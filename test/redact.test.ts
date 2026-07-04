@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -35,6 +35,18 @@ describe("loadRedactionSalt", () => {
       expect(first).toBe(second);
       expect(first.length).toBeGreaterThanOrEqual(32);
       expect(statSync(join(dir, "redaction-salt")).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses a pre-existing salt rather than overwriting it (atomic create)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wac-salt-"));
+    try {
+      writeFileSync(join(dir, "redaction-salt"), "preexisting-salt-value", {
+        mode: 0o600,
+      });
+      expect(loadRedactionSalt(dir)).toBe("preexisting-salt-value");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -33,18 +33,38 @@ export function redactJid(jid: string | null, salt: string): string | null {
 
 const SALT_FILE = "redaction-salt";
 
+function readSalt(file: string): string | null {
+  try {
+    const existing = readFileSync(file, "utf8").trim();
+    return existing.length > 0 ? existing : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Load (or create) the per-install redaction salt stored owner-only under the
  * data directory. Generated once and reused so redacted tokens stay stable
  * across exports while remaining non-reversible without the salt.
+ *
+ * Creation is atomic (exclusive `wx` write): if two exports race, the loser
+ * gets EEXIST and re-reads the winner's salt, so both use the same key rather
+ * than emitting tokens from a salt that was never persisted.
  */
 export function loadRedactionSalt(dataDir: string): string {
   const file = join(dataDir, SALT_FILE);
-  if (existsSync(file)) {
-    const existing = readFileSync(file, "utf8").trim();
-    if (existing.length > 0) return existing;
-  }
+  const existing = readSalt(file);
+  if (existing) return existing;
+
   const salt = randomBytes(32).toString("hex");
-  writeFileSync(file, salt, { mode: 0o600 });
-  return salt;
+  try {
+    writeFileSync(file, salt, { mode: 0o600, flag: "wx" });
+    return salt;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+      const raced = readSalt(file);
+      if (raced) return raced;
+    }
+    throw err;
+  }
 }

@@ -26,10 +26,17 @@ beforeEach(() => {
   configPath = join(dir, "config.yaml");
   stdout = [];
   stderr = [];
-  vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
-    stdout.push(String(chunk));
-    return true;
-  });
+  vi.spyOn(process.stdout, "write").mockImplementation(
+    (chunk: unknown, ...args: unknown[]) => {
+      stdout.push(String(chunk));
+      // Invoke the write callback (used by flushStdout) if one was passed.
+      const cb = args.find((a) => typeof a === "function") as
+        | ((err?: Error | null) => void)
+        | undefined;
+      cb?.();
+      return true;
+    },
+  );
   vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
     stderr.push(String(chunk));
     return true;
@@ -80,17 +87,17 @@ function records(): ExportRecord[] {
 }
 
 describe("runExport", () => {
-  it("defaults to allowed-only (does not leak non-allowed chats)", () => {
+  it("defaults to allowed-only (does not leak non-allowed chats)", async () => {
     seed();
-    const result = runExport({ configPath });
+    const result = await runExport({ configPath });
     expect(result.count).toBe(3);
     const recs = records();
     expect(recs.every((r) => r.chat_jid === "a@s.whatsapp.net")).toBe(true);
   });
 
-  it("--all includes non-allowed chats, in ascending cursor order", () => {
+  it("--all includes non-allowed chats, in ascending cursor order", async () => {
     seed();
-    const result = runExport({ configPath, all: true });
+    const result = await runExport({ configPath, all: true });
     expect(result.count).toBe(4);
     const recs = records();
     expect(recs.map((r) => r.message_id)).toEqual(["A1", "A2", "A3", "B1"]);
@@ -99,14 +106,14 @@ describe("runExport", () => {
     );
   });
 
-  it("never exports a chat blocked via the DB flag, even with --all", () => {
+  it("never exports a chat blocked via the DB flag, even with --all", async () => {
     seed();
     const config = loadConfig(configPath);
     const db = openDb(config.paths.sqlite);
     setChatBlocked(db, config.account.name, "b@s.whatsapp.net", true);
     db.close();
 
-    runExport({ configPath, all: true });
+    await runExport({ configPath, all: true });
     const recs = records();
     expect(recs.every((r) => r.chat_jid !== "b@s.whatsapp.net")).toBe(true);
   });
@@ -138,31 +145,35 @@ describe("runExport", () => {
     db.close();
   });
 
-  it("quotes the --config path in the offset commit hint", () => {
+  it("quotes the --config path in the offset commit hint", async () => {
     seed();
-    runExport({ configPath, sinceLast: "hermes", all: true });
+    await runExport({ configPath, sinceLast: "hermes", all: true });
     expect(stderr.join("")).toContain(`--config '${configPath}'`);
   });
 
-  it("--redact-phone-numbers redacts sender JIDs", () => {
+  it("--redact-phone-numbers redacts sender JIDs", async () => {
     seed();
-    runExport({ configPath, redactPhoneNumbers: true });
+    await runExport({ configPath, redactPhoneNumbers: true });
     const recs = records();
     const dm = recs.find((r) => r.message_id === "A1");
     expect(dm?.sender_jid).toMatch(/^redacted-/);
     expect(JSON.stringify(recs)).not.toContain("49123@s.whatsapp.net");
   });
 
-  it("rejects --redact-phone-numbers combined with --include-raw-json", () => {
+  it("rejects --redact-phone-numbers combined with --include-raw-json", async () => {
     seed();
-    expect(() =>
+    await expect(
       runExport({ configPath, redactPhoneNumbers: true, includeRawJson: true }),
-    ).toThrow(/raw/i);
+    ).rejects.toThrow(/raw/i);
   });
 
-  it("two-phase: --since-last does not advance offset without --commit", () => {
+  it("two-phase: --since-last does not advance offset without --commit", async () => {
     seed();
-    const first = runExport({ configPath, sinceLast: "hermes", all: true });
+    const first = await runExport({
+      configPath,
+      sinceLast: "hermes",
+      all: true,
+    });
     expect(first.count).toBe(4);
     expect(first.committed).toBe(false);
 
@@ -172,9 +183,9 @@ describe("runExport", () => {
     ro.close();
   });
 
-  it("--since-last --commit advances the offset and resumes after it", () => {
+  it("--since-last --commit advances the offset and resumes after it", async () => {
     seed();
-    const first = runExport({
+    const first = await runExport({
       configPath,
       sinceLast: "hermes",
       all: true,
@@ -184,7 +195,7 @@ describe("runExport", () => {
     expect(first.committed).toBe(true);
 
     stdout = [];
-    const second = runExport({
+    const second = await runExport({
       configPath,
       sinceLast: "hermes",
       all: true,

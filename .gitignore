@@ -27,6 +27,8 @@ whatsapp-conduit.db*
 config.yaml
 config.yml
 config.local.yaml
+# Per-install HMAC key for export phone-number redaction — a secret.
+redaction-salt
 # Exported message data is private (see AGENTS.md): never commit exports.
 exports/
 *.jsonl

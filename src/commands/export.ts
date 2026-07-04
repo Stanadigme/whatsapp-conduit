@@ -101,16 +101,32 @@ function shellQuote(value: string): string {
 }
 
 /**
+ * Flush stdout and resolve once the buffered data has been handed to the OS.
+ * A write error (e.g. EPIPE from a consumer that exited early) is reported via
+ * `onError` so callers can avoid advancing an offset past undelivered rows.
+ */
+function flushStdout(onError: () => void): Promise<void> {
+  return new Promise((resolve) => {
+    process.stdout.write("", (err) => {
+      if (err) onError();
+      resolve();
+    });
+  });
+}
+
+/**
  * Emit allowed/selected messages as deterministic JSONL on stdout.
  *
  * - Allowed-only by default (pass `all` to include non-allowed chats); blocked
  *   chats are never exported.
  * - For `--since-last`, resumes after the consumer's stored cursor; the offset
  *   is advanced only with `--commit` (two-phase by default), and only after
- *   stdout accepted every line, so a consumer that exits early (EPIPE) can't
- *   skip messages on the next run.
+ *   stdout has flushed without error, so a consumer that exits early (EPIPE)
+ *   can't advance the offset past rows it never received.
  */
-export function runExport(options: ExportOptions = {}): ExportResult {
+export async function runExport(
+  options: ExportOptions = {},
+): Promise<ExportResult> {
   const config = loadConfig(resolveConfigPath(options.configPath));
   const sinceTs =
     options.since !== undefined ? parseSinceSec(options.since) : null;
@@ -176,6 +192,12 @@ export function runExport(options: ExportOptions = {}): ExportResult {
       );
       lastCursor = row.export_rowid;
       lastTs = row.timestamp;
+    }
+
+    // Wait for the written rows to flush to the OS before deciding to commit,
+    // so a late EPIPE (e.g. `| head -n1`) is observed and blocks the advance.
+    if (options.commit && options.sinceLast) {
+      await flushStdout(onStdoutError);
     }
 
     let committed = false;

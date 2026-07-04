@@ -209,7 +209,7 @@ export function buildProgram(): Command {
     .option("--limit <n>", "maximum messages to export")
     .option("--commit", "advance the --since-last offset after exporting")
     .action(
-      (opts: {
+      async (opts: {
         since?: string;
         sinceLast?: string;
         all?: boolean;
@@ -225,7 +225,7 @@ export function buildProgram(): Command {
           );
         }
         const globals = program.opts<GlobalOptions>();
-        runExport({
+        await runExport({
           configPath: globals.config,
           since: opts.since,
           sinceLast: opts.sinceLast,
