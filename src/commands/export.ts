@@ -95,6 +95,11 @@ export interface ExportResult {
   consumer?: string;
 }
 
+/** Single-quote a value for a copy-pasteable POSIX shell command. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * Emit allowed/selected messages as deterministic JSONL on stdout.
  *
@@ -150,6 +155,7 @@ export function runExport(options: ExportOptions = {}): ExportResult {
       afterRowid,
       allowedOnly,
       allowedChats: config.filters.allowedChats,
+      blockedChats: config.filters.blockedChats,
       limit: options.limit,
     });
 
@@ -162,13 +168,12 @@ export function runExport(options: ExportOptions = {}): ExportResult {
     let lastCursor: number | null = null;
     let lastTs: number | null = null;
     for (const row of rows) {
-      const ok = process.stdout.write(
+      // A false return is only backpressure (the chunk is queued and will
+      // drain); it is NOT a failure. Real failures (EPIPE from an early-exiting
+      // consumer) surface via the 'error' listener and set stdoutFailed.
+      process.stdout.write(
         `${JSON.stringify(toExportRecord(row, recordCfg))}\n`,
       );
-      if (!ok || stdoutFailed) {
-        // Backpressure/EPIPE: stop and do not advance the offset.
-        stdoutFailed = stdoutFailed || !ok;
-      }
       lastCursor = row.export_rowid;
       lastTs = row.timestamp;
     }
@@ -189,11 +194,11 @@ export function runExport(options: ExportOptions = {}): ExportResult {
 
     if (options.sinceLast && !committed && lastCursor !== null) {
       const configFlag = options.configPath
-        ? `--config ${options.configPath} `
+        ? `--config ${shellQuote(options.configPath)} `
         : "";
       process.stderr.write(
         `Exported ${rows.length} message(s). To advance the offset, run:\n` +
-          `  whatsapp-conduit ${configFlag}offsets commit ${options.sinceLast} --through ${lastCursor}\n`,
+          `  whatsapp-conduit ${configFlag}offsets commit ${shellQuote(options.sinceLast)} --through ${lastCursor}\n`,
       );
     }
 

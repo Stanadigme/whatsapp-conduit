@@ -202,6 +202,7 @@ export function buildProgram(): Command {
       "resume after a consumer's stored offset",
     )
     .option("--all", "include non-allowed chats (default: allowed chats only)")
+    .option("--allowed-only", "(deprecated) allowed-only is now the default")
     .option("--format <format>", "output format (only 'jsonl')", "jsonl")
     .option("--redact-phone-numbers", "redact phone numbers in JIDs")
     .option("--include-raw-json", "include the raw Baileys payload")

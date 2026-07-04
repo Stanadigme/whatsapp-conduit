@@ -440,6 +440,8 @@ export interface ExportSelect {
   /** Restrict to allowed chats (is_allowed = 1 or in `allowedChats`). */
   allowedOnly?: boolean;
   allowedChats?: string[];
+  /** Config-level blocked chats to exclude in addition to the DB flag. */
+  blockedChats?: string[];
   limit?: number;
 }
 
@@ -466,8 +468,17 @@ export function selectExportMessages(
     where.push("m.rowid > @afterRowid");
     params.afterRowid = sel.afterRowid;
   }
-  // Chats blocked via `chats block` are never exported, regardless of options.
+  // Chats blocked via `chats block` (DB flag) are never exported.
   where.push("c.is_blocked = 0");
+  // Config-level blocked_chats are excluded too, even under --all.
+  const blocked = sel.blockedChats ?? [];
+  if (blocked.length > 0) {
+    const placeholders = blocked.map((_, i) => `@bc${i}`);
+    blocked.forEach((jid, i) => {
+      params[`bc${i}`] = jid;
+    });
+    where.push(`m.chat_jid not in (${placeholders.join(", ")})`);
+  }
   if (sel.allowedOnly) {
     const allow = sel.allowedChats ?? [];
     const placeholders = allow.map((_, i) => `@ac${i}`);

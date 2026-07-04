@@ -8,6 +8,7 @@ import { loadConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import {
   getConsumerOffset,
+  selectExportMessages,
   setChatAllowed,
   setChatBlocked,
   upsertAccount,
@@ -18,16 +19,21 @@ import {
 let dir: string;
 let configPath: string;
 let stdout: string[];
+let stderr: string[];
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "wac-export-"));
   configPath = join(dir, "config.yaml");
   stdout = [];
+  stderr = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
     stdout.push(String(chunk));
     return true;
   });
-  vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+    stderr.push(String(chunk));
+    return true;
+  });
   runInit({ configPath, dataDir: join(dir, "data") });
   stdout = []; // discard init output
 });
@@ -103,6 +109,39 @@ describe("runExport", () => {
     runExport({ configPath, all: true });
     const recs = records();
     expect(recs.every((r) => r.chat_jid !== "b@s.whatsapp.net")).toBe(true);
+  });
+
+  it("excludes config blocked_chats (selectExportMessages), even under --all", () => {
+    const db = openDb(join(dir, "data", "whatsapp-conduit.db"));
+    upsertAccount(db, { id: "personal" });
+    upsertChat(db, { accountId: "personal", jid: "a@s.whatsapp.net" });
+    upsertChat(db, { accountId: "personal", jid: "b@s.whatsapp.net" });
+    upsertMessage(db, {
+      accountId: "personal",
+      chatJid: "a@s.whatsapp.net",
+      messageId: "A",
+      timestamp: 1,
+      text: "keep",
+    });
+    upsertMessage(db, {
+      accountId: "personal",
+      chatJid: "b@s.whatsapp.net",
+      messageId: "B",
+      timestamp: 2,
+      text: "drop",
+    });
+    const rows = selectExportMessages(db, {
+      accountId: "personal",
+      blockedChats: ["b@s.whatsapp.net"],
+    });
+    expect(rows.map((r) => r.chat_jid)).toEqual(["a@s.whatsapp.net"]);
+    db.close();
+  });
+
+  it("quotes the --config path in the offset commit hint", () => {
+    seed();
+    runExport({ configPath, sinceLast: "hermes", all: true });
+    expect(stderr.join("")).toContain(`--config '${configPath}'`);
   });
 
   it("--redact-phone-numbers redacts sender JIDs", () => {
