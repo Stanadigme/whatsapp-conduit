@@ -1,4 +1,7 @@
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import qrcode from "qrcode-terminal";
+import type { WASocket } from "baileys";
 import { loadConfig, type Config } from "../config.js";
 import { ConduitConnection } from "../baileys/connect.js";
 import { openAuthState } from "../baileys/auth.js";
@@ -11,6 +14,10 @@ export interface LinkOptions {
   configPath?: string;
   /** Seconds to wait for pairing before giving up. Default 120. */
   timeoutSec?: number;
+  /** Use the QR fallback instead of pairing-code linking. */
+  qr?: boolean;
+  /** E.164 phone number without the leading plus sign. */
+  phoneNumber?: string;
 }
 
 export interface LinkResult {
@@ -27,11 +34,17 @@ export interface LinkResult {
 export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
   const config = loadConfig(resolveConfigPath(options.configPath));
   const timeoutSec = options.timeoutSec ?? 120;
+  const useQr = options.qr ?? false;
+  const phoneNumber = useQr
+    ? undefined
+    : await resolvePhoneNumber(options.phoneNumber);
   const log = appLogger(config);
   const authState = await openAuthState(config.paths.authDir);
 
   return new Promise<LinkResult>((resolve, reject) => {
     let settled = false;
+    let pairingRequested = false;
+    let pairingSocket: WASocket | undefined;
 
     const connection = new ConduitConnection({
       config,
@@ -39,7 +52,11 @@ export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
       logger: baileysLogger(config),
       mode: "link",
       handlers: {
+        onSocket(sock) {
+          if (!useQr) pairingSocket = sock;
+        },
         onQr(qr) {
+          if (!useQr) return;
           if (!config.baileys.printQrInTerminal) {
             // The QR payload is a live pairing token; honor the operator's
             // choice to keep it out of (possibly captured) stdout.
@@ -56,6 +73,16 @@ export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
         },
         onConnecting() {
           log.info("connecting to WhatsApp");
+          if (useQr || pairingRequested || !pairingSocket || !phoneNumber) {
+            return;
+          }
+          pairingRequested = true;
+          void requestPairingCode(pairingSocket, phoneNumber, log, () => {
+            settled = true;
+            if (timer) clearTimeout(timer);
+            connection.stop();
+            reject(new Error("Pairing-code request failed."));
+          });
         },
         onOpen(info) {
           if (settled) return;
@@ -105,6 +132,51 @@ export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
       reject(err instanceof Error ? err : new Error(String(err)));
     });
   });
+}
+
+async function resolvePhoneNumber(phoneNumber?: string): Promise<string> {
+  if (phoneNumber && /^\d{6,15}$/.test(phoneNumber)) return phoneNumber;
+  if (phoneNumber) {
+    throw new Error("The phone number must be E.164 digits without '+'.");
+  }
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error(
+      "Pairing-code linking requires a TTY; pass --phone or use --qr.",
+    );
+  }
+  const rl = createInterface({ input, output });
+  try {
+    const answer = await rl.question(
+      "WhatsApp phone number (E.164 digits without '+'): ",
+    );
+    if (!/^\d{6,15}$/.test(answer.trim())) {
+      throw new Error("The phone number must be E.164 digits without '+'.");
+    }
+    return answer.trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function requestPairingCode(
+  sock: WASocket,
+  phoneNumber: string,
+  log: ReturnType<typeof appLogger>,
+  onError: () => void,
+): Promise<void> {
+  try {
+    const code = await sock.requestPairingCode(phoneNumber);
+    process.stdout.write(
+      "\nEnter this pairing code in WhatsApp → Settings → Linked Devices:\n\n" +
+        `${code}\n\n`,
+    );
+  } catch (err: unknown) {
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      "failed to request pairing code",
+    );
+    onError();
+  }
 }
 
 function persistAccount(config: Config, selfJid?: string): string {

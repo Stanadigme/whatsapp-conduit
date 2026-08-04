@@ -8,9 +8,10 @@ import {
   upsertChat,
   upsertMessage,
   upsertParticipant,
+  resolveParticipantJid,
 } from "../db/queries.js";
 import { nowSec } from "../util/time.js";
-import { isGroupJid, isStatusJid } from "./jid.js";
+import { isGroupJid, isStatusJid, normalizeJid, phoneFromJid } from "./jid.js";
 import {
   normalizeMessage,
   normalizeReaction,
@@ -88,6 +89,38 @@ export function registerIngestion(sock: WASocket, deps: IngestDeps): void {
       }
     }
   });
+
+  sock.ev.on("lid-mapping.update", (mapping) => {
+    persistLidMapping(deps, mapping.pn, mapping.lid);
+  });
+
+  sock.ev.on("contacts.upsert", (contacts) => {
+    for (const contact of contacts) {
+      const jid = contact.phoneNumber ?? contact.id;
+      const lid =
+        contact.lid ?? (contact.id.endsWith("@lid") ? contact.id : null);
+      if (!jid || !lid || jid.endsWith("@lid")) continue;
+      persistLidMapping(deps, jid, lid, contact.name ?? contact.notify ?? null);
+    }
+  });
+}
+
+function persistLidMapping(
+  deps: IngestDeps,
+  phoneJid: string,
+  lid: string,
+  displayName: string | null = null,
+): void {
+  const jid = normalizeJid(phoneJid);
+  const normalizedLid = normalizeJid(lid);
+  if (!jid || !normalizedLid.endsWith("@lid")) return;
+  upsertParticipant(deps.db, {
+    accountId: deps.accountId,
+    jid,
+    lid: normalizedLid,
+    phone: phoneFromJid(jid) ?? null,
+    displayName,
+  });
 }
 
 interface ChatContext {
@@ -161,10 +194,18 @@ export function ingestMessage(deps: IngestDeps, msg: WAMessage): void {
   // blocked sender must not be able to write edited text or tombstones either.
   const senderJid =
     result.action === "store" ? result.message.senderJid : result.senderJid;
-  if (!senderPasses(deps, ctx.jid, senderJid, messageId)) return;
+  const resolvedSenderJid = senderJid
+    ? resolveParticipantJid(deps.db, deps.accountId, senderJid)
+    : null;
+  if (!senderPasses(deps, ctx.jid, resolvedSenderJid, messageId)) return;
 
   if (result.action === "store") {
-    persistStore(deps, result.message, rawJsonOf(deps.config, msg));
+    persistStore(
+      deps,
+      result.message,
+      rawJsonOf(deps.config, msg),
+      resolvedSenderJid,
+    );
     return;
   }
 
@@ -204,9 +245,12 @@ export function ingestReaction(
     isStatus: message.isStatus,
   };
   if (!chatPasses(deps, ctx, message.messageId)) return;
-  if (!senderPasses(deps, ctx.jid, message.senderJid, message.messageId))
+  const resolvedSenderJid = message.senderJid
+    ? resolveParticipantJid(deps.db, deps.accountId, message.senderJid)
+    : null;
+  if (!senderPasses(deps, ctx.jid, resolvedSenderJid, message.messageId))
     return;
-  persistStore(deps, message, null);
+  persistStore(deps, message, null, resolvedSenderJid);
 }
 
 /** Handle `messages.update` — used here only to capture delete-for-everyone. */
@@ -239,7 +283,10 @@ export function ingestUpdate(
     ctx.isGroup,
     Boolean(update.key.fromMe),
   );
-  if (!senderPasses(deps, chatJid, senderJid, targetId)) return;
+  const resolvedSenderJid = senderJid
+    ? resolveParticipantJid(deps.db, deps.accountId, senderJid)
+    : null;
+  if (!senderPasses(deps, chatJid, resolvedSenderJid, targetId)) return;
 
   persistRevoke(deps, chatJid, targetId, ctx.isGroup, ctx.isStatus);
 }
@@ -248,6 +295,7 @@ function persistStore(
   deps: IngestDeps,
   n: NormalizedMessage,
   rawJson: string | null,
+  resolvedSenderJid: string | null = n.senderJid,
 ): void {
   const storeText = deps.config.privacy.storeMessageText;
   const text = storeText ? n.text : null;
@@ -264,7 +312,9 @@ function persistStore(
     if (n.senderJid) {
       upsertParticipant(deps.db, {
         accountId: deps.accountId,
-        jid: n.senderJid,
+        jid: resolvedSenderJid ?? n.senderJid,
+        lid: n.senderJid.endsWith("@lid") ? n.senderJid : null,
+        phone: phoneFromJid(resolvedSenderJid ?? n.senderJid) ?? null,
         pushName: n.fromMe ? null : n.pushName,
       });
     }
@@ -272,13 +322,14 @@ function persistStore(
       accountId: deps.accountId,
       chatJid: n.chatJid,
       messageId: n.messageId,
-      senderJid: n.senderJid,
+      senderJid: resolvedSenderJid,
       fromMe: n.fromMe,
       timestamp: n.timestamp,
       messageType: n.messageType,
       text,
       normalizedText: text,
       hasMedia: n.hasMedia,
+      durationS: n.durationS,
       quotedMessageId: n.quotedMessageId,
       quotedSenderJid: n.quotedSenderJid,
       rawJson,

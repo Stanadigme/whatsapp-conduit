@@ -255,6 +255,7 @@ export function listChats(
 export interface ParticipantInput {
   accountId: string;
   jid: string;
+  lid?: string | null;
   phone?: string | null;
   displayName?: string | null;
   pushName?: string | null;
@@ -265,12 +266,14 @@ export function upsertParticipant(db: Database, input: ParticipantInput): void {
   const now = nowSec();
   db.prepare(
     `insert into participants (
-       account_id, jid, phone, display_name, push_name,
+       account_id, jid, lid, phone, display_name, push_name,
        first_seen_at, updated_at, raw_json
      ) values (
-       @accountId, @jid, @phone, @displayName, @pushName, @now, @now, @rawJson
+       @accountId, @jid, @lid, @phone, @displayName, @pushName,
+       @now, @now, @rawJson
      )
      on conflict (account_id, jid) do update set
+       lid = coalesce(excluded.lid, participants.lid),
        phone = coalesce(excluded.phone, participants.phone),
        display_name = coalesce(excluded.display_name, participants.display_name),
        push_name = coalesce(excluded.push_name, participants.push_name),
@@ -279,12 +282,41 @@ export function upsertParticipant(db: Database, input: ParticipantInput): void {
   ).run({
     accountId: input.accountId,
     jid: input.jid,
+    lid: input.lid ?? null,
     phone: input.phone ?? null,
     displayName: input.displayName ?? null,
     pushName: input.pushName ?? null,
     rawJson: input.rawJson ?? null,
     now,
   });
+}
+
+export interface ParticipantRow {
+  account_id: string;
+  jid: string;
+  lid: string | null;
+  phone: string | null;
+  display_name: string | null;
+  push_name: string | null;
+  first_seen_at: number;
+  updated_at: number;
+  raw_json: string | null;
+}
+
+/** Resolve an incoming LID to the canonical phone JID when known. */
+export function resolveParticipantJid(
+  db: Database,
+  accountId: string,
+  jid: string,
+): string {
+  if (!jid.endsWith("@lid")) return jid;
+  const row = db
+    .prepare<
+      [string, string],
+      Pick<ParticipantRow, "jid">
+    >("select jid from participants where account_id = ? and lid = ?")
+    .get(accountId, jid);
+  return row?.jid ?? jid;
 }
 
 export interface MessageInput {
@@ -298,12 +330,16 @@ export interface MessageInput {
   text?: string | null;
   normalizedText?: string | null;
   hasMedia?: boolean;
+  durationS?: number | null;
+  ingestionSource?: IngestionSource;
   quotedMessageId?: string | null;
   quotedSenderJid?: string | null;
   editedMessageId?: string | null;
   deletedAt?: number | null;
   rawJson?: string | null;
 }
+
+export type IngestionSource = "live" | "history" | "backup";
 
 export interface MessageRow {
   account_id: string;
@@ -317,6 +353,8 @@ export interface MessageRow {
   text: string | null;
   normalized_text: string | null;
   has_media: number;
+  duration_s: number | null;
+  ingestion_source: IngestionSource;
   quoted_message_id: string | null;
   quoted_sender_jid: string | null;
   edited_message_id: string | null;
@@ -335,10 +373,12 @@ export function upsertMessage(db: Database, input: MessageInput): void {
     `insert into messages (
        account_id, chat_jid, message_id, sender_jid, from_me, timestamp,
        received_at, message_type, text, normalized_text, has_media,
+       duration_s, ingestion_source,
        quoted_message_id, quoted_sender_jid, edited_message_id, deleted_at, raw_json
      ) values (
        @accountId, @chatJid, @messageId, @senderJid, @fromMe, @timestamp,
        @receivedAt, @messageType, @text, @normalizedText, @hasMedia,
+       @durationS, @ingestionSource,
        @quotedMessageId, @quotedSenderJid, @editedMessageId, @deletedAt, @rawJson
      )
      on conflict (account_id, chat_jid, message_id) do update set
@@ -348,6 +388,9 @@ export function upsertMessage(db: Database, input: MessageInput): void {
        normalized_text = coalesce(excluded.normalized_text, messages.normalized_text),
        -- Preserve a prior has_media=1 on partial replays (revoke/edit) that omit it.
        has_media = case when @hasMediaSet = 1 then @hasMedia else messages.has_media end,
+       duration_s = coalesce(excluded.duration_s, messages.duration_s),
+       ingestion_source = case when @ingestionSourceSet = 1
+         then excluded.ingestion_source else messages.ingestion_source end,
        quoted_message_id = coalesce(excluded.quoted_message_id, messages.quoted_message_id),
        quoted_sender_jid = coalesce(excluded.quoted_sender_jid, messages.quoted_sender_jid),
        edited_message_id = coalesce(excluded.edited_message_id, messages.edited_message_id),
@@ -366,6 +409,9 @@ export function upsertMessage(db: Database, input: MessageInput): void {
     normalizedText: input.normalizedText ?? null,
     hasMedia: input.hasMedia ? 1 : 0,
     hasMediaSet: input.hasMedia === undefined ? 0 : 1,
+    durationS: input.durationS ?? null,
+    ingestionSource: input.ingestionSource ?? "live",
+    ingestionSourceSet: input.ingestionSource === undefined ? 0 : 1,
     quotedMessageId: input.quotedMessageId ?? null,
     quotedSenderJid: input.quotedSenderJid ?? null,
     editedMessageId: input.editedMessageId ?? null,

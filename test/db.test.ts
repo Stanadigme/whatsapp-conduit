@@ -20,6 +20,8 @@ import {
   upsertAccount,
   upsertChat,
   upsertMessage,
+  upsertParticipant,
+  resolveParticipantJid,
 } from "../src/db/queries.js";
 
 function freshDb() {
@@ -33,11 +35,63 @@ describe("migrations", () => {
     const db = openDb(":memory:", { migrate: false });
     const first = runMigrations(db);
     expect(first.applied).toContain("0001_initial.sql");
+    expect(first.applied).toContain("0002_grh_ingestion_contract.sql");
     expect(appliedMigrations(db)).toContain("0001_initial.sql");
 
     const second = runMigrations(db);
     expect(second.applied).toHaveLength(0);
     expect(pendingMigrations(db)).toHaveLength(0);
+    db.close();
+  });
+
+  it("adds the GRH ingestion fields and validates their contract", () => {
+    const db = freshDb();
+    const columns = db.prepare("pragma table_info(messages)").all() as Array<{
+      name: string;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["duration_s", "ingestion_source"]),
+    );
+    const participantColumns = db
+      .prepare("pragma table_info(participants)")
+      .all() as Array<{ name: string }>;
+    expect(participantColumns.map((column) => column.name)).toContain("lid");
+
+    upsertChat(db, { accountId: "acct", jid: "c@s.whatsapp.net" });
+    upsertMessage(db, {
+      accountId: "acct",
+      chatJid: "c@s.whatsapp.net",
+      messageId: "A1",
+      durationS: 12,
+      ingestionSource: "history",
+    });
+    expect(getMessage(db, "acct", "c@s.whatsapp.net", "A1")).toMatchObject({
+      duration_s: 12,
+      ingestion_source: "history",
+    });
+    expect(() =>
+      db
+        .prepare(
+          "update messages set ingestion_source = 'invalid' where message_id = 'A1'",
+        )
+        .run(),
+    ).toThrow();
+    db.close();
+  });
+
+  it("resolves a LID to the canonical participant JID", () => {
+    const db = freshDb();
+    upsertParticipant(db, {
+      accountId: "acct",
+      jid: "491234@s.whatsapp.net",
+      lid: "12345@lid",
+    });
+    expect(resolveParticipantJid(db, "acct", "12345@lid")).toBe(
+      "491234@s.whatsapp.net",
+    );
+    expect(resolveParticipantJid(db, "acct", "491234@s.whatsapp.net")).toBe(
+      "491234@s.whatsapp.net",
+    );
     db.close();
   });
 });

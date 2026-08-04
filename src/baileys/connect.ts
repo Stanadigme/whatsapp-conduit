@@ -24,6 +24,8 @@ export interface CloseInfo {
 
 export interface ConnectionHandlers {
   onQr?(qr: string): void;
+  /** Hook called for each newly-created socket, before connection events. */
+  onSocket?(sock: WASocket): void;
   onConnecting?(): void;
   onOpen?(info: { selfJid?: string }): void;
   onClose?(info: CloseInfo): void;
@@ -144,6 +146,7 @@ export class ConduitConnection {
     sock.ev.on("creds.update", () => {
       void this.authState.saveCreds();
     });
+    this.handlers.onSocket?.(sock);
     this.handlers.registerSocket?.(sock);
     sock.ev.on("connection.update", (update) => {
       this.handleUpdate(update);

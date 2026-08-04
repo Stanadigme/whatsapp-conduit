@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { proto, type WAMessage } from "baileys";
+import { proto, type WAMessage, type WASocket } from "baileys";
 import { resolveConfig, type Config } from "../src/config.js";
 import {
   ingestMessage,
   ingestReaction,
   ingestUpdate,
+  registerIngestion,
   type IngestDeps,
 } from "../src/baileys/ingest.js";
 import { openDb } from "../src/db/index.js";
@@ -13,6 +14,7 @@ import {
   getChat,
   getMessage,
   setChatBlocked,
+  upsertParticipant,
   upsertAccount,
 } from "../src/db/queries.js";
 import { createLogger } from "../src/util/logging.js";
@@ -39,6 +41,24 @@ function msg(overrides: Partial<WAMessage>): WAMessage {
 
 const baseConfig = resolveConfig({}, { dataDir: "/data" });
 
+class FakeEventSocket {
+  private readonly listeners = new Map<
+    string,
+    Array<(value: unknown) => void>
+  >();
+  readonly ev = {
+    on: (event: string, listener: (value: unknown) => void): void => {
+      const current = this.listeners.get(event) ?? [];
+      current.push(listener);
+      this.listeners.set(event, current);
+    },
+  };
+
+  emit(event: string, value: unknown): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(value);
+  }
+}
+
 describe("ingestMessage persistence", () => {
   it("stores a text message with chat, sender, and metadata", () => {
     const d = deps(baseConfig);
@@ -60,6 +80,58 @@ describe("ingestMessage persistence", () => {
     ingestMessage(d, m);
     ingestMessage(d, m);
     expect(countMessages(d.db)).toBe(1);
+    d.db.close();
+  });
+
+  it("resolves an incoming LID and stores audio duration", () => {
+    const d = deps(baseConfig);
+    upsertParticipant(d.db, {
+      accountId: "personal",
+      jid: "49111@s.whatsapp.net",
+      lid: "9001@lid",
+    });
+    ingestMessage(
+      d,
+      msg({
+        key: {
+          remoteJid: "c@s.whatsapp.net",
+          fromMe: false,
+          id: "AUDIO1",
+          participant: "9001@lid",
+        },
+        message: {
+          audioMessage: {
+            seconds: 42,
+            mimetype: "audio/ogg; codecs=opus",
+          },
+        },
+      }),
+    );
+    const row = getMessage(d.db, "personal", "c@s.whatsapp.net", "AUDIO1");
+    expect(row?.sender_jid).toBe("49111@s.whatsapp.net");
+    expect(row?.duration_s).toBe(42);
+    d.db.close();
+  });
+
+  it("persists Baileys LID mapping events", () => {
+    const d = deps(baseConfig);
+    const socket = new FakeEventSocket();
+    registerIngestion(socket as unknown as WASocket, d);
+
+    socket.emit("lid-mapping.update", {
+      pn: "49111@s.whatsapp.net",
+      lid: "9001@lid",
+    });
+
+    const participant = d.db
+      .prepare(
+        "select jid, lid from participants where account_id = 'personal'",
+      )
+      .get() as { jid: string; lid: string } | undefined;
+    expect(participant).toEqual({
+      jid: "49111@s.whatsapp.net",
+      lid: "9001@lid",
+    });
     d.db.close();
   });
 

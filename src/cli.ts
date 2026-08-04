@@ -79,19 +79,30 @@ export function buildProgram(): Command {
 
   program
     .command("link")
-    .description("link a WhatsApp account as a secondary device via QR code")
+    .description(
+      "link a WhatsApp account as a secondary device via pairing code",
+    )
+    .option("--qr", "use the explicit QR fallback instead of a pairing code")
+    .option(
+      "--phone <number>",
+      "E.164 phone number without '+' (otherwise prompted)",
+    )
     .option(
       "--timeout <seconds>",
       "seconds to wait for pairing before giving up",
       "120",
     )
-    .action(async (opts: { timeout?: string }) => {
-      const globals = program.opts<GlobalOptions>();
-      await runLink({
-        configPath: globals.config,
-        timeoutSec: opts.timeout ? Number(opts.timeout) : undefined,
-      });
-    });
+    .action(
+      async (opts: { timeout?: string; qr?: boolean; phone?: string }) => {
+        const globals = program.opts<GlobalOptions>();
+        await runLink({
+          configPath: globals.config,
+          timeoutSec: opts.timeout ? Number(opts.timeout) : undefined,
+          qr: opts.qr,
+          phoneNumber: opts.phone,
+        });
+      },
+    );
 
   program
     .command("run")

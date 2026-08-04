@@ -11,9 +11,9 @@ pnpm build
 # 1. Create config, data dirs (0700), and the migrated SQLite DB.
 whatsapp-conduit init --data-dir /srv/agents-state/nicolai/whatsapp-conduit
 
-# 2. Link the account as a secondary device (scan the QR in WhatsApp →
-#    Settings → Linked Devices → Link a device).
-whatsapp-conduit link
+# 2. Link the account as a secondary device. Pairing code is the default;
+#    use --qr only as an explicit fallback.
+whatsapp-conduit link --phone 49123456789
 
 # 3. Run the foreground observe-only daemon.
 whatsapp-conduit run
@@ -95,3 +95,23 @@ sqlite3 /path/to/whatsapp-conduit.db ".backup '/backup/whatsapp-conduit-$(date +
 ```
 
 Treat backups as sensitive (see [security.md](./security.md)).
+
+## Docker
+
+The parent repository is the deployment entrypoint. Initialize the submodule,
+then use the same image for development and production:
+
+```bash
+git submodule update --init --recursive
+cp .env.docker.example .env
+docker compose build
+docker compose run --rm ingestion init
+docker compose run --rm -it ingestion link --phone 49123456789
+docker compose up -d ingestion
+docker compose logs -f ingestion
+```
+
+The host directories configured by `WHATSAPP_CONDUIT_CONFIG_DIR` and
+`WHATSAPP_CONDUIT_DATA_DIR` contain private configuration, SQLite, Baileys
+authentication and media state. Back up the SQLite database with its online
+backup API; never copy a live WAL by hand.

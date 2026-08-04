@@ -59,6 +59,20 @@ describe("normalizeMessage: storable content", () => {
     expect(r.message.hasMedia).toBe(true);
   });
 
+  it("extracts audio duration before media handling", () => {
+    const r = normalizeMessage(
+      msg({
+        message: {
+          audioMessage: { seconds: 37, mimetype: "audio/ogg; codecs=opus" },
+        },
+      }),
+    );
+    expect(r.action).toBe("store");
+    if (r.action !== "store") return;
+    expect(r.message.messageType).toBe("audio");
+    expect(r.message.durationS).toBe(37);
+  });
+
   it("document with no caption", () => {
     const r = normalizeMessage(
       msg({ message: { documentMessage: { fileName: "x.pdf" } } }),

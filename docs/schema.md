@@ -32,7 +32,8 @@ PK `(account_id, jid)`.
 
 ### `participants`
 PK `(account_id, jid)`. Per-sender metadata (`phone`, `display_name`,
-`push_name`, `first_seen_at`).
+`push_name`, `first_seen_at`). `lid` is indexed and links the opaque WhatsApp
+identity (`@lid`) to the canonical phone JID in both directions.
 
 ### `messages`
 PK `(account_id, chat_jid, message_id)`. Normalized common columns plus
@@ -44,6 +45,8 @@ PK `(account_id, chat_jid, message_id)`. Normalized common columns plus
 | `message_type` | `text`/`image`/`video`/`audio`/`document`/`sticker`/`contact`/`location`/`poll`/`reaction`/`unknown` |
 | `text`, `normalized_text` | omitted when `store_message_text: false` |
 | `has_media` | preserved across partial replays |
+| `duration_s` | audio duration, persisted before any future media download |
+| `ingestion_source` | `live`, `history`, or `backup`; defaults to `live` |
 | `quoted_message_id`, `quoted_sender_jid` | reply context |
 | `edited_message_id` | set when an edit is applied |
 | `deleted_at` | tombstone for delete-for-everyone |

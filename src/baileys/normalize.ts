@@ -33,6 +33,7 @@ export interface NormalizedMessage {
   messageType: MessageType;
   text: string | null;
   hasMedia: boolean;
+  durationS: number | null;
   quotedMessageId: string | null;
   quotedSenderJid: string | null;
   isGroup: boolean;
@@ -155,6 +156,16 @@ function extractText(contentType: string, node: unknown): string | null {
   }
 }
 
+/** Extract audio duration before any media download is attempted. */
+function extractDurationSeconds(
+  contentType: string,
+  node: unknown,
+): number | null {
+  if (contentType !== "audioMessage" || !isRecord(node)) return null;
+  const seconds = toEpochSeconds(node.seconds as LongLike);
+  return seconds == null ? null : Math.max(0, Math.floor(seconds));
+}
+
 export function resolveSender(
   key: proto.IMessageKey,
   isGroup: boolean,
@@ -196,6 +207,7 @@ export function normalizeMessage(msg: WAMessage): NormalizeResult {
       messageType: "unknown",
       text: null,
       hasMedia: false,
+      durationS: null,
       quoted: { quotedMessageId: null, quotedSenderJid: null },
     });
   }
@@ -241,6 +253,7 @@ export function normalizeMessage(msg: WAMessage): NormalizeResult {
     messageType,
     text: extractText(contentType, node),
     hasMedia: MEDIA_TYPES.has(messageType),
+    durationS: extractDurationSeconds(contentType, node),
     quoted: extractContext(node),
   });
 }
@@ -286,6 +299,7 @@ function buildReaction(parts: ReactionParts): NormalizeResult {
       messageType: "reaction",
       text: typeof parts.text === "string" ? parts.text : "",
       hasMedia: false,
+      durationS: null,
       quotedMessageId: parts.targetId,
       quotedSenderJid: parts.targetParticipant
         ? normalizeJid(parts.targetParticipant)
@@ -379,6 +393,7 @@ interface StoreParts {
   messageType: MessageType;
   text: string | null;
   hasMedia: boolean;
+  durationS: number | null;
   quoted: { quotedMessageId: string | null; quotedSenderJid: string | null };
 }
 
@@ -402,6 +417,7 @@ function buildStore(
       messageType: parts.messageType,
       text: parts.text,
       hasMedia: parts.hasMedia,
+      durationS: parts.durationS,
       quotedMessageId: parts.quoted.quotedMessageId,
       quotedSenderJid: parts.quoted.quotedSenderJid,
       isGroup,
