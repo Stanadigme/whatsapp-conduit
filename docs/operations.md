@@ -117,7 +117,8 @@ configuration and `data/` contains SQLite, Baileys authentication and media
 state. Back up the SQLite database with its online backup API; never copy a
 live WAL by hand.
 
-Pairing waits for the Baileys WebSocket to become ready before requesting the
-code. If a link attempt is interrupted before authentication completes, its
-provisional pairing credentials are cleared automatically; retry `link` without
-deleting an existing authenticated auth directory.
+Pairing waits for the Baileys handshake-ready event before requesting the code,
+then confirms that the underlying WebSocket is open. If a link attempt is
+interrupted before authentication completes, its provisional pairing
+credentials are cleared automatically; retry `link` without deleting an
+existing authenticated auth directory.

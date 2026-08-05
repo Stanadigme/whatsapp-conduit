@@ -1,13 +1,15 @@
 # Fix pairing-code WebSocket readiness
 
 The pairing-code flow currently requests a code from the `connecting` event.
-Baileys emits that event before its WebSocket is open, while
-`requestPairingCode()` immediately sends an IQ node. Baileys therefore raises
-`Connection Closed` before the pairing request reaches WhatsApp.
+Baileys emits that event before its WebSocket and Noise handshake are ready,
+while `requestPairingCode()` immediately sends an IQ node. Baileys therefore
+raises `Connection Closed` or closes the session with status 428 before the
+pairing request can be completed.
 
 ## Scope
 
-- Wait for `sock.waitForSocketOpen()` before requesting a pairing code.
+- Use Baileys' post-handshake `qr` event as the pairing-code trigger and also
+  wait for `sock.waitForSocketOpen()` before requesting a pairing code.
 - Preserve only safe connection status information in logs and errors.
 - Clear provisional pairing credentials after an unsuccessful, unauthenticated
   attempt so `status` and `run` do not treat it as a linked session.
