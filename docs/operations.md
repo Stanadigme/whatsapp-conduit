@@ -111,7 +111,13 @@ docker compose up -d ingestion
 docker compose logs -f ingestion
 ```
 
-The host directories configured by `WHATSAPP_CONDUIT_CONFIG_DIR` and
-`WHATSAPP_CONDUIT_DATA_DIR` contain private configuration, SQLite, Baileys
-authentication and media state. Back up the SQLite database with its online
-backup API; never copy a live WAL by hand.
+The parent repository mounts private host directories below
+`${WHATSAPP_CONDUIT_VOLUMES_DIR:-./volumes}/ingestion/`: `config/` contains
+configuration and `data/` contains SQLite, Baileys authentication and media
+state. Back up the SQLite database with its online backup API; never copy a
+live WAL by hand.
+
+Pairing waits for the Baileys WebSocket to become ready before requesting the
+code. If a link attempt is interrupted before authentication completes, its
+provisional pairing credentials are cleared automatically; retry `link` without
+deleting an existing authenticated auth directory.

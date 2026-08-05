@@ -56,6 +56,21 @@ export async function openAuthState(authDir: string): Promise<AuthState> {
   return authState;
 }
 
+/**
+ * Remove only credentials created by an incomplete pairing attempt.
+ *
+ * Baileys writes `me` and `pairingCode` before the pairing IQ has been sent.
+ * Keep a completed account untouched; it is identified by the persisted
+ * signed device account data.
+ */
+export async function clearPendingPairing(authState: AuthState): Promise<void> {
+  const creds = authState.state.creds;
+  if (creds.account) return;
+  creds.me = undefined;
+  creds.pairingCode = undefined;
+  await authState.saveCreds();
+}
+
 interface PersistedCreds {
   me?: { id?: unknown } | null;
 }
