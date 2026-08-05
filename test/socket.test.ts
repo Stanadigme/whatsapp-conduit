@@ -38,13 +38,13 @@ describe("buildSocketConfig observe-only invariants", () => {
     expect(cfg.shouldSyncHistoryMessage).toBeUndefined();
   });
 
-  it("omits version when not provided (uses Baileys' bundled version)", () => {
+  it("uses the pinned protocol version by default", () => {
     const cfg = buildSocketConfig({
       config: resolveConfig({}, { dataDir: "/data" }),
       authState: fakeAuthState(),
       logger: createLogger({ level: "error" }),
     });
-    expect(cfg.version).toBeUndefined();
+    expect(cfg.version).toEqual([2, 3000, 1033893291]);
   });
 
   it("getMessage is a no-op (no resend support)", async () => {

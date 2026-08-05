@@ -5,6 +5,9 @@ import { defaultDataDir } from "./paths.js";
 import { LOG_LEVELS, type LogLevel } from "./util/logging.js";
 
 export type ExportFormat = "jsonl";
+export type BaileysVersion = [number, number, number];
+
+export const DEFAULT_BAILEYS_VERSION: BaileysVersion = [2, 3000, 1033893291];
 
 export interface AccountConfig {
   name: string;
@@ -19,6 +22,7 @@ export interface PathsConfig {
 }
 
 export interface BaileysConfig {
+  version: BaileysVersion;
   printQrInTerminal: boolean;
   syncFullHistory: boolean;
   markOnlineOnConnect: boolean;
@@ -51,6 +55,13 @@ export interface ExportsConfig {
 
 export interface LoggingConfig {
   level: LogLevel;
+  /**
+   * Baileys logger level. Kept independently configurable because debug-level
+   * Baileys output can contain protocol and authentication diagnostics.
+   */
+  baileysLevel: LogLevel;
+  /** Allow the Baileys logger to emit message and protocol payload fields. */
+  baileysLogMessageText: boolean;
   logMessageText: boolean;
 }
 
@@ -87,6 +98,22 @@ function asLogLevel(value: unknown, fallback: LogLevel): LogLevel {
   return LOG_LEVELS.includes(value as LogLevel)
     ? (value as LogLevel)
     : fallback;
+}
+
+function asBaileysVersion(
+  value: unknown,
+  fallback: BaileysVersion,
+): BaileysVersion {
+  if (
+    Array.isArray(value) &&
+    value.length === 3 &&
+    value.every(
+      (part) => typeof part === "number" && Number.isInteger(part) && part >= 0,
+    )
+  ) {
+    return [value[0] as number, value[1] as number, value[2] as number];
+  }
+  return [...fallback];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -175,6 +202,7 @@ export function resolveConfig(
     account,
     paths,
     baileys: {
+      version: asBaileysVersion(baileysRaw.version, DEFAULT_BAILEYS_VERSION),
       printQrInTerminal: asBool(baileysRaw.print_qr_in_terminal, true),
       syncFullHistory: asBool(baileysRaw.sync_full_history, false),
       markOnlineOnConnect: asBool(baileysRaw.mark_online_on_connect, false),
@@ -194,6 +222,8 @@ export function resolveConfig(
     },
     logging: {
       level: asLogLevel(loggingRaw.level, "info"),
+      baileysLevel: asLogLevel(loggingRaw.baileys_level, "warn"),
+      baileysLogMessageText: asBool(loggingRaw.baileys_log_message_text, false),
       logMessageText: asBool(loggingRaw.log_message_text, false),
     },
   };
@@ -233,6 +263,7 @@ paths:
   media_dir: ${join(dataDir, "media")}
 
 baileys:
+  version: [${DEFAULT_BAILEYS_VERSION.join(", ")}]
   print_qr_in_terminal: true
   sync_full_history: false
   mark_online_on_connect: false
@@ -262,6 +293,10 @@ exports:
 
 logging:
   level: info
+  # Keep Baileys at warn by default; raise this temporarily for protocol
+  # diagnostics (debug output may contain authentication details).
+  baileys_level: warn
+  baileys_log_message_text: false
   log_message_text: false
 `;
 }

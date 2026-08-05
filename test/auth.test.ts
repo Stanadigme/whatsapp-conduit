@@ -1,8 +1,13 @@
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { authStateExists, openAuthState } from "../src/baileys/auth.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  authStateExists,
+  clearPendingPairing,
+  openAuthState,
+} from "../src/baileys/auth.js";
+import type { AuthState } from "../src/baileys/auth.js";
 
 let dir: string;
 
@@ -47,5 +52,63 @@ describe("openAuthState permissions", () => {
       }),
     );
     expect(authStateExists(authDir)).toBe(true);
+  });
+
+  it("clears provisional pairing credentials without touching an account", async () => {
+    const saveCreds = vi.fn(async () => undefined);
+    const creds = {
+      me: { id: "49123@s.whatsapp.net" },
+      pairingCode: "ABCD1234",
+      registered: false,
+    } as { me?: { id: string }; pairingCode?: string; account?: object };
+    const authState = {
+      state: { creds },
+      saveCreds,
+    } as unknown as AuthState;
+
+    await clearPendingPairing(authState);
+
+    expect(creds.me).toBeUndefined();
+    expect(creds.pairingCode).toBeUndefined();
+    expect(saveCreds).toHaveBeenCalledOnce();
+  });
+
+  it("makes an interrupted pairing appear unlinked to status", async () => {
+    const authDir = join(dir, "auth");
+    await openAuthState(authDir);
+    writeFileSync(
+      join(authDir, "creds.json"),
+      JSON.stringify({
+        registered: false,
+        me: { id: "49123@s.whatsapp.net" },
+        pairingCode: "ABCD1234",
+      }),
+    );
+
+    const authState = await openAuthState(authDir);
+    expect(authStateExists(authDir)).toBe(true);
+
+    await clearPendingPairing(authState);
+
+    expect(authStateExists(authDir)).toBe(false);
+  });
+
+  it("preserves completed account credentials", async () => {
+    const saveCreds = vi.fn(async () => undefined);
+    const creds = {
+      account: {},
+      me: { id: "49123@s.whatsapp.net" },
+      pairingCode: "ABCD1234",
+    } as { me?: { id: string }; pairingCode?: string; account?: object };
+    const authState = {
+      state: { creds },
+      saveCreds,
+    } as unknown as AuthState;
+
+    await clearPendingPairing(authState);
+
+    expect(creds.me).toEqual({ id: "49123@s.whatsapp.net" });
+    expect(creds.pairingCode).toBe("ABCD1234");
+    expect(saveCreds).not.toHaveBeenCalled();
   });
 });

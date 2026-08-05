@@ -3,8 +3,12 @@ import { stdin as input, stdout as output } from "node:process";
 import qrcode from "qrcode-terminal";
 import type { WASocket } from "baileys";
 import { loadConfig, type Config } from "../config.js";
-import { ConduitConnection } from "../baileys/connect.js";
-import { openAuthState } from "../baileys/auth.js";
+import { clearPendingPairing, openAuthState } from "../baileys/auth.js";
+import {
+  ConduitConnection,
+  statusCodeOf,
+  type ConnectionDeps,
+} from "../baileys/connect.js";
 import { phoneFromJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
 import { upsertAccount } from "../db/queries.js";
@@ -25,13 +29,25 @@ export interface LinkResult {
   accountId: string;
 }
 
+export interface LinkConnection {
+  start(): Promise<void>;
+  stop(): void;
+}
+
+export interface LinkDependencies {
+  connectionFactory?: (deps: ConnectionDeps) => LinkConnection;
+}
+
 /**
  * Link the WhatsApp account as a secondary device via QR code, persisting auth
  * state. Resolves once the connection reaches `open`; rejects on logout, an
  * unrecoverable close, or timeout. Strictly observe-only — it only reads the
  * connection lifecycle and stores the account identity.
  */
-export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
+export async function runLink(
+  options: LinkOptions = {},
+  dependencies: LinkDependencies = {},
+): Promise<LinkResult> {
   const config = loadConfig(resolveConfigPath(options.configPath));
   const timeoutSec = options.timeoutSec ?? 120;
   const useQr = options.qr ?? false;
@@ -46,7 +62,9 @@ export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
     let pairingRequested = false;
     let pairingSocket: WASocket | undefined;
 
-    const connection = new ConduitConnection({
+    const connection = (
+      dependencies.connectionFactory ?? ((deps) => new ConduitConnection(deps))
+    )({
       config,
       authState,
       logger: baileysLogger(config),
@@ -56,7 +74,25 @@ export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
           if (!useQr) pairingSocket = sock;
         },
         onQr(qr) {
-          if (!useQr) return;
+          if (!useQr) {
+            if (pairingRequested || !pairingSocket || !phoneNumber) return;
+            pairingRequested = true;
+            void requestPairingCode(pairingSocket, phoneNumber)
+              .then((code) => {
+                process.stdout.write(
+                  "\nEnter this pairing code in WhatsApp → Settings → Linked Devices:\n\n" +
+                    `${code}\n\n`,
+                );
+              })
+              .catch((err: unknown) => {
+                log.error(
+                  { statusCode: statusCodeOf(err) },
+                  "failed to request pairing code",
+                );
+                fail(pairingFailure(err));
+              });
+            return;
+          }
           if (!config.baileys.printQrInTerminal) {
             // The QR payload is a live pairing token; honor the operator's
             // choice to keep it out of (possibly captured) stdout.
@@ -73,16 +109,6 @@ export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
         },
         onConnecting() {
           log.info("connecting to WhatsApp");
-          if (useQr || pairingRequested || !pairingSocket || !phoneNumber) {
-            return;
-          }
-          pairingRequested = true;
-          void requestPairingCode(pairingSocket, phoneNumber, log, () => {
-            settled = true;
-            if (timer) clearTimeout(timer);
-            connection.stop();
-            reject(new Error("Pairing-code request failed."));
-          });
         },
         onOpen(info) {
           if (settled) return;
@@ -103,10 +129,7 @@ export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
             log.info("restarting connection to complete pairing");
             return;
           }
-          settled = true;
-          if (timer) clearTimeout(timer);
-          connection.stop();
-          reject(
+          fail(
             new Error(
               info.loggedOut
                 ? "Linking failed: logged out. Remove the auth directory and try again."
@@ -118,19 +141,24 @@ export async function runLink(options: LinkOptions = {}): Promise<LinkResult> {
     });
 
     const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      connection.stop();
-      reject(new Error(`Linking timed out after ${timeoutSec}s.`));
+      fail(new Error(`Linking timed out after ${timeoutSec}s.`));
     }, timeoutSec * 1000);
 
     connection.start().catch((err: unknown) => {
+      fail(err instanceof Error ? err : new Error(String(err)));
+    });
+
+    function fail(error: Error): void {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       connection.stop();
-      reject(err instanceof Error ? err : new Error(String(err)));
-    });
+      void clearPendingPairing(authState)
+        .catch(() => {
+          log.warn("failed to clear incomplete pairing state");
+        })
+        .finally(() => reject(error));
+    }
   });
 }
 
@@ -158,25 +186,21 @@ async function resolvePhoneNumber(phoneNumber?: string): Promise<string> {
   }
 }
 
-async function requestPairingCode(
-  sock: WASocket,
+export async function requestPairingCode(
+  sock: Pick<WASocket, "waitForSocketOpen" | "requestPairingCode">,
   phoneNumber: string,
-  log: ReturnType<typeof appLogger>,
-  onError: () => void,
-): Promise<void> {
-  try {
-    const code = await sock.requestPairingCode(phoneNumber);
-    process.stdout.write(
-      "\nEnter this pairing code in WhatsApp → Settings → Linked Devices:\n\n" +
-        `${code}\n\n`,
-    );
-  } catch (err: unknown) {
-    log.error(
-      { err: err instanceof Error ? err.message : String(err) },
-      "failed to request pairing code",
-    );
-    onError();
-  }
+): Promise<string> {
+  await sock.waitForSocketOpen();
+  return sock.requestPairingCode(phoneNumber);
+}
+
+function pairingFailure(error: unknown): Error {
+  const statusCode = statusCodeOf(error);
+  return new Error(
+    statusCode
+      ? `Pairing-code request failed (status ${statusCode}).`
+      : "Pairing-code request failed.",
+  );
 }
 
 function persistAccount(config: Config, selfJid?: string): string {

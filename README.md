@@ -432,6 +432,7 @@ paths:
   media_dir: /srv/agents-state/nicolai/whatsapp-conduit/media
 
 baileys:
+  version: [2, 3000, 1033893291]
   print_qr_in_terminal: true
   sync_full_history: false
   mark_online_on_connect: false
@@ -461,6 +462,10 @@ exports:
 
 logging:
   level: info
+  # Keep Baileys at warn by default; use debug/trace temporarily for protocol
+  # diagnostics (those records may contain authentication details).
+  baileys_level: warn
+  baileys_log_message_text: false
   log_message_text: false
 ```
 

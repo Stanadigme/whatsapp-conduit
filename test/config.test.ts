@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveConfig } from "../src/config.js";
+import { DEFAULT_BAILEYS_VERSION, resolveConfig } from "../src/config.js";
 
 describe("resolveConfig", () => {
   it("applies observe-only-safe defaults for an empty config", () => {
@@ -14,8 +14,11 @@ describe("resolveConfig", () => {
 
     expect(cfg.baileys.markOnlineOnConnect).toBe(false);
     expect(cfg.baileys.syncFullHistory).toBe(false);
+    expect(cfg.baileys.version).toEqual(DEFAULT_BAILEYS_VERSION);
 
     expect(cfg.logging.level).toBe("info");
+    expect(cfg.logging.baileysLevel).toBe("warn");
+    expect(cfg.logging.baileysLogMessageText).toBe(false);
     expect(cfg.logging.logMessageText).toBe(false);
 
     expect(cfg.exports.defaultFormat).toBe("jsonl");
@@ -58,12 +61,35 @@ describe("resolveConfig", () => {
         allowed_chats: ["a@s.whatsapp.net"],
         blocked_chats: ["b@g.us"],
       },
-      logging: { level: "debug", log_message_text: true },
+      logging: {
+        level: "debug",
+        baileys_level: "trace",
+        baileys_log_message_text: true,
+        log_message_text: true,
+      },
     });
     expect(cfg.filters.allowedChats).toEqual(["a@s.whatsapp.net"]);
     expect(cfg.filters.blockedChats).toEqual(["b@g.us"]);
     expect(cfg.logging.level).toBe("debug");
+    expect(cfg.logging.baileysLevel).toBe("trace");
+    expect(cfg.logging.baileysLogMessageText).toBe(true);
     expect(cfg.logging.logMessageText).toBe(true);
+  });
+
+  it("accepts an explicit Baileys protocol version", () => {
+    const cfg = resolveConfig({
+      baileys: { version: [2, 3000, 123] },
+    });
+
+    expect(cfg.baileys.version).toEqual([2, 3000, 123]);
+  });
+
+  it("falls back to the pinned version for malformed overrides", () => {
+    const cfg = resolveConfig({
+      baileys: { version: [2, 3000] },
+    });
+
+    expect(cfg.baileys.version).toEqual(DEFAULT_BAILEYS_VERSION);
   });
 
   it("rejects an invalid log level by falling back to info", () => {

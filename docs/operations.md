@@ -111,7 +111,24 @@ docker compose up -d ingestion
 docker compose logs -f ingestion
 ```
 
-The host directories configured by `WHATSAPP_CONDUIT_CONFIG_DIR` and
-`WHATSAPP_CONDUIT_DATA_DIR` contain private configuration, SQLite, Baileys
-authentication and media state. Back up the SQLite database with its online
-backup API; never copy a live WAL by hand.
+The parent repository mounts private host directories below
+`${WHATSAPP_CONDUIT_VOLUMES_DIR:-./volumes}/ingestion/`: `config/` contains
+configuration and `data/` contains SQLite, Baileys authentication and media
+state. Back up the SQLite database with its online backup API; never copy a
+live WAL by hand.
+
+Pairing waits for the Baileys handshake-ready event before requesting the code,
+then confirms that the underlying WebSocket is open. If a link attempt is
+interrupted before authentication completes, its provisional pairing
+credentials are cleared automatically; retry `link` without deleting an
+existing authenticated auth directory.
+
+Baileys logs are kept at `warn` by default. For a complete diagnosis of a
+protocol failure, set `logging.baileys_level: trace` and
+`logging.baileys_log_message_text: true` in the mounted config, repeat the
+command, and collect the output locally. This deliberately disables payload
+redaction for the Baileys logger.
+
+The Baileys protocol version is pinned in the generated configuration. Update
+`baileys.version` deliberately when WhatsApp protocol compatibility requires
+it, then rebuild the same Docker image before retrying a link.
