@@ -123,11 +123,11 @@ interrupted before authentication completes, its provisional pairing
 credentials are cleared automatically; retry `link` without deleting an
 existing authenticated auth directory.
 
-Baileys logs are kept at `warn` by default. For a diagnosis of a protocol
-failure, set `logging.baileys_level: debug` (or `trace`) in the mounted config,
-repeat the command, and collect the output locally. These logs can contain
-authentication or protocol details and must not be published or pasted into an
-issue without review.
+Baileys logs are kept at `warn` by default. For a complete diagnosis of a
+protocol failure, set `logging.baileys_level: trace` and
+`logging.baileys_log_message_text: true` in the mounted config, repeat the
+command, and collect the output locally. This deliberately disables payload
+redaction for the Baileys logger.
 
 The Baileys protocol version is pinned in the generated configuration. Update
 `baileys.version` deliberately when WhatsApp protocol compatibility requires

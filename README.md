@@ -465,6 +465,7 @@ logging:
   # Keep Baileys at warn by default; use debug/trace temporarily for protocol
   # diagnostics (those records may contain authentication details).
   baileys_level: warn
+  baileys_log_message_text: false
   log_message_text: false
 ```
 

@@ -60,6 +60,8 @@ export interface LoggingConfig {
    * Baileys output can contain protocol and authentication diagnostics.
    */
   baileysLevel: LogLevel;
+  /** Allow the Baileys logger to emit message and protocol payload fields. */
+  baileysLogMessageText: boolean;
   logMessageText: boolean;
 }
 
@@ -221,6 +223,7 @@ export function resolveConfig(
     logging: {
       level: asLogLevel(loggingRaw.level, "info"),
       baileysLevel: asLogLevel(loggingRaw.baileys_level, "warn"),
+      baileysLogMessageText: asBool(loggingRaw.baileys_log_message_text, false),
       logMessageText: asBool(loggingRaw.log_message_text, false),
     },
   };
@@ -293,6 +296,7 @@ logging:
   # Keep Baileys at warn by default; raise this temporarily for protocol
   # diagnostics (debug output may contain authentication details).
   baileys_level: warn
+  baileys_log_message_text: false
   log_message_text: false
 `;
 }

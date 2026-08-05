@@ -18,6 +18,7 @@ describe("resolveConfig", () => {
 
     expect(cfg.logging.level).toBe("info");
     expect(cfg.logging.baileysLevel).toBe("warn");
+    expect(cfg.logging.baileysLogMessageText).toBe(false);
     expect(cfg.logging.logMessageText).toBe(false);
 
     expect(cfg.exports.defaultFormat).toBe("jsonl");
@@ -63,6 +64,7 @@ describe("resolveConfig", () => {
       logging: {
         level: "debug",
         baileys_level: "trace",
+        baileys_log_message_text: true,
         log_message_text: true,
       },
     });
@@ -70,6 +72,7 @@ describe("resolveConfig", () => {
     expect(cfg.filters.blockedChats).toEqual(["b@g.us"]);
     expect(cfg.logging.level).toBe("debug");
     expect(cfg.logging.baileysLevel).toBe("trace");
+    expect(cfg.logging.baileysLogMessageText).toBe(true);
     expect(cfg.logging.logMessageText).toBe(true);
   });
 
