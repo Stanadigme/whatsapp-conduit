@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveConfig } from "../src/config.js";
+import { DEFAULT_BAILEYS_VERSION, resolveConfig } from "../src/config.js";
 
 describe("resolveConfig", () => {
   it("applies observe-only-safe defaults for an empty config", () => {
@@ -14,6 +14,7 @@ describe("resolveConfig", () => {
 
     expect(cfg.baileys.markOnlineOnConnect).toBe(false);
     expect(cfg.baileys.syncFullHistory).toBe(false);
+    expect(cfg.baileys.version).toEqual(DEFAULT_BAILEYS_VERSION);
 
     expect(cfg.logging.level).toBe("info");
     expect(cfg.logging.logMessageText).toBe(false);
@@ -64,6 +65,22 @@ describe("resolveConfig", () => {
     expect(cfg.filters.blockedChats).toEqual(["b@g.us"]);
     expect(cfg.logging.level).toBe("debug");
     expect(cfg.logging.logMessageText).toBe(true);
+  });
+
+  it("accepts an explicit Baileys protocol version", () => {
+    const cfg = resolveConfig({
+      baileys: { version: [2, 3000, 123] },
+    });
+
+    expect(cfg.baileys.version).toEqual([2, 3000, 123]);
+  });
+
+  it("falls back to the pinned version for malformed overrides", () => {
+    const cfg = resolveConfig({
+      baileys: { version: [2, 3000] },
+    });
+
+    expect(cfg.baileys.version).toEqual(DEFAULT_BAILEYS_VERSION);
   });
 
   it("rejects an invalid log level by falling back to info", () => {

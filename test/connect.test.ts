@@ -8,7 +8,7 @@ import {
   statusCodeOf,
   type CloseInfo,
 } from "../src/baileys/connect.js";
-import type { WASocket } from "../src/baileys/socket.js";
+import type { SocketConfig, WASocket } from "../src/baileys/socket.js";
 import { createLogger } from "../src/util/logging.js";
 
 /** Minimal stand-in for a Baileys socket that we can drive from tests. */
@@ -93,6 +93,7 @@ describe("shouldReconnect", () => {
 describe("ConduitConnection", () => {
   function makeConn(mode: "run" | "link") {
     const sockets: FakeSocket[] = [];
+    const socketConfigs: SocketConfig[] = [];
     const closes: CloseInfo[] = [];
     let openSelfJid: string | undefined;
     const conn = new ConduitConnection({
@@ -101,8 +102,8 @@ describe("ConduitConnection", () => {
       logger,
       mode,
       reconnectDelayMs: 0,
-      fetchVersion: async () => [2, 3000, 0],
-      socketFactory: () => {
+      socketFactory: (socketConfig) => {
+        socketConfigs.push(socketConfig);
         const s = new FakeSocket();
         sockets.push(s);
         return s as unknown as WASocket;
@@ -116,8 +117,22 @@ describe("ConduitConnection", () => {
         },
       },
     });
-    return { conn, sockets, closes, getOpenJid: () => openSelfJid };
+    return {
+      conn,
+      sockets,
+      socketConfigs,
+      closes,
+      getOpenJid: () => openSelfJid,
+    };
   }
+
+  it("passes the configured protocol version to the socket", async () => {
+    const { conn, socketConfigs } = makeConn("run");
+    await conn.start();
+
+    expect(socketConfigs[0]?.version).toEqual([2, 3000, 1033893291]);
+    conn.stop();
+  });
 
   it("normalizes the self jid on open", async () => {
     const { conn, sockets, getOpenJid } = makeConn("run");

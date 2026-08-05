@@ -137,7 +137,7 @@ export class ConduitConnection {
     const socketConfig = buildSocketConfig({
       config: this.config,
       authState: this.authState,
-      version: this.version,
+      version: this.version ?? this.config.baileys.version,
       logger: this.logger,
     });
     const sock = this.socketFactory(socketConfig);

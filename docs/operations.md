@@ -122,3 +122,7 @@ then confirms that the underlying WebSocket is open. If a link attempt is
 interrupted before authentication completes, its provisional pairing
 credentials are cleared automatically; retry `link` without deleting an
 existing authenticated auth directory.
+
+The Baileys protocol version is pinned in the generated configuration. Update
+`baileys.version` deliberately when WhatsApp protocol compatibility requires
+it, then rebuild the same Docker image before retrying a link.

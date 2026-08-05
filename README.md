@@ -432,6 +432,7 @@ paths:
   media_dir: /srv/agents-state/nicolai/whatsapp-conduit/media
 
 baileys:
+  version: [2, 3000, 1033893291]
   print_qr_in_terminal: true
   sync_full_history: false
   mark_online_on_connect: false

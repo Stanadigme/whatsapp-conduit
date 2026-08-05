@@ -38,12 +38,12 @@ export interface BuildSocketConfigArgs {
  *    only the limited recent on-connect history, which an inbox sync wants.
  *  - `getMessage` is a no-op returning undefined: it exists only to support
  *    message *re-sending*, which this observe-only bridge never does.
- *  - `version` is omitted by default so Baileys uses the protocol version it
- *    was built against. Fetching the latest WA Web version on every start can
- *    advance ahead of the pinned package's protobufs and break connect/link.
+ *  - `version` is pinned in the application config so the WhatsApp protocol
+ *    version can be updated deliberately without fetching it at every start.
  */
 export function buildSocketConfig(args: BuildSocketConfigArgs): SocketConfig {
   const { config, authState, version, logger } = args;
+  const effectiveVersion = version ?? config.baileys.version;
 
   const socketConfig: SocketConfig = {
     logger,
@@ -58,7 +58,7 @@ export function buildSocketConfig(args: BuildSocketConfigArgs): SocketConfig {
     // Observe-only: we never resend messages, so no real message lookup.
     getMessage: async () => undefined,
   };
-  if (version) socketConfig.version = version;
+  socketConfig.version = effectiveVersion;
   return socketConfig;
 }
 
