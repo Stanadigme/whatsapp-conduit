@@ -123,6 +123,12 @@ interrupted before authentication completes, its provisional pairing
 credentials are cleared automatically; retry `link` without deleting an
 existing authenticated auth directory.
 
+Baileys logs are kept at `warn` by default. For a diagnosis of a protocol
+failure, set `logging.baileys_level: debug` (or `trace`) in the mounted config,
+repeat the command, and collect the output locally. These logs can contain
+authentication or protocol details and must not be published or pasted into an
+issue without review.
+
 The Baileys protocol version is pinned in the generated configuration. Update
 `baileys.version` deliberately when WhatsApp protocol compatibility requires
 it, then rebuild the same Docker image before retrying a link.

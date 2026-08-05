@@ -462,6 +462,9 @@ exports:
 
 logging:
   level: info
+  # Keep Baileys at warn by default; use debug/trace temporarily for protocol
+  # diagnostics (those records may contain authentication details).
+  baileys_level: warn
   log_message_text: false
 ```
 

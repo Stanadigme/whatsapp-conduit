@@ -17,6 +17,7 @@ describe("resolveConfig", () => {
     expect(cfg.baileys.version).toEqual(DEFAULT_BAILEYS_VERSION);
 
     expect(cfg.logging.level).toBe("info");
+    expect(cfg.logging.baileysLevel).toBe("warn");
     expect(cfg.logging.logMessageText).toBe(false);
 
     expect(cfg.exports.defaultFormat).toBe("jsonl");
@@ -59,11 +60,16 @@ describe("resolveConfig", () => {
         allowed_chats: ["a@s.whatsapp.net"],
         blocked_chats: ["b@g.us"],
       },
-      logging: { level: "debug", log_message_text: true },
+      logging: {
+        level: "debug",
+        baileys_level: "trace",
+        log_message_text: true,
+      },
     });
     expect(cfg.filters.allowedChats).toEqual(["a@s.whatsapp.net"]);
     expect(cfg.filters.blockedChats).toEqual(["b@g.us"]);
     expect(cfg.logging.level).toBe("debug");
+    expect(cfg.logging.baileysLevel).toBe("trace");
     expect(cfg.logging.logMessageText).toBe(true);
   });
 
