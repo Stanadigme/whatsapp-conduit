@@ -5,64 +5,12 @@ import {
   type WAMessage,
 } from "baileys";
 import { isGroupJid, isStatusJid, normalizeJid } from "./jid.js";
-
-/**
- * Normalized message types we persist. `unknown` is used (with raw_json kept)
- * whenever a payload cannot be safely parsed — explicit loss over invented data.
- */
-export type MessageType =
-  | "text"
-  | "image"
-  | "video"
-  | "audio"
-  | "document"
-  | "sticker"
-  | "contact"
-  | "location"
-  | "poll"
-  | "reaction"
-  | "protocol"
-  | "unknown";
-
-export interface NormalizedMessage {
-  chatJid: string;
-  messageId: string;
-  senderJid: string | null;
-  fromMe: boolean;
-  timestamp: number | null;
-  messageType: MessageType;
-  text: string | null;
-  hasMedia: boolean;
-  durationS: number | null;
-  quotedMessageId: string | null;
-  quotedSenderJid: string | null;
-  isGroup: boolean;
-  isStatus: boolean;
-  pushName: string | null;
-}
-
-/** Result of normalizing one Baileys message. A discriminated action. */
-export type NormalizeResult =
-  | { action: "store"; message: NormalizedMessage }
-  | {
-      action: "revoke";
-      chatJid: string;
-      targetId: string;
-      senderJid: string | null;
-      isGroup: boolean;
-      isStatus: boolean;
-    }
-  | {
-      action: "edit";
-      chatJid: string;
-      targetId: string;
-      text: string | null;
-      editId: string;
-      senderJid: string | null;
-      isGroup: boolean;
-      isStatus: boolean;
-    }
-  | { action: "skip"; reason: string };
+export type {
+  MessageType,
+  NormalizedMessage,
+  NormalizeResult,
+} from "../ingest/types.js";
+import type { MessageType, NormalizeResult } from "../ingest/types.js";
 
 const MEDIA_TYPES: ReadonlySet<MessageType> = new Set([
   "image",

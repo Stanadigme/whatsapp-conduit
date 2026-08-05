@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@whatsmeow-node/whatsmeow-node':
+        specifier: 0.7.0
+        version: 0.7.0
       baileys:
         specifier: 7.0.0-rc13
         version: 7.0.0-rc13(sharp@0.35.2)
@@ -734,6 +737,48 @@ packages:
 
   '@vitest/utils@4.1.9':
     resolution: {integrity: sha512-A51o8ymO5PpqlWNnBP9ZHPXDIpuMtTLlGSjN7la4US+LJzoUMyhwjA5QXlm39JexgwHKW4Xjs8Z2d3dLCXOeuA==}
+
+  '@whatsmeow-node/darwin-arm64@0.7.0':
+    resolution: {integrity: sha512-6qu5H0O5lydaNf9haOe7mRxU4UWL5Smrlw9rcBN19VabPi/tJs+AXUBJHZTXweX3uC213rwzpk6ii3smpe5jlw==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@whatsmeow-node/darwin-x64@0.7.0':
+    resolution: {integrity: sha512-Sht7ZtrDeiI/zx/JQdNiqgcywiesHkYFNaJaCpenweVG4kaE3+cA8eDMAVtyM6FoXrDI9w/FxhyQizWuuFWlkw==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@whatsmeow-node/linux-arm64@0.7.0':
+    resolution: {integrity: sha512-OZRSBj2ULdUHNFegi1KQ5hgt/tzs5zPzPIa9Nt5RsKh6tQp4yBFjYVW+X/jbbc9w5ymW5+uwnmNBGoNzO9MLdg==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@whatsmeow-node/linux-x64-musl@0.7.0':
+    resolution: {integrity: sha512-RviyMXwO2v84VJ+0um0aBKi1QA0fLZqJgoJely+9WUJ2+i2Cxj17DRwl9kvAMAPWF2c7FV/GhNl81pa+451uog==}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@whatsmeow-node/linux-x64@0.7.0':
+    resolution: {integrity: sha512-hOqWFUZ7ecR8oU9VrBctT0LIzRLSMGu5XLtO9jASaOEF4h18Gj1V9whu2XwQ12Nzsv9KvcFT1S6psi6Dh8k7Fw==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@whatsmeow-node/whatsmeow-node@0.7.0':
+    resolution: {integrity: sha512-2/54SGYOOta9Vm0nPNKyHzmXlo/LJDxmsZSeZUBhiNpTpSMgjbfWsp/HwCgiA4DvCyev8ZEMjzKJdHcSenukqA==}
+    engines: {node: '>=18'}
+
+  '@whatsmeow-node/win32-arm64@0.7.0':
+    resolution: {integrity: sha512-M6WadhbHwpEgTKppar+v/PwuX5n6ml1mCa1IhixhAnuXHyz/asnDoappMKgEpD8B0JCIRssnmZ0YH9m2PVTMGQ==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@whatsmeow-node/win32-x64@0.7.0':
+    resolution: {integrity: sha512-PnUnr9DlJ7guF1L7LctefhABY/3lrGS2JMUn3VAUA6qhXL/dt3ttmYae1PidGzYK9c2kV2f+H324LtxhlMR3ag==}
+    cpu: [x64]
+    os: [win32]
 
   acorn-jsx@5.3.2:
     resolution: {integrity: sha512-rq9s+JNhf0IChjtDXxllJ7g41oZk5SlXtp0LHwyA5cejwn7vKmKp4pPri6YEePv2PU65sAsegbXtIinmDFDXgQ==}
@@ -2190,6 +2235,37 @@ snapshots:
       '@vitest/pretty-format': 4.1.9
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
+
+  '@whatsmeow-node/darwin-arm64@0.7.0':
+    optional: true
+
+  '@whatsmeow-node/darwin-x64@0.7.0':
+    optional: true
+
+  '@whatsmeow-node/linux-arm64@0.7.0':
+    optional: true
+
+  '@whatsmeow-node/linux-x64-musl@0.7.0':
+    optional: true
+
+  '@whatsmeow-node/linux-x64@0.7.0':
+    optional: true
+
+  '@whatsmeow-node/whatsmeow-node@0.7.0':
+    optionalDependencies:
+      '@whatsmeow-node/darwin-arm64': 0.7.0
+      '@whatsmeow-node/darwin-x64': 0.7.0
+      '@whatsmeow-node/linux-arm64': 0.7.0
+      '@whatsmeow-node/linux-x64': 0.7.0
+      '@whatsmeow-node/linux-x64-musl': 0.7.0
+      '@whatsmeow-node/win32-arm64': 0.7.0
+      '@whatsmeow-node/win32-x64': 0.7.0
+
+  '@whatsmeow-node/win32-arm64@0.7.0':
+    optional: true
+
+  '@whatsmeow-node/win32-x64@0.7.0':
+    optional: true
 
   acorn-jsx@5.3.2(acorn@8.17.0):
     dependencies:

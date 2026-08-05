@@ -19,9 +19,11 @@ export interface StatusAccount {
 
 export interface StatusReport {
   configPath: string;
+  transport: string;
   database: string;
   databaseExists: boolean;
   authDir: string;
+  authStore: string;
   authLinked: boolean;
   observeOnly: boolean;
   sendEnabled: boolean;
@@ -40,13 +42,21 @@ export interface StatusOptions {
 export function buildStatusReport(configPath: string): StatusReport {
   const config = loadConfig(configPath);
   const databaseExists = existsSync(config.paths.sqlite);
-  const authLinked = authStateExists(config.paths.authDir);
+  const authStore =
+    config.transport === "whatsmeow"
+      ? config.paths.whatsmeowStore
+      : config.paths.authDir;
+  const authLinked =
+    existsSync(authStore) &&
+    (config.transport === "whatsmeow" || authStateExists(config.paths.authDir));
 
   const base: StatusReport = {
     configPath,
+    transport: config.transport,
     database: config.paths.sqlite,
     databaseExists,
     authDir: config.paths.authDir,
+    authStore,
     authLinked,
     observeOnly: config.privacy.observeOnly,
     sendEnabled: config.privacy.sendEnabled,
@@ -101,8 +111,9 @@ export function runStatus(options: StatusOptions = {}): void {
   const lines = [
     "whatsapp-conduit status",
     `  config:        ${report.configPath}`,
+    `  transport:     ${report.transport}`,
     `  database:      ${report.database}${report.databaseExists ? "" : " (missing)"}`,
-    `  auth:          ${report.authLinked ? "linked" : "not linked"}`,
+    `  auth:          ${report.authLinked ? "linked" : "not linked"} (${report.authStore})`,
     `  posture:       observe_only=${report.observeOnly} send_enabled=${report.sendEnabled}`,
     `  accounts:      ${accountLine}`,
     `  chats:         ${report.chats} (${report.allowedChats} allowed)`,

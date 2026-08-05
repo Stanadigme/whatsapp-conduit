@@ -9,10 +9,11 @@ import {
   statusCodeOf,
   type ConnectionDeps,
 } from "../baileys/connect.js";
-import { phoneFromJid } from "../baileys/jid.js";
+import { normalizeJid, phoneFromJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
 import { upsertAccount } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
+import { WhatsmeowTransport } from "../whatsmeow/transport.js";
 
 export interface LinkOptions {
   configPath?: string;
@@ -49,6 +50,12 @@ export async function runLink(
   dependencies: LinkDependencies = {},
 ): Promise<LinkResult> {
   const config = loadConfig(resolveConfigPath(options.configPath));
+  if (
+    config.transport === "whatsmeow" &&
+    dependencies.connectionFactory === undefined
+  ) {
+    return runWhatsmeowLink(config, options.timeoutSec ?? 120);
+  }
   const timeoutSec = options.timeoutSec ?? 120;
   const useQr = options.qr ?? false;
   const phoneNumber = useQr
@@ -162,6 +169,61 @@ export async function runLink(
   });
 }
 
+async function runWhatsmeowLink(
+  config: Config,
+  timeoutSec: number,
+): Promise<LinkResult> {
+  const log = appLogger(config);
+  const transport = new WhatsmeowTransport({
+    store: config.paths.whatsmeowStore,
+    config: config.whatsmeow,
+  });
+  return new Promise<LinkResult>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      fail(new Error(`Linking timed out after ${timeoutSec}s.`));
+    }, timeoutSec * 1000);
+
+    transport.on("connected", ({ jid }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const accountId = persistAccount(config, jid);
+      process.stdout.write(
+        `\nLinked successfully as ${jid}.\n` +
+          "Auth state saved. You can now run `whatsapp-conduit run`.\n",
+      );
+      void transport.stop();
+      resolve({ selfJid: jid, accountId });
+    });
+    transport.on("error", (error) => {
+      if (!settled) fail(error);
+      else log.error({ err: error.message }, "whatsmeow pairing error");
+    });
+    transport.on("disconnected", () => {
+      if (!settled) fail(new Error("Linking failed: whatsmeow disconnected."));
+    });
+
+    transport
+      .startPairing((code) => {
+        process.stdout.write(
+          "\nScan this QR code in WhatsApp → Settings → Linked Devices → Link a device:\n\n",
+        );
+        qrcode.generate(code, { small: true });
+      })
+      .catch((error: unknown) => {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      });
+
+    function fail(error: Error): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void transport.stop().finally(() => reject(error));
+    }
+  });
+}
+
 async function resolvePhoneNumber(phoneNumber?: string): Promise<string> {
   if (phoneNumber && /^\d{6,15}$/.test(phoneNumber)) return phoneNumber;
   if (phoneNumber) {
@@ -206,11 +268,14 @@ function pairingFailure(error: unknown): Error {
 function persistAccount(config: Config, selfJid?: string): string {
   const db = openDb(config.paths.sqlite, { migrate: true });
   try {
+    const normalizedSelfJid = selfJid ? normalizeJid(selfJid) : undefined;
     upsertAccount(db, {
       id: config.account.name,
       label: config.account.description ?? null,
-      selfJid: selfJid ?? null,
-      phoneNumber: selfJid ? (phoneFromJid(selfJid) ?? null) : null,
+      selfJid: normalizedSelfJid ?? null,
+      phoneNumber: normalizedSelfJid
+        ? (phoneFromJid(normalizedSelfJid) ?? null)
+        : null,
     });
     return config.account.name;
   } finally {

@@ -1,8 +1,8 @@
 # whatsapp-conduit
 
-> **A passive, observe-only WhatsApp conduit for personal agents: Baileys in, SQLite out — without turning your account into a bot.**
+> **A passive, observe-only WhatsApp conduit for personal agents: whatsmeow in, SQLite out — without turning your account into a bot.**
 
-`whatsapp-conduit` is a small, channel-specific bridge for one job: connect to a WhatsApp account through the linked-device protocol, listen to message events through [Baileys](https://github.com/WhiskeySockets/Baileys), and persist a normalized local copy into SQLite.
+`whatsapp-conduit` is a small, channel-specific bridge for one job: connect to a WhatsApp account through the linked-device protocol, listen to message events through [whatsmeow](https://github.com/tulir/whatsmeow) via `whatsmeow-node`, and persist a normalized local copy into SQLite. Baileys remains available as a temporary comparison transport.
 
 It is **not** an AI agent.  
 It is **not** an open-loop tracker.  
@@ -121,9 +121,9 @@ no automatic in-band reply
 
 The stock gateway also routes inbound messages into Hermes conversation sessions and owns the response loop. That is exactly what a messaging gateway should do, but it is the wrong primitive for a private inbox conduit.
 
-### Why not configure Baileys directly and call it done?
+### Why not configure a transport directly and call it done?
 
-Baileys provides the hard transport primitive: a linked-device WhatsApp Web socket and event hooks such as message upserts. It does not, by itself, provide the product boundary we want:
+The linked-device transport provides the hard protocol primitive and event hooks. It does not, by itself, provide the product boundary we want:
 
 - SQLite schema and migrations
 - idempotent message persistence
@@ -134,7 +134,9 @@ Baileys provides the hard transport primitive: a linked-device WhatsApp Web sock
 - operational service wrapper
 - clear observe-only/no-read/no-send guardrails
 
-So this project should be small, but it is still a real project: Baileys is the transport; `whatsapp-conduit` is the local interface and persistence layer.
+So this project should be small, but it is still a real project: whatsmeow is
+the primary transport; `whatsapp-conduit` is the local interface and
+persistence layer.
 
 ### Decision rule
 
@@ -244,9 +246,14 @@ The first version should store everything locally. No cloud dashboard. No teleme
 
 ---
 
-## Relationship to Baileys
+## Relationship to the transports
 
-[Baileys](https://github.com/WhiskeySockets/Baileys) is the upstream WhatsApp Web protocol client.
+`whatsmeow` is the primary WhatsApp Web protocol client, exposed to Node.js by
+`@whatsmeow-node/whatsmeow-node`. Baileys remains a temporary fallback and
+comparison path.
+
+[Baileys](https://github.com/WhiskeySockets/Baileys) is the former primary
+WhatsApp Web protocol client.
 
 Baileys provides:
 
@@ -285,10 +292,10 @@ Important caveat: Baileys is unofficial and is not affiliated with WhatsApp. Use
               │ Linked Devices
               ▼
 ┌──────────────────────────┐
-│ Baileys WebSocket client │
-│ - QR/pairing auth        │
-│ - messages.upsert        │
-│ - chats/contacts events  │
+│ whatsmeow Go client      │
+│ - QR auth via IPC        │
+│ - message events         │
+│ - reconnect lifecycle    │
 └─────────────┬────────────┘
               │ event stream
               ▼
@@ -1095,7 +1102,9 @@ pnpm dlx whatsapp-conduit run
 
 ## Legal / ToS / ethics
 
-This project uses Baileys, an unofficial WhatsApp Web protocol client. It is not affiliated with, endorsed by, or supported by WhatsApp or Meta.
+This project uses unofficial WhatsApp Web protocol clients (`whatsmeow` and,
+temporarily, Baileys). It is not affiliated with, endorsed by, or supported by
+WhatsApp or Meta.
 
 Use this only for accounts and messages you are authorized to access. The intended use is personal local sync of your own WhatsApp account as a linked device.
 

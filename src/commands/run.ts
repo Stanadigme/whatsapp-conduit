@@ -1,10 +1,14 @@
+import { existsSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { authStateExists, openAuthState } from "../baileys/auth.js";
 import { ConduitConnection } from "../baileys/connect.js";
 import { registerIngestion } from "../baileys/ingest.js";
+import { normalizeJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
 import { upsertAccount } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
+import { registerWhatsmeowIngestion } from "../whatsmeow/ingest.js";
+import { WhatsmeowTransport } from "../whatsmeow/transport.js";
 
 export interface RunOptions {
   configPath?: string;
@@ -20,6 +24,10 @@ export interface RunOptions {
 export async function runRun(options: RunOptions = {}): Promise<void> {
   const config = loadConfig(resolveConfigPath(options.configPath));
   const log = appLogger(config);
+
+  if (config.transport === "whatsmeow") {
+    return runWhatsmeow(config, log);
+  }
 
   // Refuse to start unpaired: `run` has no QR handler, so opening a fresh auth
   // state would spin in an unrecoverable pairing/reconnect loop. Require link.
@@ -110,6 +118,91 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
       log.error(
         { err: err instanceof Error ? err.message : String(err) },
         "failed to start connection",
+      );
+      shutdown(1);
+    });
+  });
+}
+
+async function runWhatsmeow(
+  config: ReturnType<typeof loadConfig>,
+  log: ReturnType<typeof appLogger>,
+): Promise<void> {
+  if (!existsSync(config.paths.whatsmeowStore)) {
+    throw new Error(
+      "No linked whatsmeow device found. Run `whatsapp-conduit link --qr` first.",
+    );
+  }
+
+  const db = openDb(config.paths.sqlite, { migrate: true });
+  upsertAccount(db, {
+    id: config.account.name,
+    label: config.account.description ?? null,
+  });
+  const transport = new WhatsmeowTransport({
+    store: config.paths.whatsmeowStore,
+    config: config.whatsmeow,
+  });
+  registerWhatsmeowIngestion(transport, {
+    db,
+    accountId: config.account.name,
+    config,
+    logger: log,
+  });
+
+  log.info(
+    {
+      account: config.account.name,
+      transport: "whatsmeow",
+      observeOnly: config.privacy.observeOnly,
+      sendEnabled: config.privacy.sendEnabled,
+      markRead: config.privacy.markRead,
+      includeGroups: config.privacy.includeGroups,
+    },
+    "starting observe-only sync",
+  );
+
+  return new Promise<void>((resolve) => {
+    let shuttingDown = false;
+    const shutdown = (code: number): void => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      log.info("shutting down");
+      void transport.stop().finally(() => {
+        try {
+          db.close();
+        } catch {
+          // best-effort
+        }
+        if (code !== 0) process.exitCode = code;
+        resolve();
+      });
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+    };
+    const onSignal = (): void => shutdown(0);
+
+    transport.on("connected", ({ jid }) => {
+      const selfJid = normalizeJid(jid);
+      upsertAccount(db, { id: config.account.name, selfJid });
+      log.info({ selfJid, transport: "whatsmeow" }, "connected");
+    });
+    transport.on("disconnected", () => {
+      if (!shuttingDown) log.warn("whatsmeow connection closed");
+    });
+    transport.on("error", (error) => {
+      log.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        "whatsmeow transport error",
+      );
+    });
+    process.on("SIGINT", onSignal);
+    process.on("SIGTERM", onSignal);
+
+    transport.start().catch((error: unknown) => {
+      log.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        "failed to start whatsmeow connection",
       );
       shutdown(1);
     });

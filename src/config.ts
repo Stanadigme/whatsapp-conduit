@@ -6,6 +6,7 @@ import { LOG_LEVELS, type LogLevel } from "./util/logging.js";
 
 export type ExportFormat = "jsonl";
 export type BaileysVersion = [number, number, number];
+export type TransportName = "whatsmeow" | "baileys";
 
 export const DEFAULT_BAILEYS_VERSION: BaileysVersion = [2, 3000, 1033893291];
 
@@ -19,6 +20,18 @@ export interface PathsConfig {
   sqlite: string;
   authDir: string;
   mediaDir: string;
+  whatsmeowStore: string;
+}
+
+export interface WhatsmeowConfig {
+  binaryPath?: string;
+  commandTimeoutMs: number;
+}
+
+export interface MediaConfig {
+  maxAudioDurationS: number;
+  maxAudioBytes: number;
+  maxAttempts: number;
 }
 
 export interface BaileysConfig {
@@ -66,10 +79,13 @@ export interface LoggingConfig {
 }
 
 export interface Config {
+  transport: TransportName;
   account: AccountConfig;
   paths: PathsConfig;
+  whatsmeow: WhatsmeowConfig;
   baileys: BaileysConfig;
   privacy: PrivacyConfig;
+  media: MediaConfig;
   filters: FiltersConfig;
   exports: ExportsConfig;
   logging: LoggingConfig;
@@ -89,6 +105,12 @@ function asString(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
 }
 
+function asPositiveInt(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : fallback;
+}
+
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((v): v is string => typeof v === "string");
@@ -98,6 +120,10 @@ function asLogLevel(value: unknown, fallback: LogLevel): LogLevel {
   return LOG_LEVELS.includes(value as LogLevel)
     ? (value as LogLevel)
     : fallback;
+}
+
+function asTransport(value: unknown): TransportName {
+  return value === "baileys" ? "baileys" : "whatsmeow";
 }
 
 function asBaileysVersion(
@@ -147,10 +173,13 @@ export function resolveConfig(
 ): Config {
   const raw = isRecord(rawInput) ? rawInput : {};
 
+  const transportRaw = section(raw, "transport");
   const accountRaw = section(raw, "account");
   const pathsRaw = section(raw, "paths");
+  const whatsmeowRaw = section(raw, "whatsmeow");
   const baileysRaw = section(raw, "baileys");
   const privacyRaw = section(raw, "privacy");
+  const mediaRaw = section(raw, "media");
   const filtersRaw = section(raw, "filters");
   const exportsRaw = section(raw, "exports");
   const loggingRaw = section(raw, "logging");
@@ -170,6 +199,11 @@ export function resolveConfig(
     ),
     authDir: resolvePath(dataDir, pathsRaw.auth_dir, join(dataDir, "auth")),
     mediaDir: resolvePath(dataDir, pathsRaw.media_dir, join(dataDir, "media")),
+    whatsmeowStore: resolvePath(
+      dataDir,
+      pathsRaw.whatsmeow_store,
+      join(dataDir, "whatsmeow.db"),
+    ),
   };
 
   const privacy: PrivacyConfig = {
@@ -190,6 +224,16 @@ export function resolveConfig(
     );
   }
 
+  const whatsmeow: WhatsmeowConfig = {
+    commandTimeoutMs: asPositiveInt(whatsmeowRaw.command_timeout_ms, 60_000),
+  };
+  if (
+    typeof whatsmeowRaw.binary_path === "string" &&
+    whatsmeowRaw.binary_path.length > 0
+  ) {
+    whatsmeow.binaryPath = whatsmeowRaw.binary_path;
+  }
+
   const account: AccountConfig = {
     name: asString(accountRaw.name, "personal"),
   };
@@ -199,8 +243,10 @@ export function resolveConfig(
   }
 
   return {
+    transport: asTransport(transportRaw.name),
     account,
     paths,
+    whatsmeow,
     baileys: {
       version: asBaileysVersion(baileysRaw.version, DEFAULT_BAILEYS_VERSION),
       printQrInTerminal: asBool(baileysRaw.print_qr_in_terminal, true),
@@ -209,6 +255,11 @@ export function resolveConfig(
       browserName: asString(baileysRaw.browser_name, "whatsapp-conduit"),
     },
     privacy,
+    media: {
+      maxAudioDurationS: asPositiveInt(mediaRaw.max_audio_duration_s, 600),
+      maxAudioBytes: asPositiveInt(mediaRaw.max_audio_bytes, 50 * 1024 * 1024),
+      maxAttempts: asPositiveInt(mediaRaw.max_attempts, 3),
+    },
     filters: {
       allowedChats: asStringArray(filtersRaw.allowed_chats),
       blockedChats: asStringArray(filtersRaw.blocked_chats),
@@ -252,6 +303,9 @@ export function defaultConfigYaml(dataDir: string): string {
   return `# whatsapp-conduit configuration
 # Observe-only personal WhatsApp linked-device sync. Defaults are privacy-safe.
 
+transport:
+  name: whatsmeow
+
 account:
   name: personal
   description: "Personal WhatsApp linked-device sync"
@@ -261,6 +315,11 @@ paths:
   sqlite: ${join(dataDir, "whatsapp-conduit.db")}
   auth_dir: ${join(dataDir, "auth")}
   media_dir: ${join(dataDir, "media")}
+  whatsmeow_store: ${join(dataDir, "whatsmeow.db")}
+
+whatsmeow:
+  # binary_path: /usr/local/bin/whatsmeow-node
+  command_timeout_ms: 60000
 
 baileys:
   version: [${DEFAULT_BAILEYS_VERSION.join(", ")}]
@@ -278,6 +337,11 @@ privacy:
   store_media: false
   include_groups: false
   include_status: false
+
+media:
+  max_audio_duration_s: 600
+  max_audio_bytes: 52428800
+  max_attempts: 3
 
 filters:
   # Empty allowlist: discover chats, but do not expose all chats to exports.

@@ -174,6 +174,17 @@ export function ingestMessage(deps: IngestDeps, msg: WAMessage): void {
     return;
   }
 
+  ingestNormalizedResult(deps, result, rawJsonOf(deps.config, msg));
+}
+
+/** Persist a transport-independent normalized event. */
+export function ingestNormalizedResult(
+  deps: IngestDeps,
+  result: NormalizeResult,
+  rawJson: string | null,
+): boolean {
+  if (result.action === "skip") return false;
+
   const ctx: ChatContext =
     result.action === "store"
       ? {
@@ -188,7 +199,7 @@ export function ingestMessage(deps: IngestDeps, msg: WAMessage): void {
         };
 
   const messageId = messageIdOf(result);
-  if (!chatPasses(deps, ctx, messageId)) return;
+  if (!chatPasses(deps, ctx, messageId)) return false;
 
   // The sender filter applies to stores AND protocol edits/revokes alike — a
   // blocked sender must not be able to write edited text or tombstones either.
@@ -197,16 +208,11 @@ export function ingestMessage(deps: IngestDeps, msg: WAMessage): void {
   const resolvedSenderJid = senderJid
     ? resolveParticipantJid(deps.db, deps.accountId, senderJid)
     : null;
-  if (!senderPasses(deps, ctx.jid, resolvedSenderJid, messageId)) return;
+  if (!senderPasses(deps, ctx.jid, resolvedSenderJid, messageId)) return false;
 
   if (result.action === "store") {
-    persistStore(
-      deps,
-      result.message,
-      rawJsonOf(deps.config, msg),
-      resolvedSenderJid,
-    );
-    return;
+    persistStore(deps, result.message, rawJson, resolvedSenderJid);
+    return true;
   }
 
   if (result.action === "revoke") {
@@ -217,17 +223,12 @@ export function ingestMessage(deps: IngestDeps, msg: WAMessage): void {
       ctx.isGroup,
       ctx.isStatus,
     );
-    return;
+    return true;
   }
 
   // edit
-  persistEdit(
-    deps,
-    result,
-    ctx.isGroup,
-    ctx.isStatus,
-    rawJsonOf(deps.config, msg),
-  );
+  persistEdit(deps, result, ctx.isGroup, ctx.isStatus, rawJson);
+  return true;
 }
 
 /** Ingest a reaction from the dedicated `messages.reaction` event. */
@@ -453,12 +454,17 @@ function isLongLike(
  * silently undone by the (default-on) raw payload.
  */
 export function rawJsonOf(config: Config, msg: WAMessage): string | null {
+  return rawJsonOfValue(config, msg);
+}
+
+/** Serialize any transport payload under the same privacy policy. */
+export function rawJsonOfValue(config: Config, value: unknown): string | null {
   if (!config.privacy.storeRawJson || !config.privacy.storeMessageText) {
     return null;
   }
-  return JSON.stringify(msg, (_key, value: unknown) => {
-    if (isUint8Array(value)) return Buffer.from(value).toString("base64");
-    if (isLongLike(value)) return value.toNumber();
-    return value;
+  return JSON.stringify(value, (_key, nested: unknown) => {
+    if (isUint8Array(nested)) return Buffer.from(nested).toString("base64");
+    if (isLongLike(nested)) return nested.toNumber();
+    return nested;
   });
 }

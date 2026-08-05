@@ -43,7 +43,7 @@ export function buildProgram(): Command {
   program
     .name("whatsapp-conduit")
     .description(
-      "Passive, observe-only WhatsApp linked-device bridge: Baileys in, SQLite out.",
+      "Passive, observe-only WhatsApp linked-device bridge: whatsmeow in, SQLite out.",
     )
     .version(getVersion(), "-v, --version", "print the version and exit")
     .option("-c, --config <path>", "path to the YAML config file")
@@ -80,7 +80,7 @@ export function buildProgram(): Command {
   program
     .command("link")
     .description(
-      "link a WhatsApp account as a secondary device via pairing code",
+      "link a WhatsApp account as a secondary device via QR code",
     )
     .option("--qr", "use the explicit QR fallback instead of a pairing code")
     .option(

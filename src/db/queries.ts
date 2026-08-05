@@ -420,6 +420,85 @@ export function upsertMessage(db: Database, input: MessageInput): void {
   });
 }
 
+export interface AttachmentInput {
+  accountId: string;
+  chatJid: string;
+  messageId: string;
+  attachmentIndex?: number;
+  mediaType?: string | null;
+  mimeType?: string | null;
+  fileName?: string | null;
+  filePath?: string | null;
+  sha256?: string | null;
+  sizeBytes?: number | null;
+  downloadedAt?: number | null;
+  rawJson?: string | null;
+}
+
+export function upsertAttachment(db: Database, input: AttachmentInput): void {
+  db.prepare(
+    `insert into attachments (
+       account_id, chat_jid, message_id, attachment_index, media_type,
+       mime_type, file_name, file_path, sha256, size_bytes, downloaded_at, raw_json
+     ) values (
+       @accountId, @chatJid, @messageId, @attachmentIndex, @mediaType,
+       @mimeType, @fileName, @filePath, @sha256, @sizeBytes, @downloadedAt, @rawJson
+     )
+     on conflict (account_id, chat_jid, message_id, attachment_index) do update set
+       media_type = coalesce(excluded.media_type, attachments.media_type),
+       mime_type = coalesce(excluded.mime_type, attachments.mime_type),
+       file_name = coalesce(excluded.file_name, attachments.file_name),
+       file_path = coalesce(excluded.file_path, attachments.file_path),
+       sha256 = coalesce(excluded.sha256, attachments.sha256),
+       size_bytes = coalesce(excluded.size_bytes, attachments.size_bytes),
+       downloaded_at = coalesce(excluded.downloaded_at, attachments.downloaded_at),
+       raw_json = coalesce(excluded.raw_json, attachments.raw_json)`,
+  ).run({
+    accountId: input.accountId,
+    chatJid: input.chatJid,
+    messageId: input.messageId,
+    attachmentIndex: input.attachmentIndex ?? 0,
+    mediaType: input.mediaType ?? null,
+    mimeType: input.mimeType ?? null,
+    fileName: input.fileName ?? null,
+    filePath: input.filePath ?? null,
+    sha256: input.sha256 ?? null,
+    sizeBytes: input.sizeBytes ?? null,
+    downloadedAt: input.downloadedAt ?? null,
+    rawJson: input.rawJson ?? null,
+  });
+}
+
+export interface AttachmentRow {
+  account_id: string;
+  chat_jid: string;
+  message_id: string;
+  attachment_index: number;
+  media_type: string | null;
+  mime_type: string | null;
+  file_name: string | null;
+  file_path: string | null;
+  sha256: string | null;
+  size_bytes: number | null;
+  downloaded_at: number | null;
+  raw_json: string | null;
+}
+
+export function getAttachment(
+  db: Database,
+  accountId: string,
+  chatJid: string,
+  messageId: string,
+  attachmentIndex = 0,
+): AttachmentRow | undefined {
+  return db
+    .prepare<[string, string, string, number], AttachmentRow>(
+      `select * from attachments
+       where account_id = ? and chat_jid = ? and message_id = ? and attachment_index = ?`,
+    )
+    .get(accountId, chatJid, messageId, attachmentIndex);
+}
+
 export function getMessage(
   db: Database,
   accountId: string,

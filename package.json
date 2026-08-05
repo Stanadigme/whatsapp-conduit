@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-conduit",
   "version": "0.1.0",
-  "description": "Passive, observe-only WhatsApp linked-device bridge: Baileys in, SQLite out.",
+  "description": "Passive, observe-only WhatsApp linked-device bridge: whatsmeow in, SQLite out.",
   "license": "MIT",
   "author": "Nicolai Schmid",
   "type": "module",
@@ -31,6 +31,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@whatsmeow-node/whatsmeow-node": "0.7.0",
     "baileys": "7.0.0-rc13",
     "better-sqlite3": "^12.11.1",
     "commander": "^15.0.0",
