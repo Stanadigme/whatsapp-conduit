@@ -22,6 +22,10 @@ const FORBIDDEN: Array<{ label: string; re: RegExp }> = [
   { label: "sendReceipts", re: /\.sendReceipts\s*\(/ },
   { label: "chatModify", re: /\.chatModify\s*\(/ },
   { label: "sendPresenceUpdate", re: /\.sendPresenceUpdate\s*\(/ },
+  {
+    label: "history sync request",
+    re: /buildHistorySyncRequest|fetchAppState|history_sync/,
+  },
 ];
 
 describe("observe-only safety invariants", () => {

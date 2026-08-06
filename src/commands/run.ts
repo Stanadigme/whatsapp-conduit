@@ -9,6 +9,7 @@ import { upsertAccount } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
 import { registerWhatsmeowIngestion } from "../whatsmeow/ingest.js";
 import { WhatsmeowTransport } from "../whatsmeow/transport.js";
+import { RuntimeStatusWriter } from "../runtime-status.js";
 
 export interface RunOptions {
   configPath?: string;
@@ -143,12 +144,27 @@ async function runWhatsmeow(
     store: config.paths.whatsmeowStore,
     config: config.whatsmeow,
   });
-  registerWhatsmeowIngestion(transport, {
-    db,
-    accountId: config.account.name,
-    config,
-    logger: log,
+  const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
+    transport: "whatsmeow",
+    connection: "disconnected",
+    authLinked: true,
   });
+  void runtimeStatus.update();
+  registerWhatsmeowIngestion(
+    transport,
+    {
+      db,
+      accountId: config.account.name,
+      config,
+      logger: log,
+    },
+    {
+      onEvent: () =>
+        void runtimeStatus.update({
+          lastEventAt: Math.floor(Date.now() / 1000),
+        }),
+    },
+  );
 
   log.info(
     {
@@ -168,6 +184,7 @@ async function runWhatsmeow(
       if (shuttingDown) return;
       shuttingDown = true;
       log.info("shutting down");
+      void runtimeStatus.update({ connection: "disconnected" });
       void transport.stop().finally(() => {
         try {
           db.close();
@@ -185,9 +202,18 @@ async function runWhatsmeow(
     transport.on("connected", ({ jid }) => {
       const selfJid = normalizeJid(jid);
       upsertAccount(db, { id: config.account.name, selfJid });
+      void runtimeStatus.update({
+        connection: "connected",
+        authLinked: true,
+        lastEventAt: Math.floor(Date.now() / 1000),
+      });
       log.info({ selfJid, transport: "whatsmeow" }, "connected");
     });
     transport.on("disconnected", () => {
+      void runtimeStatus.update({
+        connection: "disconnected",
+        lastEventAt: Math.floor(Date.now() / 1000),
+      });
       if (!shuttingDown) log.warn("whatsmeow connection closed");
     });
     transport.on("error", (error) => {

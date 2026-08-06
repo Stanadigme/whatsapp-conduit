@@ -560,6 +560,8 @@ export interface ExportSelect {
   accountId?: string;
   /** Inclusive lower bound on message timestamp (epoch seconds). */
   sinceTs?: number | null;
+  /** Inclusive upper bound on the message timestamp. */
+  beforeTs?: number | null;
   /** Exclusive lower bound on the rowid cursor (for --since-last). */
   afterRowid?: number | null;
   /** Restrict to allowed chats (is_allowed = 1 or in `allowedChats`). */
@@ -588,6 +590,10 @@ export function selectExportMessages(
   if (sel.sinceTs != null) {
     where.push("m.timestamp >= @sinceTs");
     params.sinceTs = sel.sinceTs;
+  }
+  if (sel.beforeTs != null) {
+    where.push("m.timestamp <= @beforeTs");
+    params.beforeTs = sel.beforeTs;
   }
   if (sel.afterRowid != null) {
     where.push("m.rowid > @afterRowid");

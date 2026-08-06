@@ -30,6 +30,7 @@ All commands accept `--config <path>` (default
 
 ```bash
 whatsapp-conduit status                 # auth + sync state
+whatsapp-conduit mcp                    # local read-only MCP server over stdio
 whatsapp-conduit chats list --json
 whatsapp-conduit chats show <jid>
 whatsapp-conduit messages list --chat <jid> --limit 50

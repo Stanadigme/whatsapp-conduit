@@ -21,6 +21,7 @@ export interface PathsConfig {
   authDir: string;
   mediaDir: string;
   whatsmeowStore: string;
+  runtimeStatus: string;
 }
 
 export interface WhatsmeowConfig {
@@ -32,6 +33,10 @@ export interface MediaConfig {
   maxAudioDurationS: number;
   maxAudioBytes: number;
   maxAttempts: number;
+}
+
+export interface McpConfig {
+  maxResultChars: number;
 }
 
 export interface BaileysConfig {
@@ -86,6 +91,7 @@ export interface Config {
   baileys: BaileysConfig;
   privacy: PrivacyConfig;
   media: MediaConfig;
+  mcp: McpConfig;
   filters: FiltersConfig;
   exports: ExportsConfig;
   logging: LoggingConfig;
@@ -106,8 +112,14 @@ function asString(value: unknown, fallback: string): string {
 }
 
 function asPositiveInt(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isInteger(value) && value > 0
-    ? value
+  const candidate =
+    typeof value === "string" && value.trim().length > 0
+      ? Number(value)
+      : value;
+  return typeof candidate === "number" &&
+    Number.isInteger(candidate) &&
+    candidate > 0
+    ? candidate
     : fallback;
 }
 
@@ -180,6 +192,7 @@ export function resolveConfig(
   const baileysRaw = section(raw, "baileys");
   const privacyRaw = section(raw, "privacy");
   const mediaRaw = section(raw, "media");
+  const mcpRaw = section(raw, "mcp");
   const filtersRaw = section(raw, "filters");
   const exportsRaw = section(raw, "exports");
   const loggingRaw = section(raw, "logging");
@@ -203,6 +216,11 @@ export function resolveConfig(
       dataDir,
       pathsRaw.whatsmeow_store,
       join(dataDir, "whatsmeow.db"),
+    ),
+    runtimeStatus: resolvePath(
+      dataDir,
+      pathsRaw.runtime_status,
+      join(dataDir, "runtime-status.json"),
     ),
   };
 
@@ -260,6 +278,12 @@ export function resolveConfig(
       maxAudioBytes: asPositiveInt(mediaRaw.max_audio_bytes, 50 * 1024 * 1024),
       maxAttempts: asPositiveInt(mediaRaw.max_attempts, 3),
     },
+    mcp: {
+      maxResultChars: asPositiveInt(
+        process.env.WA_MCP_MAX_RESULT_CHARS ?? mcpRaw.max_result_chars,
+        12_000,
+      ),
+    },
     filters: {
       allowedChats: asStringArray(filtersRaw.allowed_chats),
       blockedChats: asStringArray(filtersRaw.blocked_chats),
@@ -316,6 +340,7 @@ paths:
   auth_dir: ${join(dataDir, "auth")}
   media_dir: ${join(dataDir, "media")}
   whatsmeow_store: ${join(dataDir, "whatsmeow.db")}
+  runtime_status: ${join(dataDir, "runtime-status.json")}
 
 whatsmeow:
   # binary_path: /usr/local/bin/whatsmeow-node
@@ -342,6 +367,9 @@ media:
   max_audio_duration_s: 600
   max_audio_bytes: 52428800
   max_attempts: 3
+
+mcp:
+  max_result_chars: 12000
 
 filters:
   # Empty allowlist: discover chats, but do not expose all chats to exports.

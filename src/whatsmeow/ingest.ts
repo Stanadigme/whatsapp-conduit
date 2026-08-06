@@ -9,8 +9,10 @@ import { WhatsmeowTransport } from "./transport.js";
 export function registerWhatsmeowIngestion(
   transport: ObserveTransport,
   deps: IngestDeps,
+  options: { onEvent?: () => void } = {},
 ): void {
   transport.on("message", (event) => {
+    options.onEvent?.();
     try {
       const result = normalizeWhatsmeowMessage(event);
       if (result.action === "skip") {

@@ -31,13 +31,15 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@whatsmeow-node/whatsmeow-node": "0.7.0",
     "baileys": "7.0.0-rc13",
     "better-sqlite3": "^12.11.1",
     "commander": "^15.0.0",
     "pino": "^10.3.1",
     "qrcode-terminal": "^0.12.0",
-    "yaml": "^2.9.0"
+    "yaml": "^2.9.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",

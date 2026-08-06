@@ -13,6 +13,7 @@ import { runDoctor } from "./commands/doctor.js";
 import { runExport } from "./commands/export.js";
 import { runInit } from "./commands/init.js";
 import { runLink } from "./commands/link.js";
+import { runMcp } from "./commands/mcp.js";
 import { runMessagesList } from "./commands/messages.js";
 import { runOffsetsCommit, runOffsetsShow } from "./commands/offsets.js";
 import { runRun } from "./commands/run.js";
@@ -79,9 +80,7 @@ export function buildProgram(): Command {
 
   program
     .command("link")
-    .description(
-      "link a WhatsApp account as a secondary device via QR code",
-    )
+    .description("link a WhatsApp account as a secondary device via QR code")
     .option("--qr", "use the explicit QR fallback instead of a pairing code")
     .option(
       "--phone <number>",
@@ -110,6 +109,14 @@ export function buildProgram(): Command {
     .action(async () => {
       const globals = program.opts<GlobalOptions>();
       await runRun({ configPath: globals.config });
+    });
+
+  program
+    .command("mcp")
+    .description("run the read-only MCP server over stdio")
+    .action(async () => {
+      const globals = program.opts<GlobalOptions>();
+      await runMcp({ configPath: globals.config });
     });
 
   program
