@@ -7,6 +7,7 @@ import {
   setChatAllowed,
   upsertAccount,
   upsertChat,
+  upsertGroupMember,
   upsertMessage,
   upsertParticipant,
 } from "../src/db/queries.js";
@@ -27,10 +28,28 @@ async function connectedClient() {
     name: "Hidden chat",
   });
   setChatAllowed(db, "personal", "33600000000@s.whatsapp.net", true);
+  upsertChat(db, {
+    accountId: "personal",
+    jid: "120@g.us",
+    name: "Allowed group",
+    isGroup: true,
+  });
+  setChatAllowed(db, "personal", "120@g.us", true);
   upsertParticipant(db, {
     accountId: "personal",
     jid: "33600000000@s.whatsapp.net",
     displayName: "Allowed contact",
+  });
+  upsertParticipant(db, {
+    accountId: "personal",
+    jid: "33600000002@s.whatsapp.net",
+    displayName: "Group member",
+  });
+  upsertGroupMember(db, {
+    accountId: "personal",
+    groupJid: "120@g.us",
+    participantJid: "33600000002@s.whatsapp.net",
+    role: "admin",
   });
   upsertMessage(db, {
     accountId: "personal",
@@ -117,6 +136,19 @@ describe("MCP read-only server", () => {
       arguments: { query: "reunion" },
     });
     expect(JSON.stringify(search)).toContain("M3");
+    await client.close();
+    await server.close();
+    db.close();
+  });
+
+  it("returns directory members and roles only for allowed groups", async () => {
+    const { client, server, db } = await connectedClient();
+    const result = await client.callTool({
+      name: "wa_group_participants",
+      arguments: { chat: "120@g.us" },
+    });
+    expect(JSON.stringify(result)).toContain("Group member");
+    expect(JSON.stringify(result)).toContain("admin");
     await client.close();
     await server.close();
     db.close();

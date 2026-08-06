@@ -1,5 +1,13 @@
 import type { Database } from "better-sqlite3";
+import { normalizeJid, phoneFromJid } from "../baileys/jid.js";
 import { nowSec } from "../util/time.js";
+import {
+  directoryTablesAvailable,
+  markDirectoryMissingMembersInactive,
+  resolveDirectoryJid,
+  upsertDirectoryContact,
+  upsertDirectoryGroupMember,
+} from "./directory.js";
 
 /**
  * Persistence helpers. Every write is idempotent on its documented primary key
@@ -169,8 +177,8 @@ export function upsertChat(db: Database, input: ChatInput): void {
   ).run({
     accountId: input.accountId,
     jid: input.jid,
-    name: input.name ?? null,
-    pushName: input.pushName ?? null,
+    name: cleanDirectoryValue(input.name),
+    pushName: cleanDirectoryValue(input.pushName),
     isGroup: input.isGroup ? 1 : 0,
     isGroupSet: input.isGroup === undefined ? 0 : 1,
     isStatus: input.isStatus ? 1 : 0,
@@ -259,36 +267,213 @@ export interface ParticipantInput {
   phone?: string | null;
   displayName?: string | null;
   pushName?: string | null;
+  verifiedName?: string | null;
   rawJson?: string | null;
 }
 
 export function upsertParticipant(db: Database, input: ParticipantInput): void {
+  if (directoryTablesAvailable(db)) {
+    upsertDirectoryContact(db, input);
+    return;
+  }
   const now = nowSec();
+  const jid = normalizeJid(input.jid);
+  const inputLid = input.lid
+    ? normalizeJid(input.lid)
+    : jid.endsWith("@lid")
+      ? jid
+      : null;
+  const phoneJid = jid.endsWith("@s.whatsapp.net")
+    ? jid
+    : input.phone && /^\d+$/.test(input.phone)
+      ? `${input.phone}@s.whatsapp.net`
+      : null;
+
+  const write = db.transaction(() => {
+    const candidates = [jid, inputLid].filter(
+      (value): value is string => value !== null,
+    );
+    const mapped = candidates
+      .map(
+        (alias) =>
+          db
+            .prepare<[string, string], { canonical_jid: string }>(
+              `select canonical_jid from participant_aliases
+             where account_id = ? and alias_jid = ?`,
+            )
+            .get(input.accountId, alias)?.canonical_jid,
+      )
+      .filter((value): value is string => value !== undefined);
+    const canonical =
+      phoneJid ??
+      mapped.find((value) => !value.endsWith("@lid")) ??
+      mapped[0] ??
+      jid;
+    const oldCanonicals = [
+      ...new Set(mapped.filter((value) => value !== canonical)),
+    ];
+
+    const existing = db
+      .prepare<
+        [string, string],
+        ParticipantRow
+      >("select * from participants where account_id = ? and jid = ?")
+      .get(input.accountId, canonical);
+
+    for (const oldCanonical of oldCanonicals) {
+      mergeParticipant(db, input.accountId, oldCanonical, canonical);
+    }
+
+    db.prepare(
+      `insert into participants (
+         account_id, jid, lid, phone, display_name, push_name, verified_name,
+         first_seen_at, updated_at, raw_json
+       ) values (
+         @accountId, @jid, @lid, @phone, @displayName, @pushName, @verifiedName,
+         @now, @now, @rawJson
+       )
+       on conflict (account_id, jid) do update set
+         lid = coalesce(nullif(excluded.lid, ''), participants.lid),
+         phone = coalesce(nullif(excluded.phone, ''), participants.phone),
+         display_name = coalesce(nullif(trim(excluded.display_name), ''), participants.display_name),
+         push_name = coalesce(nullif(trim(excluded.push_name), ''), participants.push_name),
+         verified_name = coalesce(nullif(trim(excluded.verified_name), ''), participants.verified_name),
+         raw_json = coalesce(excluded.raw_json, participants.raw_json),
+         updated_at = excluded.updated_at`,
+    ).run({
+      accountId: input.accountId,
+      jid: canonical,
+      lid: inputLid ?? existing?.lid ?? null,
+      phone: input.phone ?? phoneFromJid(canonical) ?? existing?.phone ?? null,
+      displayName: cleanDirectoryValue(input.displayName),
+      pushName: cleanDirectoryValue(input.pushName),
+      verifiedName: cleanDirectoryValue(input.verifiedName),
+      rawJson: input.rawJson ?? null,
+      now,
+    });
+
+    for (const alias of new Set([canonical, ...candidates])) {
+      db.prepare(
+        `insert into participant_aliases (
+           account_id, alias_jid, canonical_jid, first_seen_at, updated_at
+         ) values (@accountId, @aliasJid, @canonicalJid, @now, @now)
+         on conflict (account_id, alias_jid) do update set
+           canonical_jid = excluded.canonical_jid,
+           updated_at = excluded.updated_at`,
+      ).run({
+        accountId: input.accountId,
+        aliasJid: alias,
+        canonicalJid: canonical,
+        now,
+      });
+    }
+
+    const displayName = cleanDirectoryValue(input.displayName);
+    if (displayName) {
+      db.prepare(
+        `update chats set name = coalesce(nullif(trim(name), ''), @displayName),
+           updated_at = @now
+         where account_id = @accountId and is_group = 0
+           and jid in (
+             select alias_jid from participant_aliases
+             where account_id = @accountId and canonical_jid = @canonicalJid
+           )`,
+      ).run({
+        accountId: input.accountId,
+        canonicalJid: canonical,
+        displayName,
+        now,
+      });
+    }
+  });
+  write();
+}
+
+function cleanDirectoryValue(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+/** Merge a legacy or newly-discovered alias row into the preferred canonical row. */
+function mergeParticipant(
+  db: Database,
+  accountId: string,
+  oldJid: string,
+  canonicalJid: string,
+): void {
+  if (oldJid === canonicalJid) return;
+  const old = db
+    .prepare<
+      [string, string],
+      ParticipantRow
+    >("select * from participants where account_id = ? and jid = ?")
+    .get(accountId, oldJid);
+  if (!old) return;
+
   db.prepare(
     `insert into participants (
-       account_id, jid, lid, phone, display_name, push_name,
+       account_id, jid, lid, phone, display_name, push_name, verified_name,
        first_seen_at, updated_at, raw_json
-     ) values (
-       @accountId, @jid, @lid, @phone, @displayName, @pushName,
-       @now, @now, @rawJson
-     )
+     ) values (@accountId, @jid, @lid, @phone, @displayName, @pushName,
+               @verifiedName, @firstSeenAt, @updatedAt, @rawJson)
      on conflict (account_id, jid) do update set
-       lid = coalesce(excluded.lid, participants.lid),
-       phone = coalesce(excluded.phone, participants.phone),
-       display_name = coalesce(excluded.display_name, participants.display_name),
-       push_name = coalesce(excluded.push_name, participants.push_name),
-       raw_json = coalesce(excluded.raw_json, participants.raw_json),
-       updated_at = excluded.updated_at`,
+       lid = coalesce(participants.lid, excluded.lid),
+       phone = coalesce(participants.phone, excluded.phone),
+       display_name = coalesce(participants.display_name, excluded.display_name),
+       push_name = coalesce(participants.push_name, excluded.push_name),
+       verified_name = coalesce(participants.verified_name, excluded.verified_name),
+       raw_json = coalesce(participants.raw_json, excluded.raw_json),
+       first_seen_at = min(participants.first_seen_at, excluded.first_seen_at),
+       updated_at = max(participants.updated_at, excluded.updated_at)`,
   ).run({
-    accountId: input.accountId,
-    jid: input.jid,
-    lid: input.lid ?? null,
-    phone: input.phone ?? null,
-    displayName: input.displayName ?? null,
-    pushName: input.pushName ?? null,
-    rawJson: input.rawJson ?? null,
-    now,
+    accountId,
+    jid: canonicalJid,
+    lid: old.lid,
+    phone: old.phone,
+    displayName: cleanDirectoryValue(old.display_name),
+    pushName: cleanDirectoryValue(old.push_name),
+    verifiedName: cleanDirectoryValue(old.verified_name),
+    firstSeenAt: old.first_seen_at,
+    updatedAt: old.updated_at,
+    rawJson: old.raw_json,
   });
+
+  db.prepare(
+    `update messages set sender_jid = @canonical
+     where account_id = @accountId and sender_jid = @old`,
+  ).run({ accountId, old: oldJid, canonical: canonicalJid });
+  db.prepare(
+    `update messages set quoted_sender_jid = @canonical
+     where account_id = @accountId and quoted_sender_jid = @old`,
+  ).run({ accountId, old: oldJid, canonical: canonicalJid });
+
+  db.prepare(
+    `insert into group_members (
+       account_id, group_jid, participant_jid, role, is_active,
+       first_seen_at, updated_at
+     )
+     select account_id, group_jid, @canonical, role, is_active,
+            first_seen_at, updated_at
+     from group_members
+     where account_id = @accountId and participant_jid = @old
+     on conflict (account_id, group_jid, participant_jid) do update set
+       role = coalesce(group_members.role, excluded.role),
+       is_active = max(group_members.is_active, excluded.is_active),
+       first_seen_at = min(group_members.first_seen_at, excluded.first_seen_at),
+       updated_at = max(group_members.updated_at, excluded.updated_at)`,
+  ).run({ accountId, old: oldJid, canonical: canonicalJid });
+  db.prepare(
+    "delete from group_members where account_id = ? and participant_jid = ?",
+  ).run(accountId, oldJid);
+  db.prepare(
+    `update participant_aliases set canonical_jid = @canonical,
+       updated_at = @now
+     where account_id = @accountId and canonical_jid = @old`,
+  ).run({ accountId, old: oldJid, canonical: canonicalJid, now: nowSec() });
+  db.prepare("delete from participants where account_id = ? and jid = ?").run(
+    accountId,
+    oldJid,
+  );
 }
 
 export interface ParticipantRow {
@@ -298,6 +483,7 @@ export interface ParticipantRow {
   phone: string | null;
   display_name: string | null;
   push_name: string | null;
+  verified_name: string | null;
   first_seen_at: number;
   updated_at: number;
   raw_json: string | null;
@@ -309,14 +495,151 @@ export function resolveParticipantJid(
   accountId: string,
   jid: string,
 ): string {
-  if (!jid.endsWith("@lid")) return jid;
+  const normalized = normalizeJid(jid);
+  if (directoryTablesAvailable(db)) {
+    return resolveDirectoryJid(db, accountId, normalized);
+  }
   const row = db
+    .prepare<[string, string], Pick<ParticipantRow, "jid">>(
+      `select canonical_jid as jid from participant_aliases
+       where account_id = ? and alias_jid = ?`,
+    )
+    .get(accountId, normalized);
+  if (row) return row.jid;
+  if (!normalized.endsWith("@lid")) return normalized;
+  const legacy = db
     .prepare<
       [string, string],
       Pick<ParticipantRow, "jid">
     >("select jid from participants where account_id = ? and lid = ?")
-    .get(accountId, jid);
-  return row?.jid ?? jid;
+    .get(accountId, normalized);
+  return legacy?.jid ?? normalized;
+}
+
+export function listKnownParticipantJids(
+  db: Database,
+  accountId: string,
+): string[] {
+  if (directoryTablesAvailable(db)) {
+    return db
+      .prepare<[string], { jid: string }>(
+        `select canonical_jid as jid from directory_entities
+         where account_id = ? and entity_type = 'contact'
+         order by canonical_jid`,
+      )
+      .all(accountId)
+      .map((row) => row.jid);
+  }
+  return db
+    .prepare<[string], { jid: string }>(
+      `select distinct canonical_jid as jid from participant_aliases
+       where account_id = ? and canonical_jid not like '%@g.us'
+       order by canonical_jid`,
+    )
+    .all(accountId)
+    .map((row) => row.jid);
+}
+
+export interface GroupMemberInput {
+  accountId: string;
+  groupJid: string;
+  participantJid: string;
+  role?: "member" | "admin" | "superadmin" | null;
+  isActive?: boolean;
+}
+
+export interface GroupMemberRow extends ParticipantRow {
+  group_jid: string;
+  role: "member" | "admin" | "superadmin" | null;
+  is_active: number;
+}
+
+export function upsertGroupMember(db: Database, input: GroupMemberInput): void {
+  if (directoryTablesAvailable(db)) {
+    upsertDirectoryGroupMember(db, input);
+    return;
+  }
+  const participantJid = resolveParticipantJid(
+    db,
+    input.accountId,
+    normalizeJid(input.participantJid),
+  );
+  const now = nowSec();
+  db.prepare(
+    `insert into group_members (
+       account_id, group_jid, participant_jid, role, is_active,
+       first_seen_at, updated_at
+     ) values (@accountId, @groupJid, @participantJid, @role, @isActive,
+               @now, @now)
+     on conflict (account_id, group_jid, participant_jid) do update set
+       role = coalesce(excluded.role, group_members.role),
+       is_active = case when @isActiveSet = 1
+         then excluded.is_active else group_members.is_active end,
+       updated_at = excluded.updated_at`,
+  ).run({
+    accountId: input.accountId,
+    groupJid: normalizeJid(input.groupJid),
+    participantJid,
+    role: input.role ?? null,
+    isActive: input.isActive === false ? 0 : 1,
+    isActiveSet: input.isActive === undefined ? 0 : 1,
+    now,
+  });
+}
+
+export function markMissingGroupMembersInactive(
+  db: Database,
+  accountId: string,
+  groupJid: string,
+  activeJids: string[],
+): void {
+  if (directoryTablesAvailable(db)) {
+    markDirectoryMissingMembersInactive(db, accountId, groupJid, activeJids);
+    return;
+  }
+  const normalized = activeJids.map((jid) =>
+    resolveParticipantJid(db, accountId, jid),
+  );
+  if (normalized.length === 0) {
+    db.prepare(
+      `update group_members set is_active = 0, updated_at = @now
+       where account_id = @accountId and group_jid = @groupJid`,
+    ).run({ accountId, groupJid: normalizeJid(groupJid), now: nowSec() });
+    return;
+  }
+  const placeholders = normalized.map((_, index) => `@jid${index}`);
+  const params: Record<string, unknown> = {
+    accountId,
+    groupJid: normalizeJid(groupJid),
+    now: nowSec(),
+  };
+  normalized.forEach((jid, index) => {
+    params[`jid${index}`] = jid;
+  });
+  db.prepare(
+    `update group_members set is_active = 0, updated_at = @now
+     where account_id = @accountId and group_jid = @groupJid
+       and participant_jid not in (${placeholders.join(", ")})`,
+  ).run(params);
+}
+
+export function listGroupMembers(
+  db: Database,
+  accountId: string,
+  groupJid: string,
+  limit = 200,
+): GroupMemberRow[] {
+  return db
+    .prepare<[string, string, number], GroupMemberRow>(
+      `select p.*, gm.group_jid, gm.role, gm.is_active
+       from group_members gm
+       join participants p on p.account_id = gm.account_id
+         and p.jid = gm.participant_jid
+       where gm.account_id = ? and gm.group_jid = ? and gm.is_active = 1
+       order by coalesce(p.display_name, p.push_name, p.jid)
+       limit ?`,
+    )
+    .all(accountId, normalizeJid(groupJid), limit);
 }
 
 export interface MessageInput {

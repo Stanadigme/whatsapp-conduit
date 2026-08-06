@@ -2,12 +2,17 @@ import { EventEmitter } from "node:events";
 import {
   createClient,
   type ClientOptions,
+  type GroupInfo,
+  type UserInfo,
   type WhatsmeowClient,
 } from "@whatsmeow-node/whatsmeow-node";
 import type { WhatsmeowConfig } from "../config.js";
 import type {
+  DirectoryReadTransport,
   ObserveTransport,
   TransportConnectedEvent,
+  TransportGroupInfoEvent,
+  TransportGroupJoinedEvent,
   TransportMessageEvent,
 } from "../transport/types.js";
 
@@ -19,13 +24,13 @@ export interface WhatsmeowTransportOptions {
 /**
  * Observe-only Node adapter for the whatsmeow Go client.
  *
- * Deliberately exposes only connection and inbound-message events. Sending,
- * read receipts, presence, history requests and administration are not part
- * of this class.
+ * Deliberately exposes only connection, inbound-message and directory metadata
+ * events. Sending, read receipts, presence, history requests and
+ * administration are not part of this class.
  */
 export class WhatsmeowTransport
   extends EventEmitter
-  implements ObserveTransport
+  implements ObserveTransport, DirectoryReadTransport
 {
   private readonly client: WhatsmeowClient;
   private initialized = false;
@@ -48,6 +53,12 @@ export class WhatsmeowTransport
     this.client.on("message", (data) =>
       this.emit("message", data as TransportMessageEvent),
     );
+    this.client.on("group:info", (data) =>
+      this.emit("group:info", data as TransportGroupInfoEvent),
+    );
+    this.client.on("group:joined", (data) =>
+      this.emit("group:joined", data as TransportGroupJoinedEvent),
+    );
     this.client.on("error", (error) => this.emit("error", error));
   }
 
@@ -59,6 +70,14 @@ export class WhatsmeowTransport
   override on(
     event: "message",
     listener: (data: TransportMessageEvent) => void,
+  ): this;
+  override on(
+    event: "group:info",
+    listener: (data: TransportGroupInfoEvent) => void,
+  ): this;
+  override on(
+    event: "group:joined",
+    listener: (data: TransportGroupJoinedEvent) => void,
   ): this;
   override on(event: "error", listener: (error: Error) => void): this;
   override on(event: string, listener: (...args: never[]) => void): this {
@@ -81,6 +100,22 @@ export class WhatsmeowTransport
     this.started = false;
     await this.client.disconnect().catch(() => undefined);
     this.client.close();
+  }
+
+  /** Read-only directory metadata operations. */
+  async getJoinedGroups(): Promise<GroupInfo[]> {
+    if (!this.started) throw new Error("whatsmeow transport is not started");
+    return this.client.getJoinedGroups();
+  }
+
+  async getGroupInfo(jid: string): Promise<GroupInfo> {
+    if (!this.started) throw new Error("whatsmeow transport is not started");
+    return this.client.getGroupInfo(jid);
+  }
+
+  async getUserInfo(jids: string[]): Promise<Record<string, UserInfo>> {
+    if (!this.started) throw new Error("whatsmeow transport is not started");
+    return this.client.getUserInfo(jids);
   }
 
   /** Download a media payload only for the explicit local media worker. */
@@ -106,6 +141,11 @@ export class WhatsmeowTransport
   override emit(event: "connected", data: TransportConnectedEvent): boolean;
   override emit(event: "disconnected"): boolean;
   override emit(event: "message", data: TransportMessageEvent): boolean;
+  override emit(event: "group:info", data: TransportGroupInfoEvent): boolean;
+  override emit(
+    event: "group:joined",
+    data: TransportGroupJoinedEvent,
+  ): boolean;
   override emit(event: "error", error: Error): boolean;
   override emit(event: string, ...args: unknown[]): boolean {
     return super.emit(event, ...args);

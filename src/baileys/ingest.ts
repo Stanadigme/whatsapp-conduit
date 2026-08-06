@@ -332,7 +332,13 @@ function persistStore(
       hasMedia: n.hasMedia,
       durationS: n.durationS,
       quotedMessageId: n.quotedMessageId,
-      quotedSenderJid: n.quotedSenderJid,
+      quotedSenderJid: n.quotedSenderJid
+        ? resolveParticipantJid(
+            deps.db,
+            deps.accountId,
+            n.quotedSenderJid,
+          )
+        : null,
       rawJson,
     });
   });

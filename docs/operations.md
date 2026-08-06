@@ -1,5 +1,24 @@
 # Operations
 
+## Synchroniser l’annuaire
+
+La synchronisation explicite récupère les noms et membres des groupes joints,
+puis enrichit uniquement les contacts déjà connus par l’ingestion :
+
+```bash
+whatsapp-conduit directory sync --groups --json
+```
+
+Cette commande ne synchronise pas l’historique et ne lit ni ne persiste le
+contenu des messages. Les groupes restent invisibles dans MCP tant qu’ils ne
+sont pas explicitement autorisés.
+
+`--contacts` limite l’opération aux JID déjà connus ; `--jid <jid>` cible un
+groupe ou un contact connu et peut être combiné avec `--json`. Sans sélecteur,
+les groupes joints et les contacts connus sont traités. Les événements live
+appliquent uniquement les métadonnées reçues et n’appellent aucun
+rafraîchissement réseau.
+
 Day-to-day running of `whatsapp-conduit`.
 
 ## First-run flow

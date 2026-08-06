@@ -8,6 +8,7 @@ import { openDb } from "../db/index.js";
 import { upsertAccount } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
 import { registerWhatsmeowIngestion } from "../whatsmeow/ingest.js";
+import { DirectorySync } from "../whatsmeow/directory.js";
 import { WhatsmeowTransport } from "../whatsmeow/transport.js";
 import { RuntimeStatusWriter } from "../runtime-status.js";
 
@@ -144,6 +145,13 @@ async function runWhatsmeow(
     store: config.paths.whatsmeowStore,
     config: config.whatsmeow,
   });
+  const directory = new DirectorySync({
+    db,
+    accountId: config.account.name,
+    logger: log,
+    transport,
+  });
+  directory.register();
   const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
     transport: "whatsmeow",
     connection: "disconnected",

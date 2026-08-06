@@ -10,6 +10,24 @@ clobber known values (`COALESCE` / provided-flag guards).
 
 ## Tables
 
+### Annuaire (`directory_entities`, `directory_aliases`)
+
+La migration additive `0005_directory_entities.sql` fait de ces tables la
+source de vérité des contacts et groupes. `directory_entities` conserve le JID
+canonique, le nom, `display_name`, `push_name`, `verified_name`, la source du
+nom et `last_synced_at`. `directory_aliases` mappe chaque JID téléphonique ou
+LID vers une seule entité. Le JID téléphonique devient canonique dès qu'il est
+connu ; le LID reste un alias.
+
+### `directory_group_members`
+
+Cette table conserve les membres actifs et leur rôle (`member`, `admin` ou
+`superadmin`) avec les timestamps. Les anciennes tables d'annuaire restent
+des projections compatibles pour l'ingestion et les consommateurs existants.
+Les événements live appliquent uniquement les métadonnées reçues. Les appels
+`getJoinedGroups()`, `getGroupInfo()` et `getUserInfo()` sont réservés à la
+commande explicite `directory sync`.
+
 ### `accounts`
 One row per linked account. `id` is the configured `account.name`.
 
@@ -32,8 +50,23 @@ PK `(account_id, jid)`.
 
 ### `participants`
 PK `(account_id, jid)`. Per-sender metadata (`phone`, `display_name`,
-`push_name`, `first_seen_at`). `lid` is indexed and links the opaque WhatsApp
-identity (`@lid`) to the canonical phone JID in both directions.
+`push_name`, `verified_name`, `first_seen_at`). `lid` is indexed and links the
+opaque WhatsApp identity (`@lid`) to the canonical phone JID. The
+`participant_aliases` table is the authoritative bidirectional JID/LID map and
+prevents one contact from being represented by two participant rows.
+
+### `participant_aliases`
+
+PK `(account_id, alias_jid)`. Each known phone JID or LID points to exactly one
+canonical `participants.jid`. Existing participant/message references are
+merged when a phone JID becomes known.
+
+### `group_members`
+
+PK `(account_id, group_jid, participant_jid)`. Stores the latest known active
+state and role (`member`, `admin`, `superadmin`) for group members. Partial
+events may update membership without replacing an already-known role; full
+group snapshots reconcile inactive members.
 
 ### `messages`
 PK `(account_id, chat_jid, message_id)`. Normalized common columns plus

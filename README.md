@@ -12,6 +12,10 @@ It is **not** a browser automation harness.
 
 It is the boring, auditable ingestion layer that other tools can safely build on top of.
 
+Directory metadata is synchronized only by the explicit read-only command
+`whatsapp-conduit directory sync [--groups] [--contacts] [--jid <jid>]
+[--json]`. The daemon never performs an automatic directory refresh.
+
 ---
 
 ## Name brainstorm
@@ -1148,8 +1152,8 @@ whatsapp-conduit run
 See [`docs/operations.md`](docs/operations.md),
 [`docs/security.md`](docs/security.md), and [`docs/schema.md`](docs/schema.md).
 
-Implemented commands: `doctor`, `init`, `link`, `run`, `mcp`, `status`,
-`chats list|show|allow|block`, `messages list`, `export`,
+Implemented commands: `doctor`, `init`, `link`, `run`, `directory sync`, `mcp`,
+`status`, `chats list|show|allow|block`, `messages list`, `export`,
 `offsets commit|show`, `db migrate|check`, `service install|start|stop|restart|status|logs`.
 
 Current working name:

@@ -3,9 +3,17 @@ import { toExportRecord, type ExportConfig } from "../commands/export.js";
 import type {
   AttachmentRow,
   ChatRow,
+  GroupMemberRow,
   MessageRow,
   ParticipantRow,
 } from "../db/queries.js";
+import {
+  directoryTablesAvailable,
+  getDirectoryEntityByJid,
+  listDirectoryAliases,
+  listDirectoryGroupMembers,
+  type DirectoryEntityRow,
+} from "../db/directory.js";
 import {
   countAllowedChats,
   countChats,
@@ -32,6 +40,7 @@ import {
 interface ChatView {
   jid: string;
   name: string | null;
+  label: string;
   pushName: string | null;
   isGroup: boolean;
   isStatus: boolean;
@@ -70,11 +79,16 @@ function allowedChat(ctx: McpContext, chatJid: string): ChatRow {
   return row;
 }
 
-function chatView(row: ChatRow, hasAudio: boolean): ChatView {
+function chatView(
+  row: ChatRow,
+  hasAudio: boolean,
+  entity?: DirectoryEntityRow,
+): ChatView {
   return {
     jid: row.jid,
-    name: row.name,
-    pushName: row.push_name,
+    name: row.name ?? entity?.name ?? row.push_name ?? row.jid,
+    label: row.name ?? entity?.name ?? row.push_name ?? row.jid,
+    pushName: entity?.push_name ?? row.push_name,
     isGroup: row.is_group === 1,
     isStatus: row.is_status === 1,
     lastMessageTs: row.last_message_ts,
@@ -173,7 +187,15 @@ export function listChats(
     );
   const last = rows[limit - 1];
   return page(
-    rows.map((row) => chatView(row, row.has_audio === 1)),
+    rows.map((row) =>
+      chatView(
+        row,
+        row.has_audio === 1,
+        directoryTablesAvailable(ctx.db)
+          ? getDirectoryEntityByJid(ctx.db, ctx.accountId, row.jid)
+          : undefined,
+      ),
+    ),
     limit,
     last
       ? encodeCursor({ ts: last.last_message_ts ?? 0, jid: last.jid })
@@ -188,26 +210,74 @@ export function searchContacts(
 ): ParticipantRow[] {
   const limit = assertLimit(limitInput);
   if (query.trim().length < 2) throw new McpRequestError("query is too short");
+  if (directoryTablesAvailable(ctx.db)) {
+    const like = `%${query}%`;
+    return ctx.db
+      .prepare<
+        [string, string, string, string, string, string, string, number],
+        ParticipantRow
+      >(
+        `select distinct p.* from directory_entities e
+         left join participants p on p.account_id = e.account_id and p.jid = e.canonical_jid
+         where e.account_id = ? and e.entity_type = 'contact'
+           and (exists (
+             select 1 from messages m
+             join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
+             where m.account_id = e.account_id and c.is_allowed = 1 and c.is_blocked = 0
+               and (m.sender_jid = e.canonical_jid or m.quoted_sender_jid = e.canonical_jid)
+           ) or exists (
+             select 1 from directory_group_members gm
+             join directory_entities g on g.id = gm.group_entity_id
+             join chats gc on gc.account_id = g.account_id and gc.jid = g.canonical_jid
+             where gm.account_id = e.account_id and gm.member_entity_id = e.id
+               and gm.is_active = 1 and gc.is_allowed = 1 and gc.is_blocked = 0
+           ))
+           and (lower(coalesce(e.canonical_jid, '')) like lower(?)
+             or lower(coalesce(e.name, '')) like lower(?)
+             or lower(coalesce(e.display_name, '')) like lower(?)
+             or lower(coalesce(e.push_name, '')) like lower(?)
+             or lower(coalesce(e.verified_name, '')) like lower(?)
+             or exists (select 1 from directory_aliases a
+                        where a.entity_id = e.id and lower(a.alias_jid) like lower(?)))
+         order by coalesce(e.name, e.canonical_jid)
+         limit ?`,
+      )
+      .all(ctx.accountId, like, like, like, like, like, like, limit);
+  }
   return ctx.db
-    .prepare<[string, string, string, string, string, number], ParticipantRow>(
+    .prepare<
+      [string, string, string, string, string, string, number],
+      ParticipantRow
+    >(
       `select distinct p.* from participants p
        where p.account_id = ?
-         and exists (
+         and (exists (
            select 1 from messages m
            join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
            where m.account_id = p.account_id
              and c.is_allowed = 1 and c.is_blocked = 0
-             and (m.sender_jid = p.jid or m.quoted_sender_jid = p.jid)
-         )
-         and (lower(coalesce(p.jid, '')) like lower(?)
-           or lower(coalesce(p.lid, '')) like lower(?)
-           or lower(coalesce(p.display_name, '')) like lower(?)
-           or lower(coalesce(p.push_name, '')) like lower(?))
+           and (m.sender_jid = p.jid or m.quoted_sender_jid = p.jid)
+           )
+         or exists (
+           select 1 from group_members gm
+           join chats gc on gc.account_id = gm.account_id
+             and gc.jid = gm.group_jid
+           where gm.account_id = p.account_id
+             and gm.participant_jid = p.jid
+             and gm.is_active = 1
+             and gc.is_allowed = 1 and gc.is_blocked = 0
+          ))
+          and (lower(coalesce(p.jid, '')) like lower(?)
+            or lower(coalesce(p.lid, '')) like lower(?)
+            or lower(coalesce(p.display_name, '')) like lower(?)
+            or lower(coalesce(p.push_name, '')) like lower(?)
+            or lower(coalesce(p.verified_name, '')) like lower(?))
        order by coalesce(p.display_name, p.push_name, p.jid)
        limit ?`,
     )
     .all(
       ctx.accountId,
+      `%${query}%`,
       `%${query}%`,
       `%${query}%`,
       `%${query}%`,
@@ -220,20 +290,73 @@ export function listGroupParticipants(
   ctx: McpContext,
   chatJid: string,
   limitInput?: number,
-): ParticipantRow[] {
+): GroupMemberRow[] {
   const chat = allowedChat(ctx, chatJid);
   if (chat.is_group !== 1) throw new McpRequestError("chat is not a group");
   const limit = assertLimit(limitInput);
+  if (directoryTablesAvailable(ctx.db)) {
+    return listDirectoryGroupMembers(
+      ctx.db,
+      ctx.accountId,
+      chat.jid,
+      limit,
+    ).map((member) => {
+      const aliases = listDirectoryAliases(
+        ctx.db,
+        ctx.accountId,
+        member.member_entity_id,
+      );
+      const projection = ctx.db
+        .prepare<
+          [string, string],
+          Pick<ParticipantRow, "phone">
+        >("select phone from participants where account_id = ? and jid = ?")
+        .get(ctx.accountId, member.canonical_jid);
+      return {
+        account_id: ctx.accountId,
+        jid: member.canonical_jid,
+        lid:
+          aliases.find((alias) => alias.alias_type === "lid")?.alias_jid ??
+          null,
+        phone: projection?.phone ?? null,
+        display_name: member.display_name ?? member.name,
+        push_name: member.push_name,
+        verified_name: member.verified_name,
+        first_seen_at: member.first_seen_at,
+        updated_at: member.updated_at,
+        raw_json: member.raw_json,
+        group_jid: chat.jid,
+        role: member.role,
+        is_active: member.is_active,
+      } satisfies GroupMemberRow;
+    });
+  }
   return ctx.db
-    .prepare<[string, string, number], ParticipantRow>(
-      `select distinct p.* from participants p
-       join messages m on m.account_id = p.account_id
-         and (m.sender_jid = p.jid or m.quoted_sender_jid = p.jid)
-       where m.account_id = ? and m.chat_jid = ?
-       order by coalesce(p.display_name, p.push_name, p.jid)
+    .prepare<[string, string, string, string, string, number], GroupMemberRow>(
+      `select * from (
+         select p.*, gm.group_jid, gm.role, gm.is_active
+         from group_members gm
+         join participants p on p.account_id = gm.account_id
+           and p.jid = gm.participant_jid
+         where gm.account_id = ? and gm.group_jid = ? and gm.is_active = 1
+         union all
+         select p.*, ? as group_jid, null as role, 1 as is_active
+         from participants p
+         join messages m on m.account_id = p.account_id
+           and (m.sender_jid = p.jid or m.quoted_sender_jid = p.jid)
+         where m.account_id = ? and m.chat_jid = ?
+           and not exists (
+             select 1 from group_members gm2
+             where gm2.account_id = p.account_id
+               and gm2.group_jid = m.chat_jid
+               and gm2.participant_jid = p.jid
+               and gm2.is_active = 1
+           )
+       )
+       order by coalesce(display_name, push_name, jid)
        limit ?`,
     )
-    .all(ctx.accountId, chat.jid, limit);
+    .all(ctx.accountId, chat.jid, chat.jid, ctx.accountId, chat.jid, limit);
 }
 
 function messageRows(

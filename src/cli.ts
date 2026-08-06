@@ -8,6 +8,7 @@ import {
   runChatsList,
   runChatsShow,
 } from "./commands/chats.js";
+import { runDirectorySync } from "./commands/directory.js";
 import { runDbCheck, runDbMigrate } from "./commands/db.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runExport } from "./commands/export.js";
@@ -109,6 +110,33 @@ export function buildProgram(): Command {
     .action(async () => {
       const globals = program.opts<GlobalOptions>();
       await runRun({ configPath: globals.config });
+    });
+
+  const directory = program
+    .command("directory")
+    .description("synchronize WhatsApp contact and group metadata");
+
+  directory
+    .command("sync")
+    .description("synchronize known contacts and joined groups, metadata only")
+    .option("--groups", "synchronize joined groups")
+    .option("--contacts", "synchronize known contacts")
+    .option("--jid <jid>", "synchronize one known group or contact JID")
+    .option("--json", "emit machine-readable JSON")
+    .action(async (opts: {
+      groups?: boolean;
+      contacts?: boolean;
+      jid?: string;
+      json?: boolean;
+    }) => {
+      const globals = program.opts<GlobalOptions>();
+      await runDirectorySync({
+        configPath: globals.config,
+        groups: opts.groups,
+        contacts: opts.contacts,
+        jid: opts.jid,
+        json: opts.json,
+      });
     });
 
   program

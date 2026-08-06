@@ -7,6 +7,11 @@ import {
   setChatBlocked,
   type ChatRow,
 } from "../db/queries.js";
+import {
+  directoryTablesAvailable,
+  getDirectoryEntityByJid,
+  listDirectoryAliases,
+} from "../db/directory.js";
 import { resolveConfigPath } from "../runtime.js";
 
 export interface ChatsListOptions {
@@ -18,26 +23,42 @@ export interface ChatsListOptions {
 
 interface ChatView {
   jid: string;
-  name: string | null;
+  name: string;
   pushName: string | null;
   isGroup: boolean;
   isStatus: boolean;
   isAllowed: boolean;
   isBlocked: boolean;
   lastMessageTs: number | null;
+  aliases?: string[];
+  lastSyncedAt?: number | null;
 }
 
-function toView(row: ChatRow): ChatView {
-  return {
+function toView(
+  row: ChatRow,
+  db: Parameters<typeof getDirectoryEntityByJid>[0],
+  details = false,
+): ChatView {
+  const entity = directoryTablesAvailable(db)
+    ? getDirectoryEntityByJid(db, row.account_id, row.jid)
+    : undefined;
+  const view: ChatView = {
     jid: row.jid,
-    name: row.name,
-    pushName: row.push_name,
+    name: row.name ?? entity?.name ?? row.push_name ?? row.jid,
+    pushName: entity?.push_name ?? row.push_name,
     isGroup: row.is_group === 1,
     isStatus: row.is_status === 1,
     isAllowed: row.is_allowed === 1,
     isBlocked: row.is_blocked === 1,
     lastMessageTs: row.last_message_ts,
   };
+  if (details && entity) {
+    view.aliases = listDirectoryAliases(db, row.account_id, entity.id).map(
+      (alias) => alias.alias_jid,
+    );
+    view.lastSyncedAt = entity.last_synced_at;
+  }
+  return view;
 }
 
 function flag(row: ChatView): string {
@@ -54,7 +75,7 @@ export function runChatsList(options: ChatsListOptions = {}): void {
       accountId: config.account.name,
       allowedOnly: options.allowedOnly,
       limit: options.limit,
-    }).map(toView);
+    }).map((row) => toView(row, db));
 
     if (options.json) {
       process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
@@ -65,7 +86,7 @@ export function runChatsList(options: ChatsListOptions = {}): void {
       return;
     }
     for (const row of rows) {
-      const label = row.name ?? row.pushName ?? "(unknown)";
+      const label = row.name;
       const kind = row.isGroup ? "group" : row.isStatus ? "status" : "dm";
       process.stdout.write(
         `${flag(row).padEnd(10)} ${kind.padEnd(6)} ${row.jid}  ${label}\n`,
@@ -94,7 +115,7 @@ export function runChatsShow(
       process.stderr.write(`Chat not found: ${jid}\n`);
       return 1;
     }
-    const view = toView(row);
+    const view = toView(row, db, true);
     if (options.json) {
       process.stdout.write(`${JSON.stringify(view, null, 2)}\n`);
       return 0;
@@ -105,6 +126,8 @@ export function runChatsShow(
       `push name:  ${view.pushName ?? "—"}`,
       `kind:       ${view.isGroup ? "group" : view.isStatus ? "status" : "dm"}`,
       `policy:     ${flag(view)}`,
+      `aliases:    ${view.aliases?.join(", ") || "—"}`,
+      `synced:     ${view.lastSyncedAt ? new Date(view.lastSyncedAt * 1000).toISOString() : "—"}`,
       `last msg:   ${
         view.lastMessageTs
           ? new Date(view.lastMessageTs * 1000).toISOString()

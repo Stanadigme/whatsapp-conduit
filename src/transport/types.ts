@@ -1,4 +1,9 @@
-import type { MessageInfo } from "@whatsmeow-node/whatsmeow-node";
+import type {
+  GroupInfo,
+  GroupInfoEvent,
+  MessageInfo,
+  UserInfo,
+} from "@whatsmeow-node/whatsmeow-node";
 
 export interface TransportMessageEvent {
   info: MessageInfo;
@@ -7,6 +12,24 @@ export interface TransportMessageEvent {
 
 export interface TransportConnectedEvent {
   jid: string;
+}
+
+export type TransportGroupInfoEvent = GroupInfoEvent;
+export type TransportGroupJoinedEvent = { jid: string; name: string };
+
+export interface DirectoryReadTransport {
+  on(event: "message", listener: (data: TransportMessageEvent) => void): this;
+  on(
+    event: "group:info",
+    listener: (data: TransportGroupInfoEvent) => void,
+  ): this;
+  on(
+    event: "group:joined",
+    listener: (data: TransportGroupJoinedEvent) => void,
+  ): this;
+  getJoinedGroups(): Promise<GroupInfo[]>;
+  getGroupInfo(jid: string): Promise<GroupInfo>;
+  getUserInfo(jids: string[]): Promise<Record<string, UserInfo>>;
 }
 
 export interface ObserveTransport {
