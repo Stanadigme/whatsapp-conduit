@@ -2,7 +2,7 @@ import type { Database } from "better-sqlite3";
 import type { Config } from "../config.js";
 import { maskSecrets } from "../commands/config.js";
 import { requestHistoryStart } from "../control/ipc.js";
-import { listMessages } from "../read/messages.js";
+import { getMessage, listMessages } from "../read/messages.js";
 import { McpRequestError } from "../mcp/types.js";
 import {
   allowDashboardChat,
@@ -12,8 +12,12 @@ import {
 import {
   getActiveHistoryJob,
   getHistoryJob,
+  setTranscriptionCorrection,
   type HistoryJobRow,
 } from "../db/queries.js";
+import { findCatalogueModel } from "../stt/models.js";
+import type { ModelDownloader } from "./models.js";
+import { applySttSettings, sttHealth, sttView } from "./stt.js";
 
 export interface DashboardPairing {
   status: "disabled" | "idle" | "waiting_qr" | "connected" | "error";
@@ -24,6 +28,9 @@ export interface DashboardPairing {
 export interface DashboardContext {
   db: Database;
   config: Config;
+  /** Path of the YAML file the transcription settings are written to. */
+  configPath: string;
+  models: ModelDownloader;
   accountId: string;
   pairing: DashboardPairing;
   startPairing: () => Promise<void>;
@@ -52,6 +59,30 @@ function errorResponse(error: unknown, status = 400): Response {
 
 function decodeJid(pathPart: string): string {
   return decodeURIComponent(pathPart);
+}
+
+async function correctionBody(
+  request: Request,
+): Promise<{ textCorrected: string } | null> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) return null;
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return null;
+  }
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    Array.isArray(body) ||
+    typeof (body as Record<string, unknown>).textCorrected !== "string" ||
+    Object.keys(body).length !== 1 ||
+    !Object.prototype.hasOwnProperty.call(body, "textCorrected")
+  ) {
+    return null;
+  }
+  return { textCorrected: (body as { textCorrected: string }).textCorrected };
 }
 
 function historyView(job: HistoryJobRow): Record<string, unknown> {
@@ -91,6 +122,106 @@ export async function dashboardApi(
   }
   if (url.pathname === "/api/config" && request.method === "GET") {
     return json(maskSecrets(context.config));
+  }
+  if (url.pathname === "/api/stt" && request.method === "GET") {
+    return json(
+      await sttView({
+        db: context.db,
+        configPath: context.configPath,
+        accountId: context.accountId,
+        download: context.models.snapshot,
+      }),
+    );
+  }
+  if (url.pathname === "/api/stt" && request.method === "POST") {
+    try {
+      applySttSettings(context.configPath, url.searchParams);
+    } catch (error) {
+      // These messages are authored here and safe to show: they name the
+      // field that was refused, never the value or anything about the host.
+      return json(
+        { error: error instanceof Error ? error.message : "invalid request" },
+        400,
+      );
+    }
+    return json(
+      await sttView({
+        db: context.db,
+        configPath: context.configPath,
+        accountId: context.accountId,
+        download: context.models.snapshot,
+      }),
+    );
+  }
+  if (url.pathname === "/api/stt/check" && request.method === "POST") {
+    const health = await sttHealth(context.configPath);
+    return json({ ok: health.ok, detail: health.detail ?? null });
+  }
+  if (url.pathname === "/api/stt/models/pull" && request.method === "GET") {
+    return json(context.models.snapshot);
+  }
+  if (url.pathname === "/api/stt/models/pull" && request.method === "POST") {
+    const model = findCatalogueModel(url.searchParams.get("model") ?? "");
+    if (!model) return json({ error: "unknown model" }, 404);
+    try {
+      context.models.start(model);
+    } catch (error) {
+      return errorResponse(error, 409);
+    }
+    return json(context.models.snapshot, 202);
+  }
+  if (url.pathname.startsWith("/api/chats/") && request.method === "POST") {
+    const match =
+      /^\/api\/chats\/([^/]+)\/messages\/([^/]+)\/transcription\/correction$/.exec(
+        url.pathname,
+      );
+    if (match?.[1] && match[2]) {
+      const body = await correctionBody(request);
+      if (body === null) {
+        return json({ error: "invalid correction payload" }, 400);
+      }
+      const chatJid = decodeJid(match[1]);
+      const messageId = decodeURIComponent(match[2]);
+      try {
+        const current = getMessage(
+          { db: context.db, accountId: context.accountId },
+          chatJid,
+          messageId,
+        );
+        if (current.messageType !== "audio" || current.textRaw === null) {
+          return json({ error: "transcription not available" }, 409);
+        }
+        const written = setTranscriptionCorrection(context.db, {
+          accountId: context.accountId,
+          chatJid,
+          messageId,
+          textCorrected: body.textCorrected,
+        });
+        if (!written)
+          return json({ error: "transcription not available" }, 409);
+        return json(
+          getMessage(
+            { db: context.db, accountId: context.accountId },
+            chatJid,
+            messageId,
+          ),
+        );
+      } catch (error) {
+        if (
+          error instanceof McpRequestError &&
+          error.message === "chat is not available"
+        ) {
+          return json({ error: "not found" }, 404);
+        }
+        if (
+          error instanceof McpRequestError &&
+          error.message === "message not found"
+        ) {
+          return json({ error: "not found" }, 404);
+        }
+        return errorResponse(error, 400);
+      }
+    }
   }
   if (url.pathname === "/api/chats" && request.method === "GET") {
     return json(

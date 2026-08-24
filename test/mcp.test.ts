@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import {
+  insertTranscription,
   setChatAllowed,
   createHistoryJob,
   upsertAccount,
@@ -165,7 +166,7 @@ describe("MCP server", () => {
     db.close();
   });
 
-  it("reports unavailable transcription without inventing text", async () => {
+  it("reports a missing transcription without inventing text", async () => {
     const { client, server, db } = await connectedClient();
     const result = await client.callTool({
       name: "wa_get_transcript",
@@ -174,8 +175,64 @@ describe("MCP server", () => {
         messageId: "M1",
       },
     });
-    expect(JSON.stringify(result)).toContain('status\\":\\"unavailable');
+    // The tables exist since migration 0007, so an untranscribed message is
+    // pending rather than unsupported. Either way it never returns the written
+    // message text as if it were a transcript.
+    expect(JSON.stringify(result)).toContain('status\\":\\"pending');
     expect(JSON.stringify(result)).not.toContain("hello from allowed chat");
+    await client.close();
+    await server.close();
+    db.close();
+  });
+
+  it("returns the effective transcript and keeps raw access explicit", async () => {
+    const { client, server, db } = await connectedClient();
+    upsertMessage(db, {
+      accountId: "personal",
+      chatJid: "33600000000@s.whatsapp.net",
+      messageId: "A1",
+      senderJid: "33600000000@s.whatsapp.net",
+      timestamp: 1_700_000_003,
+      messageType: "audio",
+      hasMedia: true,
+      durationS: 6,
+    });
+    insertTranscription(db, {
+      accountId: "personal",
+      chatJid: "33600000000@s.whatsapp.net",
+      messageId: "A1",
+      textRaw: "sortie brute",
+      language: "fr",
+      engine: "whisper-local",
+      engineModel: "large-v3-turbo",
+    });
+    db.prepare(
+      "update transcriptions set text_corrected = ? where message_id = ?",
+    ).run("sortie corrigée", "A1");
+
+    const effective = await client.callTool({
+      name: "wa_get_transcript",
+      arguments: {
+        chat: "33600000000@s.whatsapp.net",
+        messageId: "A1",
+      },
+    });
+    const effectiveText = JSON.stringify(effective);
+    expect(effectiveText).toContain("sortie corrigée");
+    expect(effectiveText).not.toContain("sortie brute");
+
+    const raw = await client.callTool({
+      name: "wa_get_transcript",
+      arguments: {
+        chat: "33600000000@s.whatsapp.net",
+        messageId: "A1",
+        raw: true,
+      },
+    });
+    const rawText = JSON.stringify(raw);
+    expect(rawText).toContain("sortie brute");
+    expect(rawText).toContain("sortie corrigée");
+
     await client.close();
     await server.close();
     db.close();

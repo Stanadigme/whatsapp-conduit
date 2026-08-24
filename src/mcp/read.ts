@@ -25,14 +25,22 @@ import {
 import { loadRedactionSalt } from "../privacy/redact.js";
 import {
   allowedChat,
+  listMessages as readMessages,
+  mcpMessageView,
   messageView,
   transcriptFor,
   type MessageFilters,
-  type MessageView,
+  type McpMessageView,
 } from "../read/messages.js";
 import { nowSec } from "../util/time.js";
 
-export { listMessages } from "../read/messages.js";
+export function listMessages(
+  ctx: McpContext,
+  filters: MessageFilters,
+): Page<McpMessageView> {
+  const result = readMessages(ctx, filters);
+  return { ...result, items: result.items.map(mcpMessageView) };
+}
 import {
   assertLimit,
   assertWindow,
@@ -286,7 +294,11 @@ export function messageContext(
   messageId: string,
   before: number,
   after: number,
-): { before: MessageView[]; message: MessageView; after: MessageView[] } {
+): {
+  before: McpMessageView[];
+  message: McpMessageView;
+  after: McpMessageView[];
+} {
   allowedChat(ctx, chatJid);
   const center = ctx.db
     .prepare<
@@ -315,15 +327,25 @@ export function messageContext(
     before: beforeRows
       .reverse()
       .map((row) =>
-        messageView(ctx, row, transcriptFor(ctx, row.chat_jid, row.message_id)),
+        mcpMessageView(
+          messageView(
+            ctx,
+            row,
+            transcriptFor(ctx, row.chat_jid, row.message_id),
+          ),
+        ),
       ),
-    message: messageView(
-      ctx,
-      center,
-      transcriptFor(ctx, center.chat_jid, center.message_id),
+    message: mcpMessageView(
+      messageView(
+        ctx,
+        center,
+        transcriptFor(ctx, center.chat_jid, center.message_id),
+      ),
     ),
     after: afterRows.map((row) =>
-      messageView(ctx, row, transcriptFor(ctx, row.chat_jid, row.message_id)),
+      mcpMessageView(
+        messageView(ctx, row, transcriptFor(ctx, row.chat_jid, row.message_id)),
+      ),
     ),
   };
 }
@@ -338,7 +360,7 @@ export function searchMessages(
   ctx: McpContext,
   query: string,
   filters: MessageFilters = {},
-): Page<MessageView & { matchedTranscript: boolean }> {
+): Page<McpMessageView & { matchedTranscript: boolean }> {
   const limit = assertLimit(filters.limit);
   if (!hasVirtualTable(ctx.db, "messages_fts")) {
     throw new McpRequestError("message search is not available yet");
@@ -360,7 +382,11 @@ export function searchMessages(
     "m.account_id = @accountId",
     "c.is_allowed = 1",
     "c.is_blocked = 0",
-    "(messages_fts match @query" +
+    // The FTS constraint goes through a rowid subquery rather than a direct
+    // `messages_fts match`: SQLite rejects MATCH inside an `or` ("unable to use
+    // function MATCH in the requested context"), which is exactly the shape the
+    // transcription branch needs.
+    "(m.rowid in (select rowid from messages_fts where messages_fts match @query)" +
       (hasTranscriptions
         ? " or lower(coalesce(t.text_raw, '')) like lower(@like) or lower(coalesce(t.text_corrected, '')) like lower(@like)"
         : "") +
@@ -411,8 +437,7 @@ export function searchMessages(
     .prepare(
       `select m.*, m.rowid as rowid,
           ${hasTranscriptions ? "(lower(coalesce(t.text_raw, '')) like lower(@like) or lower(coalesce(t.text_corrected, '')) like lower(@like))" : "0"} as matched_transcript
-       from messages_fts
-       join messages m on m.rowid = messages_fts.rowid
+       from messages m
        join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
        ${joinTranscriptions}
        where ${where.join(" and ")}
@@ -424,10 +449,8 @@ export function searchMessages(
   const last = rows[limit - 1];
   return page(
     rows.map((row) => ({
-      ...messageView(
-        ctx,
-        row,
-        transcriptFor(ctx, row.chat_jid, row.message_id),
+      ...mcpMessageView(
+        messageView(ctx, row, transcriptFor(ctx, row.chat_jid, row.message_id)),
       ),
       matchedTranscript: row.matched_transcript === 1,
     })),

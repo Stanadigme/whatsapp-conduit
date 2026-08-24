@@ -40,6 +40,34 @@ export interface MessageView {
   deletedAt: number | null;
 }
 
+/** MCP-facing message shape: one effective transcript, never both variants. */
+export type McpMessageView = Omit<MessageView, "textRaw">;
+
+export function mcpMessageView(view: MessageView): McpMessageView {
+  const { textRaw, textCorrected, ...rest } = view;
+  return {
+    ...rest,
+    textCorrected:
+      view.messageType === "audio" ? (textCorrected ?? textRaw) : textCorrected,
+  };
+}
+
+export function getMessage(
+  ctx: MessageReadContext,
+  chatJid: string,
+  messageId: string,
+): MessageView {
+  allowedChat(ctx, chatJid);
+  const row = ctx.db
+    .prepare<[string, string, string], MessageRow>(
+      `select * from messages
+       where account_id = ? and chat_jid = ? and message_id = ?`,
+    )
+    .get(ctx.accountId, chatJid, messageId);
+  if (!row) throw new McpRequestError("message not found");
+  return messageView(ctx, row, transcriptFor(ctx, chatJid, messageId));
+}
+
 export interface TranscriptRow {
   text_raw: string | null;
   text_corrected: string | null;

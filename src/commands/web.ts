@@ -6,6 +6,8 @@ import { resolveConfigPath, appLogger } from "../runtime.js";
 import { startDashboardServer } from "../dashboard/server.js";
 import { createPairingController } from "../dashboard/pairing.js";
 import { ensureDashboardToken } from "../dashboard/token.js";
+import { ModelDownloader } from "../dashboard/models.js";
+import { modelsDir } from "../stt/models.js";
 
 export interface WebOptions {
   configPath?: string;
@@ -29,7 +31,8 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
   ) {
     throw new Error("web port must be an integer between 0 and 65535");
   }
-  const loaded = loadConfig(resolveConfigPath(options.configPath));
+  const configPath = resolveConfigPath(options.configPath);
+  const loaded = loadConfig(configPath);
   const config =
     options.bind === undefined && options.port === undefined
       ? loaded
@@ -58,6 +61,8 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
   const dashboard = await startDashboardServer(config, {
     db,
     config,
+    configPath,
+    models: new ModelDownloader(modelsDir(config)),
     accountId: config.account.name,
     pairing: pairing?.state ?? { status: "disabled", qr: null, error: null },
     startPairing: async () => {

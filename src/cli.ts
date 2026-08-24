@@ -26,6 +26,7 @@ import {
   type ServiceAction,
 } from "./commands/service.js";
 import { runStatus } from "./commands/status.js";
+import { runTranscribe } from "./commands/transcribe.js";
 import { getVersion } from "./version.js";
 
 function parsePositiveInt(name: string, value: string): number {
@@ -112,6 +113,20 @@ export function buildProgram(): Command {
     .action(async () => {
       const globals = program.opts<GlobalOptions>();
       await runRun({ configPath: globals.config });
+    });
+
+  program
+    .command("transcribe")
+    .description("transcribe downloaded voice notes with the configured engine")
+    .option("--once", "run a single pass and exit instead of polling")
+    .option("--check", "report whether the engine is usable, then exit")
+    .action(async (opts: { once?: boolean; check?: boolean }) => {
+      const globals = program.opts<GlobalOptions>();
+      await runTranscribe({
+        configPath: globals.config,
+        once: opts.once,
+        check: opts.check,
+      });
     });
 
   const directory = program

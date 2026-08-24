@@ -1,0 +1,25 @@
+[Unit]
+Description=whatsapp-conduit voice-note transcription worker
+After=whatsapp-conduit.service
+Wants=whatsapp-conduit.service
+
+[Service]
+Type=simple
+# Adjust the paths to your install. For a global install, ExecStart can simply
+# be: /usr/local/bin/whatsapp-conduit --config %h/.config/whatsapp-conduit/config.yaml transcribe
+ExecStart=/usr/bin/node /opt/whatsapp-conduit/dist/cli.js --config %h/.config/whatsapp-conduit/config.yaml transcribe
+Restart=always
+RestartSec=30
+WorkingDirectory=%h/.local/share/whatsapp-conduit
+Environment=NODE_ENV=production
+
+# The worker shells out to ffmpeg and whisper-cli; make sure both are on PATH.
+# Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# Transcription is CPU- or GPU-bound for seconds at a time. Keeping it below
+# the ingestion daemon means a backlog never delays message capture.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

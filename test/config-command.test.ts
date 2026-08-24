@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -76,9 +82,9 @@ describe("config set", () => {
   });
 
   it("rejects unknown keys", () => {
-    expect(() =>
-      runConfigSet("privacy.nope", "true", { configPath }),
-    ).toThrow(/not editable/);
+    expect(() => runConfigSet("privacy.nope", "true", { configPath })).toThrow(
+      /not editable/,
+    );
   });
 
   it("rejects a known-but-non-editable key (not on the allowlist)", () => {
@@ -125,5 +131,50 @@ describe("config set", () => {
     if (process.platform !== "win32") {
       expect(statSync(configPath).mode & 0o777).toBe(0o600);
     }
+  });
+});
+
+describe("config set — transcription keys", () => {
+  it("writes the keys the dashboard owns", () => {
+    runConfigSet("stt.enabled", "true", { configPath });
+    runConfigSet("stt.language", "auto", { configPath });
+    runConfigSet("stt.whisper.model_path", "/models/ggml-base.bin", {
+      configPath,
+    });
+
+    const text = readFileSync(configPath, "utf8");
+    expect(text).toContain("enabled: true");
+    expect(text).toContain("language: auto");
+    expect(text).toContain("model_path: /models/ggml-base.bin");
+    expect(text).toContain("# Voice-note transcription.");
+  });
+
+  it("creates the stt section in a config written before it existed", () => {
+    const legacy = defaultConfigYaml(join(dir, "data")).replace(
+      /\nstt:\n(?: {2}.*\n|\n)*?(?=web:)/,
+      "\n",
+    );
+    expect(legacy).not.toContain("stt:");
+    writeFileSync(configPath, legacy, { mode: 0o600 });
+
+    runConfigSet("stt.enabled", "true", { configPath });
+
+    const text = readFileSync(configPath, "utf8");
+    expect(text).toContain("stt:");
+    expect(text).toContain("enabled: true");
+    // The rest of the file survives the insertion.
+    expect(text).toContain("observe_only: true");
+  });
+
+  it("still refuses posture keys and engine paths", () => {
+    expect(() =>
+      runConfigSet("privacy.observe_only", "false", { configPath }),
+    ).toThrow(/Refusing to set/);
+    expect(() =>
+      runConfigSet("stt.whisper.binary_path", "/tmp/evil", { configPath }),
+    ).toThrow(/not editable/);
+    const text = readFileSync(configPath, "utf8");
+    expect(text).toContain("observe_only: true");
+    expect(text).toContain("binary_path: whisper-cli");
   });
 });

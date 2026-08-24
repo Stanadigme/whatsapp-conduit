@@ -257,6 +257,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
       safeCall(ctx, maxChars, async () => {
         const result = getTranscript(ctx, args.chat, args.messageId);
         if (!args.raw && "text_raw" in result) {
+          if ("text_corrected" in result && result.text_corrected === null) {
+            result.text_corrected = result.text_raw;
+          }
           delete result.text_raw;
         }
         return result;

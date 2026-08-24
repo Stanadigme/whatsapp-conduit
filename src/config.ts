@@ -47,6 +47,29 @@ export interface WebConfig {
   tokenFile: string;
 }
 
+export type SttEngineName = "whisper-local";
+
+export interface WhisperConfig {
+  /** Command or absolute path of the whisper.cpp CLI (`whisper-cli`). */
+  binaryPath: string;
+  /** Absolute path of the ggml model file. */
+  modelPath: string;
+}
+
+export interface SttConfig {
+  enabled: boolean;
+  engine: SttEngineName;
+  language: string;
+  maxAttempts: number;
+  /**
+   * Command or absolute path of ffmpeg. Decoding Opus into the 16 kHz mono WAV
+   * every engine accepts is a worker step, not an adapter one, so it is
+   * configured once here rather than per engine.
+   */
+  ffmpegPath: string;
+  whisper: WhisperConfig;
+}
+
 export interface BaileysConfig {
   version: BaileysVersion;
   printQrInTerminal: boolean;
@@ -100,6 +123,7 @@ export interface Config {
   privacy: PrivacyConfig;
   media: MediaConfig;
   mcp: McpConfig;
+  stt: SttConfig;
   web: WebConfig;
   filters: FiltersConfig;
   exports: ExportsConfig;
@@ -162,6 +186,17 @@ function asLogLevel(value: unknown, fallback: LogLevel): LogLevel {
     : fallback;
 }
 
+function asSttEngine(value: unknown): SttEngineName {
+  if (value === undefined || value === null || value === "")
+    return "whisper-local";
+  if (value !== "whisper-local") {
+    throw new Error(
+      `Invalid stt.engine: unknown engine "${String(value)}" (known: whisper-local).`,
+    );
+  }
+  return value;
+}
+
 function asTransport(value: unknown): TransportName {
   return value === "baileys" ? "baileys" : "whatsmeow";
 }
@@ -221,6 +256,8 @@ export function resolveConfig(
   const privacyRaw = section(raw, "privacy");
   const mediaRaw = section(raw, "media");
   const mcpRaw = section(raw, "mcp");
+  const sttRaw = section(raw, "stt");
+  const whisperRaw = section(sttRaw, "whisper");
   const webRaw = section(raw, "web");
   const filtersRaw = section(raw, "filters");
   const exportsRaw = section(raw, "exports");
@@ -297,6 +334,23 @@ export function resolveConfig(
     account.description = description;
   }
 
+  const stt: SttConfig = {
+    enabled: asBool(sttRaw.enabled, false),
+    engine: asSttEngine(sttRaw.engine),
+    language: asString(sttRaw.language, "fr"),
+    maxAttempts: asPositiveInt(sttRaw.max_attempts, 3),
+    ffmpegPath: asString(sttRaw.ffmpeg_path, "ffmpeg"),
+    whisper: {
+      // Left as a bare command by default so it resolves through PATH.
+      binaryPath: asString(whisperRaw.binary_path, "whisper-cli"),
+      modelPath: resolvePath(
+        dataDir,
+        whisperRaw.model_path,
+        join(dataDir, "models", "ggml-large-v3-turbo.bin"),
+      ),
+    },
+  };
+
   const web: WebConfig = {
     enabled: asBool(webRaw.enabled, false),
     host: asLoopbackHost(webRaw.host),
@@ -332,6 +386,7 @@ export function resolveConfig(
         12_000,
       ),
     },
+    stt,
     web,
     filters: {
       allowedChats: asStringArray(filtersRaw.allowed_chats),
@@ -420,6 +475,18 @@ media:
 
 mcp:
   max_result_chars: 12000
+
+stt:
+  # Voice-note transcription. Nothing runs until this is explicitly enabled and
+  # the transcribe command is started.
+  enabled: false
+  engine: whisper-local
+  language: fr
+  max_attempts: 3
+  ffmpeg_path: ffmpeg
+  whisper:
+    binary_path: whisper-cli
+    model_path: ${join(dataDir, "models", "ggml-large-v3-turbo.bin")}
 
 web:
   # The dashboard is local-only and disabled unless explicitly enabled.

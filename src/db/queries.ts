@@ -1238,3 +1238,303 @@ export function setConsumerOffset(
     now: nowSec(),
   });
 }
+
+export type TranscriptionJobStatus =
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  | "skipped";
+
+export interface TranscriptionCandidateRow {
+  chat_jid: string;
+  message_id: string;
+  duration_s: number | null;
+  file_path: string;
+  sha256: string | null;
+  attempts: number;
+}
+
+export interface ListTranscriptionCandidatesOptions {
+  accountId: string;
+  maxAttempts: number;
+  limit: number;
+}
+
+/**
+ * Downloaded voice notes in allowed chats that have no transcription yet.
+ *
+ * A job left `running` by a crashed worker is picked up again; `attempts` is
+ * what stops a poison message from looping forever. Single-worker by design:
+ * two concurrent workers would both claim the same row.
+ */
+export function listTranscriptionCandidates(
+  db: Database,
+  options: ListTranscriptionCandidatesOptions,
+): TranscriptionCandidateRow[] {
+  return db
+    .prepare<unknown[], TranscriptionCandidateRow>(
+      `select m.chat_jid, m.message_id, m.duration_s, a.file_path, a.sha256,
+              coalesce(j.attempts, 0) as attempts
+       from messages m
+       join attachments a
+         on a.account_id = m.account_id
+        and a.chat_jid = m.chat_jid
+        and a.message_id = m.message_id
+       join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
+       left join transcriptions t
+         on t.account_id = m.account_id
+        and t.chat_jid = m.chat_jid
+        and t.message_id = m.message_id
+       left join transcription_jobs j
+         on j.account_id = m.account_id
+        and j.chat_jid = m.chat_jid
+        and j.message_id = m.message_id
+       where m.account_id = @accountId
+         and m.message_type = 'audio'
+         and m.deleted_at is null
+         and c.is_allowed = 1
+         and c.is_blocked = 0
+         and a.downloaded_at is not null
+         and a.file_path is not null
+         and t.message_id is null
+         and (j.id is null
+              or (j.status in ('pending', 'running', 'failed')
+                  and j.attempts < @maxAttempts))
+       order by m.timestamp desc
+       limit @limit`,
+    )
+    .all({
+      accountId: options.accountId,
+      maxAttempts: options.maxAttempts,
+      limit: options.limit,
+    });
+}
+
+export interface TranscriptionJobInput {
+  accountId: string;
+  chatJid: string;
+  messageId: string;
+  status: TranscriptionJobStatus;
+  reason?: string | null;
+  attempts: number;
+}
+
+export function upsertTranscriptionJob(
+  db: Database,
+  input: TranscriptionJobInput,
+): void {
+  const now = nowSec();
+  db.prepare(
+    `insert into transcription_jobs
+       (account_id, chat_jid, message_id, status, reason, attempts,
+        target_lexicon_version, created_at, updated_at)
+     values (@accountId, @chatJid, @messageId, @status, @reason, @attempts,
+             0, @now, @now)
+     on conflict (account_id, chat_jid, message_id) do update set
+       status = excluded.status,
+       reason = excluded.reason,
+       attempts = excluded.attempts,
+       updated_at = excluded.updated_at`,
+  ).run({
+    accountId: input.accountId,
+    chatJid: input.chatJid,
+    messageId: input.messageId,
+    status: input.status,
+    reason: input.reason ?? null,
+    attempts: input.attempts,
+    now,
+  });
+}
+
+export interface TranscriptionJobRow {
+  id: number;
+  account_id: string;
+  chat_jid: string;
+  message_id: string;
+  status: TranscriptionJobStatus;
+  reason: string | null;
+  attempts: number;
+  target_lexicon_version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export function getTranscriptionJob(
+  db: Database,
+  accountId: string,
+  chatJid: string,
+  messageId: string,
+): TranscriptionJobRow | undefined {
+  return db
+    .prepare<
+      [string, string, string],
+      TranscriptionJobRow
+    >(`select * from transcription_jobs where account_id = ? and chat_jid = ? and message_id = ?`)
+    .get(accountId, chatJid, messageId);
+}
+
+export interface TranscriptionInput {
+  accountId: string;
+  chatJid: string;
+  messageId: string;
+  audioSha256?: string | null;
+  textRaw: string;
+  language?: string | null;
+  confidence?: number | null;
+  engine: string;
+  engineModel?: string | null;
+  durationS?: number | null;
+  costUsd?: number | null;
+  rawJson?: string | null;
+}
+
+export interface TranscriptionCorrectionInput {
+  accountId: string;
+  chatJid: string;
+  messageId: string;
+  textCorrected: string;
+}
+
+/**
+ * Save a manual correction without ever touching the engine output.
+ *
+ * An empty string is intentional: it is different from NULL and therefore
+ * remains the effective transcript for consumers that choose the corrected
+ * value when present.
+ */
+export function setTranscriptionCorrection(
+  db: Database,
+  input: TranscriptionCorrectionInput,
+): boolean {
+  const result = db
+    .prepare(
+      `update transcriptions
+       set text_corrected = @textCorrected
+       where account_id = @accountId
+         and chat_jid = @chatJid
+         and message_id = @messageId
+         and text_raw is not null`,
+    )
+    .run(input);
+  return result.changes > 0;
+}
+
+/**
+ * Write a transcription.
+ *
+ * `do nothing` on conflict, never `do update`: `text_raw` is the original
+ * signal and is never overwritten (invariant 8). Returns false when a
+ * transcription already existed.
+ */
+export function insertTranscription(
+  db: Database,
+  input: TranscriptionInput,
+): boolean {
+  const result = db
+    .prepare(
+      `insert into transcriptions
+         (account_id, chat_jid, message_id, audio_sha256, text_raw,
+          text_corrected, language, confidence, engine, engine_model,
+          lexicon_version, duration_s, cost_usd, transcribed_at, raw_json)
+       values (@accountId, @chatJid, @messageId, @audioSha256, @textRaw,
+               null, @language, @confidence, @engine, @engineModel,
+               0, @durationS, @costUsd, @now, @rawJson)
+       on conflict (account_id, chat_jid, message_id) do nothing`,
+    )
+    .run({
+      accountId: input.accountId,
+      chatJid: input.chatJid,
+      messageId: input.messageId,
+      audioSha256: input.audioSha256 ?? null,
+      textRaw: input.textRaw,
+      language: input.language ?? null,
+      confidence: input.confidence ?? null,
+      engine: input.engine,
+      engineModel: input.engineModel ?? null,
+      durationS: input.durationS ?? null,
+      costUsd: input.costUsd ?? null,
+      now: nowSec(),
+      rawJson: input.rawJson ?? null,
+    });
+  return result.changes > 0;
+}
+
+export interface TranscriptionQueueCounts {
+  pending: number;
+  failed: number;
+}
+
+/**
+ * Queue summary for the dashboard: voice notes still waiting, and jobs that
+ * exhausted their attempts. Mirrors the predicate of
+ * {@link listTranscriptionCandidates} so the two never disagree.
+ */
+export function countTranscriptionQueue(
+  db: Database,
+  accountId: string,
+  maxAttempts: number,
+): TranscriptionQueueCounts {
+  const pending = db
+    .prepare<unknown[], { count: number }>(
+      `select count(*) as count
+       from messages m
+       join attachments a
+         on a.account_id = m.account_id
+        and a.chat_jid = m.chat_jid
+        and a.message_id = m.message_id
+       join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
+       left join transcriptions t
+         on t.account_id = m.account_id
+        and t.chat_jid = m.chat_jid
+        and t.message_id = m.message_id
+       left join transcription_jobs j
+         on j.account_id = m.account_id
+        and j.chat_jid = m.chat_jid
+        and j.message_id = m.message_id
+       where m.account_id = @accountId
+         and m.message_type = 'audio'
+         and m.deleted_at is null
+         and c.is_allowed = 1
+         and c.is_blocked = 0
+         and a.downloaded_at is not null
+         and a.file_path is not null
+         and t.message_id is null
+         and (j.id is null
+              or (j.status in ('pending', 'running', 'failed')
+                  and j.attempts < @maxAttempts))`,
+    )
+    .get({ accountId, maxAttempts })?.count;
+  const failed = db
+    .prepare<
+      [string],
+      { count: number }
+    >("select count(*) as count from transcription_jobs where account_id = ? and status = 'failed'")
+    .get(accountId)?.count;
+  return { pending: pending ?? 0, failed: failed ?? 0 };
+}
+
+export interface TranscriptionFailureRow {
+  chat_jid: string;
+  message_id: string;
+  reason: string | null;
+  attempts: number;
+  updated_at: number;
+}
+
+/** Most recent failures, for the dashboard's advanced section. */
+export function listTranscriptionFailures(
+  db: Database,
+  accountId: string,
+  limit: number,
+): TranscriptionFailureRow[] {
+  return db
+    .prepare<[string, number], TranscriptionFailureRow>(
+      `select chat_jid, message_id, reason, attempts, updated_at
+       from transcription_jobs
+       where account_id = ? and status = 'failed'
+       order by updated_at desc
+       limit ?`,
+    )
+    .all(accountId, limit);
+}

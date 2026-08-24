@@ -100,6 +100,11 @@ const EDITABLE_KEYS = new Set<string>([
   "media.max_audio_bytes",
   "media.max_attempts",
   "mcp.max_result_chars",
+  // Transcription settings the local dashboard may write (ADR-0017). Engine
+  // paths stay out: they are install-time facts, not user settings.
+  "stt.enabled",
+  "stt.language",
+  "stt.whisper.model_path",
   "web.enabled",
   "web.port",
   "exports.redact_phone_numbers",
@@ -150,11 +155,15 @@ export interface ConfigSetOptions {
  * {@link EDITABLE_KEYS} allowlist may be written; posture-weakening keys are
  * refused by name (see {@link REFUSED_KEYS}) before anything touches disk.
  * Chat filters are lists managed via `chats allow`/`chats block`, not here.
+ *
+ * This is the single write path for the config file: every caller goes through
+ * it, the dashboard included, so the allowlist and the refusals cannot be
+ * sidestepped by a second writer.
  */
-export function runConfigSet(
+export function setConfigValue(
   key: string,
   rawValue: string,
-  options: ConfigSetOptions = {},
+  configPath: string,
 ): void {
   const refusal = REFUSED_KEYS.get(key);
   if (refusal) {
@@ -171,7 +180,6 @@ export function runConfigSet(
     );
   }
 
-  const configPath = options.configPath ?? defaultConfigPath();
   const doc = parseDocument(readFileSync(configPath, "utf8"));
   if (doc.errors.length > 0) {
     const first = doc.errors[0];
@@ -189,7 +197,17 @@ export function runConfigSet(
 
   // String(doc) re-serializes with the original comments preserved.
   atomicWrite(configPath, String(doc));
+}
 
+/** CLI wrapper: write the value, then report it with secrets masked. */
+export function runConfigSet(
+  key: string,
+  rawValue: string,
+  options: ConfigSetOptions = {},
+): void {
+  const configPath = options.configPath ?? defaultConfigPath();
+  setConfigValue(key, rawValue, configPath);
+  const path = key.split(".");
   const shown = isSecretKey(path[path.length - 1] ?? "")
     ? "***"
     : String(coerce(rawValue));

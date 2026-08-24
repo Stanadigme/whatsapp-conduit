@@ -13,6 +13,7 @@ import {
 import { HistoryControlServer } from "../src/control/ipc.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import { ensureDashboardToken } from "../src/dashboard/token.js";
+import { ModelDownloader } from "../src/dashboard/models.js";
 
 const accountId = "personal";
 const chatJid = "120363000000000@g.us";
@@ -42,6 +43,8 @@ describe("local dashboard HTTP API", () => {
     const dashboard = await createDashboardServer(config, {
       db,
       config,
+      configPath: join(dir, "config.yaml"),
+      models: new ModelDownloader(join(dir, "models")),
       accountId,
       pairing: { status: "idle", qr: null, error: null },
       startPairing: async () => undefined,
@@ -128,6 +131,8 @@ describe("local dashboard HTTP API", () => {
     const dashboard = await createDashboardServer(config, {
       db,
       config,
+      configPath: join(dir, "config.yaml"),
+      models: new ModelDownloader(join(dir, "models")),
       accountId,
       pairing: { status: "idle", qr: null, error: null },
       startPairing: async () => undefined,
@@ -204,6 +209,8 @@ describe("local dashboard HTTP API", () => {
     const dashboard = await createDashboardServer(config, {
       db,
       config,
+      configPath: join(dir, "config.yaml"),
+      models: new ModelDownloader(join(dir, "models")),
       accountId,
       pairing: { status: "idle", qr: null, error: null },
       startPairing: async () => undefined,
