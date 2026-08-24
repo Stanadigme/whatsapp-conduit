@@ -14,6 +14,9 @@ import type {
   TransportGroupInfoEvent,
   TransportGroupJoinedEvent,
   TransportMessageEvent,
+  HistoryAnchor,
+  HistoryTransport,
+  TransportHistorySyncEvent,
 } from "../transport/types.js";
 
 export interface WhatsmeowTransportOptions {
@@ -25,12 +28,13 @@ export interface WhatsmeowTransportOptions {
  * Observe-only Node adapter for the whatsmeow Go client.
  *
  * Deliberately exposes only connection, inbound-message and directory metadata
- * events. Sending, read receipts, presence, history requests and
- * administration are not part of this class.
+ * events. The sole protocol-level exception is requestHistory, which asks the
+ * user's primary device for older messages and never sends a user-visible
+ * message.
  */
 export class WhatsmeowTransport
   extends EventEmitter
-  implements ObserveTransport, DirectoryReadTransport
+  implements ObserveTransport, DirectoryReadTransport, HistoryTransport
 {
   private readonly client: WhatsmeowClient;
   private initialized = false;
@@ -53,6 +57,9 @@ export class WhatsmeowTransport
     this.client.on("message", (data) =>
       this.emit("message", data as TransportMessageEvent),
     );
+    this.client.on("history_sync", (data) =>
+      this.emit("history_sync", data as TransportHistorySyncEvent),
+    );
     this.client.on("group:info", (data) =>
       this.emit("group:info", data as TransportGroupInfoEvent),
     );
@@ -70,6 +77,10 @@ export class WhatsmeowTransport
   override on(
     event: "message",
     listener: (data: TransportMessageEvent) => void,
+  ): this;
+  override on(
+    event: "history_sync",
+    listener: (data: TransportHistorySyncEvent) => void,
   ): this;
   override on(
     event: "group:info",
@@ -124,6 +135,16 @@ export class WhatsmeowTransport
     return this.client.downloadAny(message);
   }
 
+  /** Request one bounded batch of older messages from the primary device. */
+  async requestHistory(anchor: HistoryAnchor, count: number): Promise<void> {
+    if (!this.started) throw new Error("whatsmeow transport is not started");
+    if (!Number.isInteger(count) || count < 1 || count > 50) {
+      throw new Error("history batch count must be between 1 and 50");
+    }
+    const request = await this.client.buildHistorySyncRequest(anchor, count);
+    await this.client.sendPeerMessage(request);
+  }
+
   /** Prepare an explicit interactive QR pairing session for the link command. */
   async startPairing(onQr: (code: string) => void): Promise<void> {
     if (this.started) return;
@@ -141,6 +162,10 @@ export class WhatsmeowTransport
   override emit(event: "connected", data: TransportConnectedEvent): boolean;
   override emit(event: "disconnected"): boolean;
   override emit(event: "message", data: TransportMessageEvent): boolean;
+  override emit(
+    event: "history_sync",
+    data: TransportHistorySyncEvent,
+  ): boolean;
   override emit(event: "group:info", data: TransportGroupInfoEvent): boolean;
   override emit(
     event: "group:joined",

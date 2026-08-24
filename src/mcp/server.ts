@@ -1,6 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readRuntimeStatus } from "../runtime-status.js";
+import { requestHistoryStart } from "../control/ipc.js";
+import { historyStatus, startHistoryDownload } from "./history.js";
 import {
   chatStats,
   exportMessages,
@@ -21,6 +23,12 @@ const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
   openWorldHint: false,
+};
+
+const historyControlAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  openWorldHint: true,
 };
 
 const pageInput = {
@@ -107,6 +115,36 @@ export function createMcpServer(ctx: McpContext): McpServer {
       annotations: readOnlyAnnotations,
     },
     async () => safeCall(ctx, maxChars, () => health(ctx)),
+  );
+
+  server.registerTool(
+    "wa_history_download",
+    {
+      title: "Download WhatsApp history",
+      description:
+        "Start a bounded history synchronization for one allowed chat. Poll wa_history_status for progress.",
+      inputSchema: z.object({
+        chat: z.string().min(1),
+        since: z.number().int().nonnegative(),
+      }),
+      annotations: historyControlAnnotations,
+    },
+    async (args) =>
+      safeCall(ctx, maxChars, () =>
+        startHistoryDownload(ctx, args.chat, args.since),
+      ),
+  );
+
+  server.registerTool(
+    "wa_history_status",
+    {
+      title: "History download status",
+      description: "Return durable progress for a history synchronization job.",
+      inputSchema: z.object({ jobId: z.string().min(1) }),
+      annotations: readOnlyAnnotations,
+    },
+    async (args) =>
+      safeCall(ctx, maxChars, () => historyStatus(ctx, args.jobId)),
   );
 
   server.registerTool(
@@ -279,5 +317,13 @@ export async function createMcpContext(
     config,
     accountId: config.account.name,
     runtimeStatus: await readRuntimeStatus(config.paths.runtimeStatus),
+    historyControl: (chat, since) =>
+      requestHistoryStart(config.paths.controlSocket, { chat, since }).then(
+        (result) => ({
+          jobId: result.jobId ?? "",
+          status: result.status ?? "queued",
+          reused: result.reused ?? false,
+        }),
+      ),
   };
 }

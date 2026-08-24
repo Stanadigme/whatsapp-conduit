@@ -8,6 +8,8 @@ import {
   runChatsList,
   runChatsShow,
 } from "./commands/chats.js";
+import { runConfigSet, runConfigShow } from "./commands/config.js";
+import { runWeb } from "./commands/web.js";
 import { runDirectorySync } from "./commands/directory.js";
 import { runDbCheck, runDbMigrate } from "./commands/db.js";
 import { runDoctor } from "./commands/doctor.js";
@@ -123,21 +125,23 @@ export function buildProgram(): Command {
     .option("--contacts", "synchronize known contacts")
     .option("--jid <jid>", "synchronize one known group or contact JID")
     .option("--json", "emit machine-readable JSON")
-    .action(async (opts: {
-      groups?: boolean;
-      contacts?: boolean;
-      jid?: string;
-      json?: boolean;
-    }) => {
-      const globals = program.opts<GlobalOptions>();
-      await runDirectorySync({
-        configPath: globals.config,
-        groups: opts.groups,
-        contacts: opts.contacts,
-        jid: opts.jid,
-        json: opts.json,
-      });
-    });
+    .action(
+      async (opts: {
+        groups?: boolean;
+        contacts?: boolean;
+        jid?: string;
+        json?: boolean;
+      }) => {
+        const globals = program.opts<GlobalOptions>();
+        await runDirectorySync({
+          configPath: globals.config,
+          groups: opts.groups,
+          contacts: opts.contacts,
+          jid: opts.jid,
+          json: opts.json,
+        });
+      },
+    );
 
   program
     .command("mcp")
@@ -355,6 +359,48 @@ export function buildProgram(): Command {
         process.exitCode = runServiceControl(action as ServiceAction);
       });
   }
+
+  const config = program
+    .command("config")
+    .description("inspect and edit the local YAML config");
+
+  config
+    .command("show")
+    .description("print the resolved config with secrets masked")
+    .option("--json", "emit machine-readable JSON")
+    .action((opts: { json?: boolean }) => {
+      const globals = program.opts<GlobalOptions>();
+      runConfigShow({ configPath: globals.config, json: opts.json });
+    });
+
+  config
+    .command("set <key> <value>")
+    .description("set one dotted config key (e.g. logging.level info)")
+    .action((key: string, value: string) => {
+      const globals = program.opts<GlobalOptions>();
+      runConfigSet(key, value, { configPath: globals.config });
+    });
+
+  program
+    .command("web")
+    .description("serve the lightweight local configuration dashboard")
+    .option("--bind <host>", "container bind host override (0.0.0.0 or ::)")
+    .option("--port <port>", "container host port override")
+    .option(
+      "--no-pairing",
+      "disable WhatsApp pairing controls in this dashboard",
+    )
+    .action(
+      async (opts: { bind?: string; port?: string; pairing?: boolean }) => {
+        const globals = program.opts<GlobalOptions>();
+        await runWeb({
+          configPath: globals.config,
+          bind: opts.bind,
+          port: opts.port === undefined ? undefined : Number(opts.port),
+          pairing: opts.pairing,
+        });
+      },
+    );
 
   const db = program.command("db").description("database maintenance commands");
 

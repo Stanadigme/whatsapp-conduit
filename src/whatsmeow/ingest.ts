@@ -1,6 +1,10 @@
 import type { IngestDeps } from "../baileys/ingest.js";
 import { ingestNormalizedResult, rawJsonOfValue } from "../baileys/ingest.js";
-import type { ObserveTransport } from "../transport/types.js";
+import type {
+  ObserveTransport,
+  TransportMessageEvent,
+} from "../transport/types.js";
+import type { IngestionEventClassification } from "../baileys/ingest.js";
 import { downloadAudioIfEnabled } from "./media.js";
 import { normalizeWhatsmeowMessage } from "./normalize.js";
 import { WhatsmeowTransport } from "./transport.js";
@@ -9,11 +13,24 @@ import { WhatsmeowTransport } from "./transport.js";
 export function registerWhatsmeowIngestion(
   transport: ObserveTransport,
   deps: IngestDeps,
-  options: { onEvent?: () => void } = {},
+  options: {
+    onEvent?: () => void;
+    classify?: (event: TransportMessageEvent) => IngestionEventClassification;
+    onStored?: (
+      event: TransportMessageEvent,
+      stored: boolean,
+      classification: IngestionEventClassification,
+    ) => void;
+  } = {},
 ): void {
   transport.on("message", (event) => {
     options.onEvent?.();
     try {
+      const classification = options.classify?.(event) ?? {
+        source: "live",
+        store: true,
+      };
+      if (!classification.store) return;
       const result = normalizeWhatsmeowMessage(event);
       if (result.action === "skip") {
         deps.logger.debug(
@@ -26,10 +43,14 @@ export function registerWhatsmeowIngestion(
         deps,
         result,
         rawJsonOfValue(deps.config, event),
+        classification.source,
       );
+      options.onStored?.(event, stored, classification);
       if (
         stored &&
         result.action === "store" &&
+        (classification.source === "live" ||
+          classification.source === "history") &&
         transport instanceof WhatsmeowTransport
       ) {
         void downloadAudioIfEnabled(

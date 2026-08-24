@@ -5,6 +5,7 @@ import { resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import {
   setChatAllowed,
+  createHistoryJob,
   upsertAccount,
   upsertChat,
   upsertGroupMember,
@@ -13,8 +14,14 @@ import {
 } from "../src/db/queries.js";
 import { createMcpContext, createMcpServer } from "../src/mcp/server.js";
 
-async function connectedClient() {
-  const config = resolveConfig({}, { dataDir: "/data" });
+async function connectedClient(
+  historyControl?: (
+    chat: string,
+    since: number,
+  ) => Promise<{ jobId: string; status: string; reused: boolean }>,
+  configOverrides: Record<string, unknown> = {},
+) {
+  const config = resolveConfig(configOverrides, { dataDir: "/data" });
   const db = openDb(":memory:", { migrate: true });
   upsertAccount(db, { id: "personal", selfJid: "33744707085@s.whatsapp.net" });
   upsertChat(db, {
@@ -79,7 +86,9 @@ async function connectedClient() {
     text: "secret hidden chat",
   });
 
-  const server = createMcpServer(await createMcpContext(db, config));
+  const context = await createMcpContext(db, config);
+  if (historyControl) context.historyControl = historyControl;
+  const server = createMcpServer(context);
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "mcp-test-client", version: "0.1.0" });
@@ -88,8 +97,8 @@ async function connectedClient() {
   return { client, server, db };
 }
 
-describe("MCP read-only server", () => {
-  it("registers only the documented read tools", async () => {
+describe("MCP server", () => {
+  it("registers read tools and bounded history controls", async () => {
     const { client, server, db } = await connectedClient();
     const tools = await client.listTools();
     const names = tools.tools.map((tool) => tool.name).sort();
@@ -103,6 +112,8 @@ describe("MCP read-only server", () => {
         "wa_get_transcript",
         "wa_group_participants",
         "wa_health",
+        "wa_history_download",
+        "wa_history_status",
         "wa_message_context",
         "wa_messages_list",
         "wa_messages_search",
@@ -165,6 +176,58 @@ describe("MCP read-only server", () => {
     });
     expect(JSON.stringify(result)).toContain('status\\":\\"unavailable');
     expect(JSON.stringify(result)).not.toContain("hello from allowed chat");
+    await client.close();
+    await server.close();
+    db.close();
+  });
+
+  it("returns durable history job progress without exposing message content", async () => {
+    const { client, server, db } = await connectedClient();
+    createHistoryJob(db, {
+      id: "job-1",
+      accountId: "personal",
+      chatJid: "33600000000@s.whatsapp.net",
+      sinceTs: 1_600_000_000,
+      untilTs: 1_700_000_000,
+    });
+    db.prepare(
+      "update history_jobs set messages_received = 4, messages_inserted = 3, progress_percent = 42",
+    ).run();
+    const result = await client.callTool({
+      name: "wa_history_status",
+      arguments: { jobId: "job-1" },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).toContain('\\"messagesReceived\\":4');
+    expect(serialized).toContain('\\"progressPercent\\":42');
+    expect(JSON.stringify(result)).not.toContain("hello from allowed chat");
+    await client.close();
+    await server.close();
+    db.close();
+  });
+
+  it("starts history only for an explicitly allowed chat", async () => {
+    const requests: Array<{ chat: string; since: number }> = [];
+    const { client, server, db } = await connectedClient(
+      async (chat, since) => {
+        if (chat !== "33600000000@s.whatsapp.net") {
+          throw new Error("chat is not available");
+        }
+        requests.push({ chat, since });
+        return { jobId: "job-allowed", status: "queued", reused: false };
+      },
+    );
+    const allowed = await client.callTool({
+      name: "wa_history_download",
+      arguments: { chat: "33600000000@s.whatsapp.net", since: 1_600_000_000 },
+    });
+    expect(JSON.stringify(allowed)).toContain("job-allowed");
+    const hidden = await client.callTool({
+      name: "wa_history_download",
+      arguments: { chat: "33600000001@s.whatsapp.net", since: 1_600_000_000 },
+    });
+    expect(hidden.isError).toBe(true);
+    expect(requests).toHaveLength(1);
     await client.close();
     await server.close();
     db.close();

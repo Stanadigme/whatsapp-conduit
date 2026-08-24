@@ -20,12 +20,18 @@ import {
   type NormalizeResult,
 } from "./normalize.js";
 import { chatAllowedAtSync, senderAllowedAtSync } from "../privacy/filters.js";
+import type { IngestionSource } from "../db/queries.js";
 
 export interface IngestDeps {
   db: Database;
   accountId: string;
   config: Config;
   logger: Logger;
+}
+
+export interface IngestionEventClassification {
+  source: IngestionSource;
+  store: boolean;
 }
 
 /** Reasons that warrant an auditable `ignored` event row (vs. bulk categories). */
@@ -182,6 +188,7 @@ export function ingestNormalizedResult(
   deps: IngestDeps,
   result: NormalizeResult,
   rawJson: string | null,
+  ingestionSource: IngestionSource = "live",
 ): boolean {
   if (result.action === "skip") return false;
 
@@ -211,7 +218,13 @@ export function ingestNormalizedResult(
   if (!senderPasses(deps, ctx.jid, resolvedSenderJid, messageId)) return false;
 
   if (result.action === "store") {
-    persistStore(deps, result.message, rawJson, resolvedSenderJid);
+    persistStore(
+      deps,
+      result.message,
+      rawJson,
+      resolvedSenderJid,
+      ingestionSource,
+    );
     return true;
   }
 
@@ -297,6 +310,7 @@ function persistStore(
   n: NormalizedMessage,
   rawJson: string | null,
   resolvedSenderJid: string | null = n.senderJid,
+  ingestionSource: IngestionSource = "live",
 ): void {
   const storeText = deps.config.privacy.storeMessageText;
   const text = storeText ? n.text : null;
@@ -333,13 +347,10 @@ function persistStore(
       durationS: n.durationS,
       quotedMessageId: n.quotedMessageId,
       quotedSenderJid: n.quotedSenderJid
-        ? resolveParticipantJid(
-            deps.db,
-            deps.accountId,
-            n.quotedSenderJid,
-          )
+        ? resolveParticipantJid(deps.db, deps.accountId, n.quotedSenderJid)
         : null,
       rawJson,
+      ingestionSource,
     });
   });
   tx();

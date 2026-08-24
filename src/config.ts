@@ -22,6 +22,7 @@ export interface PathsConfig {
   mediaDir: string;
   whatsmeowStore: string;
   runtimeStatus: string;
+  controlSocket: string;
 }
 
 export interface WhatsmeowConfig {
@@ -37,6 +38,13 @@ export interface MediaConfig {
 
 export interface McpConfig {
   maxResultChars: number;
+}
+
+export interface WebConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  tokenFile: string;
 }
 
 export interface BaileysConfig {
@@ -92,6 +100,7 @@ export interface Config {
   privacy: PrivacyConfig;
   media: MediaConfig;
   mcp: McpConfig;
+  web: WebConfig;
   filters: FiltersConfig;
   exports: ExportsConfig;
   logging: LoggingConfig;
@@ -121,6 +130,25 @@ function asPositiveInt(value: unknown, fallback: number): number {
     candidate > 0
     ? candidate
     : fallback;
+}
+
+function asPort(value: unknown, fallback: number): number {
+  const candidate =
+    typeof value === "string" && value.trim().length > 0
+      ? Number(value)
+      : value;
+  return typeof candidate === "number" &&
+    Number.isInteger(candidate) &&
+    candidate >= 0 &&
+    candidate <= 65_535
+    ? candidate
+    : fallback;
+}
+
+function asLoopbackHost(value: unknown, fallback = "127.0.0.1"): string {
+  if (value === "127.0.0.1" || value === "::1") return value;
+  if (value === undefined || value === null || value === "") return fallback;
+  throw new Error("Invalid web.host: only 127.0.0.1 and ::1 are allowed.");
 }
 
 function asStringArray(value: unknown): string[] {
@@ -193,6 +221,7 @@ export function resolveConfig(
   const privacyRaw = section(raw, "privacy");
   const mediaRaw = section(raw, "media");
   const mcpRaw = section(raw, "mcp");
+  const webRaw = section(raw, "web");
   const filtersRaw = section(raw, "filters");
   const exportsRaw = section(raw, "exports");
   const loggingRaw = section(raw, "logging");
@@ -221,6 +250,14 @@ export function resolveConfig(
       dataDir,
       pathsRaw.runtime_status,
       join(dataDir, "runtime-status.json"),
+    ),
+    controlSocket: resolvePath(
+      dataDir,
+      pathsRaw.control_socket,
+      join(
+        dataDir,
+        process.platform === "win32" ? "control.pipe" : "control.sock",
+      ),
     ),
   };
 
@@ -260,6 +297,17 @@ export function resolveConfig(
     account.description = description;
   }
 
+  const web: WebConfig = {
+    enabled: asBool(webRaw.enabled, false),
+    host: asLoopbackHost(webRaw.host),
+    port: asPort(webRaw.port, 8765),
+    tokenFile: resolvePath(
+      dataDir,
+      webRaw.token_file,
+      join(dataDir, "dashboard.token"),
+    ),
+  };
+
   return {
     transport: asTransport(transportRaw.name),
     account,
@@ -284,6 +332,7 @@ export function resolveConfig(
         12_000,
       ),
     },
+    web,
     filters: {
       allowedChats: asStringArray(filtersRaw.allowed_chats),
       blockedChats: asStringArray(filtersRaw.blocked_chats),
@@ -341,6 +390,7 @@ paths:
   media_dir: ${join(dataDir, "media")}
   whatsmeow_store: ${join(dataDir, "whatsmeow.db")}
   runtime_status: ${join(dataDir, "runtime-status.json")}
+  control_socket: ${join(dataDir, process.platform === "win32" ? "control.pipe" : "control.sock")}
 
 whatsmeow:
   # binary_path: /usr/local/bin/whatsmeow-node
@@ -370,6 +420,13 @@ media:
 
 mcp:
   max_result_chars: 12000
+
+web:
+  # The dashboard is local-only and disabled unless explicitly enabled.
+  enabled: false
+  host: 127.0.0.1
+  port: 8765
+  token_file: ${join(dataDir, "dashboard.token")}
 
 filters:
   # Empty allowlist: discover chats, but do not expose all chats to exports.

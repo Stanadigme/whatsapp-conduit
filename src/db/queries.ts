@@ -664,6 +664,201 @@ export interface MessageInput {
 
 export type IngestionSource = "live" | "history" | "backup";
 
+export type HistoryJobStatus =
+  | "queued"
+  | "waiting_connection"
+  | "running"
+  | "completed"
+  | "failed";
+
+export type HistoryJobPhase =
+  | "queued"
+  | "waiting_connection"
+  | "requesting"
+  | "ingesting"
+  | "finalizing"
+  | "done"
+  | "failed";
+
+export interface HistoryJobRow {
+  id: string;
+  account_id: string;
+  chat_jid: string;
+  since_ts: number;
+  until_ts: number;
+  status: HistoryJobStatus;
+  phase: HistoryJobPhase;
+  progress_percent: number | null;
+  anchor_sender_jid: string | null;
+  anchor_message_id: string | null;
+  anchor_timestamp: number | null;
+  oldest_seen_ts: number | null;
+  batches_requested: number;
+  batches_completed: number;
+  messages_received: number;
+  messages_inserted: number;
+  coverage_complete: number;
+  completion_reason: string | null;
+  error_code: string | null;
+  created_at: number;
+  started_at: number | null;
+  updated_at: number;
+  completed_at: number | null;
+}
+
+export interface HistoryAnchorRow {
+  chat_jid: string;
+  message_id: string;
+  sender_jid: string | null;
+  timestamp: number;
+}
+
+export interface HistoryJobInput {
+  id: string;
+  accountId: string;
+  chatJid: string;
+  sinceTs: number;
+  untilTs: number;
+  status?: HistoryJobStatus;
+  phase?: HistoryJobPhase;
+  anchorSenderJid?: string | null;
+  anchorMessageId?: string | null;
+  anchorTimestamp?: number | null;
+  completionReason?: string | null;
+}
+
+export function createHistoryJob(db: Database, input: HistoryJobInput): void {
+  const now = nowSec();
+  db.prepare(
+    `insert into history_jobs (
+       id, account_id, chat_jid, since_ts, until_ts, status, phase,
+       anchor_sender_jid, anchor_message_id, anchor_timestamp,
+       completion_reason, created_at, updated_at
+     ) values (
+       @id, @accountId, @chatJid, @sinceTs, @untilTs, @status, @phase,
+       @anchorSenderJid, @anchorMessageId, @anchorTimestamp,
+       @completionReason, @now, @now
+     )`,
+  ).run({
+    id: input.id,
+    accountId: input.accountId,
+    chatJid: input.chatJid,
+    sinceTs: input.sinceTs,
+    untilTs: input.untilTs,
+    status: input.status ?? "queued",
+    phase: input.phase ?? "queued",
+    anchorSenderJid: input.anchorSenderJid ?? null,
+    anchorMessageId: input.anchorMessageId ?? null,
+    anchorTimestamp: input.anchorTimestamp ?? null,
+    completionReason: input.completionReason ?? null,
+    now,
+  });
+}
+
+export function getHistoryJob(
+  db: Database,
+  accountId: string,
+  id: string,
+): HistoryJobRow | undefined {
+  return db
+    .prepare<
+      [string, string],
+      HistoryJobRow
+    >("select * from history_jobs where account_id = ? and id = ?")
+    .get(accountId, id);
+}
+
+export function getActiveHistoryJob(
+  db: Database,
+  accountId: string,
+): HistoryJobRow | undefined {
+  return db
+    .prepare<[string], HistoryJobRow>(
+      `select * from history_jobs
+       where account_id = ? and status in ('queued', 'waiting_connection', 'running')
+       order by created_at asc limit 1`,
+    )
+    .get(accountId);
+}
+
+export interface HistoryJobPatch {
+  status?: HistoryJobStatus;
+  phase?: HistoryJobPhase;
+  progressPercent?: number | null;
+  anchorSenderJid?: string | null;
+  anchorMessageId?: string | null;
+  anchorTimestamp?: number | null;
+  oldestSeenTs?: number | null;
+  batchesRequested?: number;
+  batchesCompleted?: number;
+  messagesReceived?: number;
+  messagesInserted?: number;
+  coverageComplete?: boolean;
+  completionReason?: string | null;
+  errorCode?: string | null;
+  startedAt?: number | null;
+  completedAt?: number | null;
+}
+
+export function updateHistoryJob(
+  db: Database,
+  accountId: string,
+  id: string,
+  patch: HistoryJobPatch,
+): void {
+  const sets: string[] = [];
+  const params: Record<string, unknown> = {
+    accountId,
+    id,
+    updatedAt: nowSec(),
+  };
+  const fields: Array<[keyof HistoryJobPatch, string]> = [
+    ["status", "status"],
+    ["phase", "phase"],
+    ["progressPercent", "progress_percent"],
+    ["anchorSenderJid", "anchor_sender_jid"],
+    ["anchorMessageId", "anchor_message_id"],
+    ["anchorTimestamp", "anchor_timestamp"],
+    ["oldestSeenTs", "oldest_seen_ts"],
+    ["batchesRequested", "batches_requested"],
+    ["batchesCompleted", "batches_completed"],
+    ["messagesReceived", "messages_received"],
+    ["messagesInserted", "messages_inserted"],
+    ["coverageComplete", "coverage_complete"],
+    ["completionReason", "completion_reason"],
+    ["errorCode", "error_code"],
+    ["startedAt", "started_at"],
+    ["completedAt", "completed_at"],
+  ];
+  for (const [inputName, column] of fields) {
+    const value = patch[inputName];
+    if (value === undefined) continue;
+    sets.push(`${column} = @${String(inputName)}`);
+    params[String(inputName)] =
+      inputName === "coverageComplete" ? (value ? 1 : 0) : value;
+  }
+  if (sets.length === 0) return;
+  sets.push("updated_at = @updatedAt");
+  db.prepare(
+    `update history_jobs set ${sets.join(", ")} where account_id = @accountId and id = @id`,
+  ).run(params);
+}
+
+export function getHistoryAnchor(
+  db: Database,
+  accountId: string,
+  chatJid: string,
+): HistoryAnchorRow | undefined {
+  return db
+    .prepare<[string, string], HistoryAnchorRow>(
+      `select chat_jid, message_id, sender_jid, timestamp
+       from messages
+       where account_id = ? and chat_jid = ? and timestamp is not null
+       order by timestamp asc, rowid asc limit 1`,
+    )
+    .get(accountId, chatJid);
+}
+
 export interface MessageRow {
   account_id: string;
   chat_jid: string;

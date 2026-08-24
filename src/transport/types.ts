@@ -5,6 +5,19 @@ import type {
   UserInfo,
 } from "@whatsmeow-node/whatsmeow-node";
 
+export interface HistoryAnchor {
+  chat: string;
+  sender: string;
+  id: string;
+  timestamp: number;
+}
+
+export interface TransportHistorySyncEvent {
+  type: string;
+  progress?: number;
+  chunkOrder?: number;
+}
+
 export interface TransportMessageEvent {
   info: MessageInfo;
   message: Record<string, unknown>;
@@ -30,6 +43,10 @@ export interface DirectoryReadTransport {
   getJoinedGroups(): Promise<GroupInfo[]>;
   getGroupInfo(jid: string): Promise<GroupInfo>;
   getUserInfo(jids: string[]): Promise<Record<string, UserInfo>>;
+}
+
+export interface HistoryTransport {
+  requestHistory(anchor: HistoryAnchor, count: number): Promise<void>;
 }
 
 export interface ObserveTransport {

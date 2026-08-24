@@ -9,6 +9,10 @@ export interface McpContext {
   config: Config;
   accountId: string;
   runtimeStatus: RuntimeStatus | null;
+  historyControl?: (
+    chat: string,
+    since: number,
+  ) => Promise<{ jobId: string; status: string; reused: boolean }>;
 }
 
 export interface Page<T> {

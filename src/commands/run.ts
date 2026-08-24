@@ -6,7 +6,10 @@ import { registerIngestion } from "../baileys/ingest.js";
 import { normalizeJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
 import { upsertAccount } from "../db/queries.js";
+import { getChat } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
+import { HistoryControlServer } from "../control/ipc.js";
+import { HistoryCoordinator } from "../history/coordinator.js";
 import { registerWhatsmeowIngestion } from "../whatsmeow/ingest.js";
 import { DirectorySync } from "../whatsmeow/directory.js";
 import { WhatsmeowTransport } from "../whatsmeow/transport.js";
@@ -145,6 +148,38 @@ async function runWhatsmeow(
     store: config.paths.whatsmeowStore,
     config: config.whatsmeow,
   });
+  const history = new HistoryCoordinator({
+    db,
+    accountId: config.account.name,
+    transport,
+    logger: log,
+  });
+  const control = new HistoryControlServer(
+    config.paths.controlSocket,
+    async (request) => {
+      const chatJid = normalizeJid(request.chat);
+      const chat = getChat(db, config.account.name, chatJid);
+      if (!chat || chat.is_blocked === 1 || chat.is_allowed !== 1) {
+        throw new Error("chat is not available");
+      }
+      if (request.since < 0 || request.since > Math.floor(Date.now() / 1000)) {
+        throw new Error("since must not be in the future");
+      }
+      const result = await history.start(chatJid, request.since);
+      return {
+        jobId: result.job.id,
+        status: result.job.status,
+        reused: result.reused,
+      };
+    },
+  );
+  try {
+    await control.start();
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+  history.recoverActive();
   const directory = new DirectorySync({
     db,
     accountId: config.account.name,
@@ -152,6 +187,24 @@ async function runWhatsmeow(
     transport,
   });
   directory.register();
+  let directorySyncInFlight: Promise<void> | null = null;
+  const refreshGroupDirectory = (): void => {
+    if (directorySyncInFlight) return;
+    directorySyncInFlight = directory
+      .sync({ groups: true, contacts: false })
+      .then((report) => {
+        log.debug(
+          { groups: report.groups, members: report.members },
+          "refreshed group directory",
+        );
+      })
+      .catch(() => {
+        log.warn("failed to refresh group directory");
+      })
+      .finally(() => {
+        directorySyncInFlight = null;
+      });
+  };
   const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
     transport: "whatsmeow",
     connection: "disconnected",
@@ -171,6 +224,9 @@ async function runWhatsmeow(
         void runtimeStatus.update({
           lastEventAt: Math.floor(Date.now() / 1000),
         }),
+      classify: (event) => history.classify(event),
+      onStored: (event, stored, classification) =>
+        history.onStored(event, stored, classification),
     },
   );
 
@@ -193,15 +249,18 @@ async function runWhatsmeow(
       shuttingDown = true;
       log.info("shutting down");
       void runtimeStatus.update({ connection: "disconnected" });
-      void transport.stop().finally(() => {
-        try {
-          db.close();
-        } catch {
-          // best-effort
-        }
-        if (code !== 0) process.exitCode = code;
-        resolve();
-      });
+      void control
+        .close()
+        .finally(() => transport.stop())
+        .finally(() => {
+          try {
+            db.close();
+          } catch {
+            // best-effort
+          }
+          if (code !== 0) process.exitCode = code;
+          resolve();
+        });
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
     };
@@ -210,6 +269,7 @@ async function runWhatsmeow(
     transport.on("connected", ({ jid }) => {
       const selfJid = normalizeJid(jid);
       upsertAccount(db, { id: config.account.name, selfJid });
+      refreshGroupDirectory();
       void runtimeStatus.update({
         connection: "connected",
         authLinked: true,

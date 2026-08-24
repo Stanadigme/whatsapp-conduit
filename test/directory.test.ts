@@ -133,6 +133,28 @@ describe("DirectorySync", () => {
     db.close();
   });
 
+  it("refreshes a renamed group in both directory and chat projections", async () => {
+    const { db, transport, directory } = setup();
+    await directory.syncJoinedGroups();
+
+    const group = transport.groups[0];
+    if (!group) throw new Error("fake group is missing");
+    group.name = "Equipe renommée";
+    await directory.sync({ groups: true, contacts: false });
+
+    expect(
+      db
+        .prepare(
+          "select name, name_source from directory_entities where canonical_jid = '120@g.us'",
+        )
+        .get(),
+    ).toEqual({ name: "Equipe renommée", name_source: "group_info" });
+    expect(
+      db.prepare("select name from chats where jid = '120@g.us'").get(),
+    ).toEqual({ name: "Equipe renommée" });
+    db.close();
+  });
+
   it("merges an LID-first contact into its phone JID without duplicates", () => {
     const { db } = setup();
     upsertParticipant(db, {

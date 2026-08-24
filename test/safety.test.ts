@@ -22,10 +22,6 @@ const FORBIDDEN: Array<{ label: string; re: RegExp }> = [
   { label: "sendReceipts", re: /\.sendReceipts\s*\(/ },
   { label: "chatModify", re: /\.chatModify\s*\(/ },
   { label: "sendPresenceUpdate", re: /\.sendPresenceUpdate\s*\(/ },
-  {
-    label: "history sync request",
-    re: /buildHistorySyncRequest|fetchAppState|history_sync/,
-  },
 ];
 
 describe("observe-only safety invariants", () => {
@@ -38,5 +34,10 @@ describe("observe-only safety invariants", () => {
       }
     }
     expect(offenders).toEqual([]);
+
+    const transport = readFileSync(`${SRC_DIR}/whatsmeow/transport.ts`, "utf8");
+    expect(transport).toContain("buildHistorySyncRequest");
+    expect(transport).toContain("sendPeerMessage");
+    expect(transport).not.toMatch(/\.sendMessage\s*\(/);
   });
 });
