@@ -9,7 +9,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ensureDashboardToken } from "../src/dashboard/token.js";
+import {
+  createDashboardSession,
+  ensureDashboardToken,
+  verifyDashboardSession,
+} from "../src/dashboard/token.js";
 
 describe("dashboard token", () => {
   it("creates and reloads an owner-only token", () => {
@@ -37,5 +41,19 @@ describe("dashboard token", () => {
     symlinkSync(target, link);
     expect(() => ensureDashboardToken(link)).toThrow(/symbolic link/);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("creates sessions that are bound to the token and expire", () => {
+    const token = "a".repeat(64);
+    const now = Date.parse("2026-08-24T12:00:00Z");
+    const session = createDashboardSession(token, now);
+
+    expect(session).not.toContain(token);
+    expect(verifyDashboardSession(token, session, now)).toBe(true);
+    expect(verifyDashboardSession("b".repeat(64), session, now)).toBe(false);
+    expect(
+      verifyDashboardSession(token, session, now + 8 * 60 * 60 * 1000),
+    ).toBe(false);
+    expect(verifyDashboardSession(token, `${session}x`, now)).toBe(false);
   });
 });

@@ -64,19 +64,40 @@ describe("local dashboard HTTP API", () => {
 
     const staticResponse = await fetch(`${base}/`);
     expect(staticResponse.status).toBe(200);
-    expect(await staticResponse.text()).toContain("Contacts et groupes");
+    const staticHtml = await staticResponse.text();
+    expect(staticHtml).toContain("Contacts et groupes");
+    expect(staticHtml).not.toContain('id="token"');
+    const setCookie = staticResponse.headers.get("set-cookie");
+    expect(setCookie).toMatch(
+      /^dashboard_session=[^;]+; Path=\/; HttpOnly; SameSite=Strict$/,
+    );
+    expect(setCookie).not.toContain(token);
+    const sessionCookie = setCookie?.split(";", 1)[0];
+    expect(sessionCookie).toBeDefined();
     expect(await (await fetch(`${base}/`)).text()).toContain(
       "Synchronisation historique",
     );
-    expect(await (await fetch(`${base}/app.js`)).text()).toContain(
-      "aucun message de cette discussion",
-    );
+    const appJs = await (await fetch(`${base}/app.js`)).text();
+    expect(appJs).toContain("same-origin");
+    expect(appJs).not.toContain("Bearer");
+    expect(appJs).not.toContain('id="token"');
+    expect(appJs).toContain("aucun message de cette discussion");
     const stylesResponse = await fetch(`${base}/styles.css`);
     expect(stylesResponse.status).toBe(200);
     expect(await stylesResponse.text()).toContain("color:#ffffff");
 
     const unauthorized = await fetch(`${base}/api/chats`);
     expect(unauthorized.status).toBe(401);
+
+    const sessionAuthorized = await fetch(`${base}/api/chats`, {
+      headers: { Cookie: sessionCookie ?? "" },
+    });
+    expect(sessionAuthorized.status).toBe(200);
+
+    const forgedSession = await fetch(`${base}/api/chats`, {
+      headers: { Cookie: `${sessionCookie}x` },
+    });
+    expect(forgedSession.status).toBe(401);
 
     const authorized = await fetch(`${base}/api/chats`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -127,10 +148,24 @@ describe("local dashboard HTTP API", () => {
       throw new Error("dashboard did not bind");
     const base = `http://127.0.0.1:${address.port}`;
     const headers = { Authorization: `Bearer ${token}` };
+    const bootstrap = await fetch(`${base}/`);
+    const sessionSetCookie = bootstrap.headers.get("set-cookie");
+    const sessionCookie = sessionSetCookie?.split(";", 1)[0] ?? "";
+
+    const csrfRejected = await fetch(
+      `${base}/api/chats/${encodeURIComponent(chatJid)}/allow`,
+      { method: "POST", headers: { Cookie: sessionCookie } },
+    );
+    expect(csrfRejected.status).toBe(403);
+
+    const sessionHeaders = {
+      Cookie: sessionCookie,
+      Origin: base,
+    };
 
     const allowed = await fetch(
       `${base}/api/chats/${encodeURIComponent(chatJid)}/allow`,
-      { method: "POST", headers },
+      { method: "POST", headers: sessionHeaders },
     );
     expect(allowed.status).toBe(200);
     expect(await allowed.json()).toEqual(

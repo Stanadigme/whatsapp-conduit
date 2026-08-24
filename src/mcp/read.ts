@@ -23,7 +23,16 @@ import {
   selectExportMessages,
 } from "../db/queries.js";
 import { loadRedactionSalt } from "../privacy/redact.js";
+import {
+  allowedChat,
+  messageView,
+  transcriptFor,
+  type MessageFilters,
+  type MessageView,
+} from "../read/messages.js";
 import { nowSec } from "../util/time.js";
+
+export { listMessages } from "../read/messages.js";
 import {
   assertLimit,
   assertWindow,
@@ -48,37 +57,6 @@ interface ChatView {
   hasAudio: boolean;
 }
 
-interface MessageView {
-  chatJid: string;
-  messageId: string;
-  senderJid: string | null;
-  fromMe: boolean;
-  timestamp: number | null;
-  receivedAt: number;
-  messageType: string | null;
-  text: string | null;
-  textRaw: string | null;
-  textCorrected: string | null;
-  hasMedia: boolean;
-  durationS: number | null;
-  ingestionSource: string;
-  quotedMessageId: string | null;
-  quotedSenderJid: string | null;
-  editedMessageId: string | null;
-  deletedAt: number | null;
-}
-
-function allowedChat(ctx: McpContext, chatJid: string): ChatRow {
-  const row = ctx.db
-    .prepare<[string, string], ChatRow>(
-      `select * from chats
-       where account_id = ? and jid = ? and is_allowed = 1 and is_blocked = 0`,
-    )
-    .get(ctx.accountId, chatJid);
-  if (!row) throw new McpRequestError("chat is not available");
-  return row;
-}
-
 function chatView(
   row: ChatRow,
   hasAudio: boolean,
@@ -94,63 +72,6 @@ function chatView(
     lastMessageTs: row.last_message_ts,
     hasAudio,
   };
-}
-
-function messageView(
-  row: MessageRow,
-  transcript?: TranscriptRow | null,
-): MessageView {
-  return {
-    chatJid: row.chat_jid,
-    messageId: row.message_id,
-    senderJid: row.sender_jid,
-    fromMe: row.from_me === 1,
-    timestamp: row.timestamp,
-    receivedAt: row.received_at,
-    messageType: row.message_type,
-    text: row.text,
-    textRaw: transcript?.text_raw ?? row.text,
-    textCorrected: transcript?.text_corrected ?? null,
-    hasMedia: row.has_media === 1,
-    durationS: row.duration_s,
-    ingestionSource: row.ingestion_source,
-    quotedMessageId: row.quoted_message_id,
-    quotedSenderJid: row.quoted_sender_jid,
-    editedMessageId: row.edited_message_id,
-    deletedAt: row.deleted_at,
-  };
-}
-
-interface TranscriptRow {
-  text_raw: string | null;
-  text_corrected: string | null;
-  language: string | null;
-  confidence: number | null;
-  engine: string | null;
-  engine_model: string | null;
-  lexicon_version: number | null;
-  duration_s: number | null;
-  transcribed_at: number | null;
-  status?: string;
-  reason?: string | null;
-}
-
-function transcriptFor(
-  ctx: McpContext,
-  chatJid: string,
-  messageId: string,
-): TranscriptRow | null {
-  if (!hasTable(ctx.db, "transcriptions")) return null;
-  return (
-    ctx.db
-      .prepare<[string, string, string], TranscriptRow>(
-        `select text_raw, text_corrected, language, confidence, engine,
-                engine_model, lexicon_version, duration_s, transcribed_at
-         from transcriptions
-         where account_id = ? and chat_jid = ? and message_id = ?`,
-      )
-      .get(ctx.accountId, chatJid, messageId) ?? null
-  );
 }
 
 export function listChats(
@@ -359,113 +280,6 @@ export function listGroupParticipants(
     .all(ctx.accountId, chat.jid, chat.jid, ctx.accountId, chat.jid, limit);
 }
 
-function messageRows(
-  ctx: McpContext,
-  where: string,
-  params: Record<string, unknown>,
-  limit: number,
-): Array<MessageRow & { rowid: number }> {
-  return ctx.db
-    .prepare(
-      `select m.*, m.rowid as rowid from messages m
-       join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
-       ${where} order by m.rowid desc limit @limit`,
-    )
-    .all({ ...params, accountId: ctx.accountId, limit }) as Array<
-    MessageRow & { rowid: number }
-  >;
-}
-
-export interface MessageFilters {
-  chat?: string;
-  sender?: string;
-  fromMe?: boolean;
-  kind?: string;
-  hasMedia?: boolean;
-  ingestionSource?: string;
-  after?: number;
-  before?: number;
-  limit?: number;
-  cursor?: string;
-}
-
-export function listMessages(
-  ctx: McpContext,
-  filters: MessageFilters,
-): Page<MessageView> {
-  const limit = assertLimit(filters.limit);
-  if (filters.kind && filters.hasMedia === true) {
-    const mediaKinds = new Set([
-      "image",
-      "video",
-      "audio",
-      "document",
-      "sticker",
-    ]);
-    if (!mediaKinds.has(filters.kind)) {
-      throw new McpRequestError("kind and hasMedia filters are contradictory");
-    }
-  }
-  const cursor = decodeCursor<{ rowid: number }>(filters.cursor);
-  const where = [
-    "m.account_id = @accountId",
-    "c.is_allowed = 1",
-    "c.is_blocked = 0",
-  ];
-  const params: Record<string, unknown> = {};
-  if (filters.chat) {
-    allowedChat(ctx, filters.chat);
-    where.push("m.chat_jid = @chat");
-    params.chat = filters.chat;
-  }
-  if (filters.sender) {
-    where.push("m.sender_jid = @sender");
-    params.sender = filters.sender;
-  }
-  if (filters.fromMe !== undefined) {
-    where.push("m.from_me = @fromMe");
-    params.fromMe = filters.fromMe ? 1 : 0;
-  }
-  if (filters.kind) {
-    where.push("m.message_type = @kind");
-    params.kind = filters.kind;
-  }
-  if (filters.hasMedia !== undefined) {
-    where.push("m.has_media = @hasMedia");
-    params.hasMedia = filters.hasMedia ? 1 : 0;
-  }
-  if (filters.ingestionSource) {
-    where.push("m.ingestion_source = @ingestionSource");
-    params.ingestionSource = filters.ingestionSource;
-  }
-  if (filters.after !== undefined) {
-    where.push("m.timestamp >= @after");
-    params.after = filters.after;
-  }
-  if (filters.before !== undefined) {
-    where.push("m.timestamp <= @before");
-    params.before = filters.before;
-  }
-  if (cursor) {
-    where.push("m.rowid < @cursorRowid");
-    params.cursorRowid = cursor.rowid;
-  }
-  const rows = messageRows(
-    ctx,
-    `where ${where.join(" and ")}`,
-    params,
-    limit + 1,
-  );
-  const last = rows[limit - 1];
-  return page(
-    rows.map((row) =>
-      messageView(row, transcriptFor(ctx, row.chat_jid, row.message_id)),
-    ),
-    limit,
-    last ? encodeCursor({ rowid: last.rowid }) : null,
-  );
-}
-
 export function messageContext(
   ctx: McpContext,
   chatJid: string,
@@ -501,14 +315,15 @@ export function messageContext(
     before: beforeRows
       .reverse()
       .map((row) =>
-        messageView(row, transcriptFor(ctx, row.chat_jid, row.message_id)),
+        messageView(ctx, row, transcriptFor(ctx, row.chat_jid, row.message_id)),
       ),
     message: messageView(
+      ctx,
       center,
       transcriptFor(ctx, center.chat_jid, center.message_id),
     ),
     after: afterRows.map((row) =>
-      messageView(row, transcriptFor(ctx, row.chat_jid, row.message_id)),
+      messageView(ctx, row, transcriptFor(ctx, row.chat_jid, row.message_id)),
     ),
   };
 }
@@ -609,7 +424,11 @@ export function searchMessages(
   const last = rows[limit - 1];
   return page(
     rows.map((row) => ({
-      ...messageView(row, transcriptFor(ctx, row.chat_jid, row.message_id)),
+      ...messageView(
+        ctx,
+        row,
+        transcriptFor(ctx, row.chat_jid, row.message_id),
+      ),
       matchedTranscript: row.matched_transcript === 1,
     })),
     limit,

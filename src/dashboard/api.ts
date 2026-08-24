@@ -2,6 +2,8 @@ import type { Database } from "better-sqlite3";
 import type { Config } from "../config.js";
 import { maskSecrets } from "../commands/config.js";
 import { requestHistoryStart } from "../control/ipc.js";
+import { listMessages } from "../read/messages.js";
+import { McpRequestError } from "../mcp/types.js";
 import {
   allowDashboardChat,
   blockDashboardChat,
@@ -108,6 +110,28 @@ export async function dashboardApi(
             | null) ?? undefined,
       }),
     );
+  }
+  if (url.pathname.startsWith("/api/chats/") && request.method === "GET") {
+    const match = /^\/api\/chats\/(.+)\/messages$/.exec(url.pathname);
+    if (!match?.[1]) return json({ error: "not found" }, 404);
+    const limitValue = url.searchParams.get("limit");
+    const cursor = url.searchParams.get("cursor") ?? undefined;
+    try {
+      const page = listMessages(context, {
+        chat: decodeJid(match[1]),
+        limit: limitValue === null ? undefined : Number(limitValue),
+        cursor,
+      });
+      return json(page);
+    } catch (error) {
+      if (
+        error instanceof McpRequestError &&
+        error.message === "chat is not available"
+      ) {
+        return json({ error: "not found" }, 404);
+      }
+      return json({ error: "invalid messages query" }, 400);
+    }
   }
   if (url.pathname.startsWith("/api/chats/") && request.method === "POST") {
     const historyMatch = /^\/api\/chats\/(.+)\/history$/.exec(url.pathname);
