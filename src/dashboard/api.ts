@@ -327,6 +327,9 @@ export async function dashboardApi(
     });
   }
   if (url.pathname === "/api/pairing/qr" && request.method === "GET") {
+    if (context.pairing.status === "waiting_qr" && !context.pairing.qr) {
+      return json({ qr: null, pending: true }, 202);
+    }
     return context.pairing.qr
       ? json({ qr: context.pairing.qr })
       : json({ error: "QR code is not available" }, 404);

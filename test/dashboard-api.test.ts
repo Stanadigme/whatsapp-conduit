@@ -40,13 +40,14 @@ describe("local dashboard HTTP API", () => {
       name: "Équipe produit",
       isGroup: true,
     });
+    const pairing = { status: "waiting_qr" as const, qr: null, error: null };
     const dashboard = await createDashboardServer(config, {
       db,
       config,
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "idle", qr: null, error: null },
+      pairing,
       startPairing: async () => undefined,
       stopPairing: async () => undefined,
     });
@@ -96,6 +97,12 @@ describe("local dashboard HTTP API", () => {
       headers: { Cookie: sessionCookie ?? "" },
     });
     expect(sessionAuthorized.status).toBe(200);
+
+    const pendingQr = await fetch(`${base}/api/pairing/qr`, {
+      headers: { Cookie: sessionCookie ?? "" },
+    });
+    expect(pendingQr.status).toBe(202);
+    expect(await pendingQr.json()).toEqual({ qr: null, pending: true });
 
     const forgedSession = await fetch(`${base}/api/chats`, {
       headers: { Cookie: `${sessionCookie}x` },
