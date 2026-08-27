@@ -157,23 +157,23 @@ export class DirectorySync {
   private applyGroupDelta(event: GroupInfoEvent): void {
     const groupJid = normalizeJid(event.jid);
     const tx = this.deps.db.transaction(() => {
-      upsertDirectoryGroup(this.deps.db, {
+      const entity = upsertDirectoryGroup(this.deps.db, {
         accountId: this.deps.accountId,
         jid: groupJid,
         name: event.name,
         nameSource: "group_info",
       });
       for (const jid of event.join ?? []) {
-        this.persistMember(jid, groupJid, undefined, true);
+        this.persistMember(jid, groupJid, undefined, true, entity.id);
       }
       for (const jid of event.leave ?? []) {
-        this.persistMember(jid, groupJid, undefined, false);
+        this.persistMember(jid, groupJid, undefined, false, entity.id);
       }
       for (const jid of event.promote ?? []) {
-        this.persistMember(jid, groupJid, "admin", true);
+        this.persistMember(jid, groupJid, "admin", true, entity.id);
       }
       for (const jid of event.demote ?? []) {
-        this.persistMember(jid, groupJid, "member", true);
+        this.persistMember(jid, groupJid, "member", true, entity.id);
       }
     });
     tx();
@@ -182,7 +182,7 @@ export class DirectorySync {
   private persistGroupSnapshot(group: GroupInfo): number {
     const groupJid = normalizeJid(group.jid);
     const tx = this.deps.db.transaction(() => {
-      upsertDirectoryGroup(this.deps.db, {
+      const entity = upsertDirectoryGroup(this.deps.db, {
         accountId: this.deps.accountId,
         jid: groupJid,
         name: group.name,
@@ -202,6 +202,7 @@ export class DirectorySync {
               ? "admin"
               : "member",
           true,
+          entity.id,
         );
       }
       markDirectoryMissingMembersInactive(
@@ -220,6 +221,7 @@ export class DirectorySync {
     groupJid: string,
     role: "member" | "admin" | "superadmin" | undefined,
     isActive: boolean,
+    groupEntityId?: number,
   ): void {
     const jid = normalizeJid(participantJid);
     upsertDirectoryGroupMember(this.deps.db, {
@@ -228,6 +230,7 @@ export class DirectorySync {
       participantJid: jid,
       role,
       isActive,
+      ...(groupEntityId === undefined ? {} : { groupEntityId }),
     });
   }
 
