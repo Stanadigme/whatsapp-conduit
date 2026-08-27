@@ -46,6 +46,13 @@ export function openDb(
 
   const db = new Database(path, { readonly });
   db.pragma("foreign_keys = ON");
+  // SQLite's built-in lower() only folds ASCII, so "École" would not match a
+  // search for "école". Name searches that used to run in JavaScript relied on
+  // toLocaleLowerCase; expose it to SQL so pushing those filters down does not
+  // silently change what matches.
+  db.function("lower_u", { deterministic: true }, (value: unknown) =>
+    typeof value === "string" ? value.toLocaleLowerCase() : null,
+  );
 
   if (!readonly) {
     db.pragma("journal_mode = WAL");

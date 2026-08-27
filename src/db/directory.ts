@@ -65,6 +65,12 @@ export interface DirectoryGroupMemberInput {
   participantJid: string;
   role?: DirectoryMemberRole | null;
   isActive?: boolean;
+  /**
+   * Group entity already resolved by the caller. Supplied during a full group
+   * snapshot, it avoids re-upserting the group once per member. When omitted,
+   * the group is resolved as before.
+   */
+  groupEntityId?: number;
 }
 
 export interface DirectoryGroupMemberRow extends DirectoryEntityRow {
@@ -84,8 +90,16 @@ const NAME_RANK: Record<string, number> = {
   local: 50,
 };
 
+// Directory tables can only appear during migrations, never mid-life of an
+// open connection, so one sqlite_master lookup per connection is enough.
+// Without this, callers resolving a page of rows paid one sqlite_master query
+// per row.
+const directoryTablesCache = new WeakMap<Database, boolean>();
+
 export function directoryTablesAvailable(db: Database): boolean {
-  return Boolean(
+  const cached = directoryTablesCache.get(db);
+  if (cached !== undefined) return cached;
+  const available = Boolean(
     db
       .prepare<
         [string],
@@ -93,6 +107,10 @@ export function directoryTablesAvailable(db: Database): boolean {
       >("select name from sqlite_master where type = 'table' and name = ?")
       .get("directory_entities"),
   );
+  // A `false` is not memoized: a connection opened before migrations ran must
+  // still be able to observe the tables appearing.
+  if (available) directoryTablesCache.set(db, true);
+  return available;
 }
 
 export function resolveDirectoryJid(
@@ -258,10 +276,14 @@ export function upsertDirectoryGroupMember(
   input: DirectoryGroupMemberInput,
 ): void {
   const write = db.transaction(() => {
-    const group = upsertDirectoryGroup(db, {
-      accountId: input.accountId,
-      jid: input.groupJid,
-    });
+    // A full snapshot resolves the group once and passes its id down, so the
+    // group entity is not rewritten once per participant.
+    const groupId =
+      input.groupEntityId ??
+      upsertDirectoryGroup(db, {
+        accountId: input.accountId,
+        jid: input.groupJid,
+      }).id;
     const member = upsertDirectoryContact(db, {
       accountId: input.accountId,
       jid: input.participantJid,
@@ -280,14 +302,14 @@ export function upsertDirectoryGroupMember(
          updated_at = excluded.updated_at`,
     ).run({
       accountId: input.accountId,
-      groupId: group.id,
+      groupId,
       memberId: member.id,
       role: input.role ?? null,
       isActive: input.isActive === false ? 0 : 1,
       isActiveSet: input.isActive === undefined ? 0 : 1,
       now,
     });
-    projectGroupMember(db, input.accountId, group.id, member.id, now);
+    projectGroupMember(db, input.accountId, groupId, member.id, now);
   });
   write();
 }
@@ -357,22 +379,35 @@ export function getDirectoryEntityByJid(
   jid: string,
   type?: DirectoryEntityType,
 ): DirectoryEntityRow | undefined {
-  const typeClause = type ? "and e.entity_type = @type" : "";
-  return db
+  // Two successive indexed lookups instead of one join with a cross-table
+  // `or`: that `or` defeated every index and made each call scan the whole
+  // join. Semantics are unchanged - canonical still wins over alias, as the
+  // former `order by` did.
+  const params = {
+    accountId,
+    jid: normalizeJid(jid),
+    ...(type ? { type } : {}),
+  };
+  const canonical = db
     .prepare(
-      `select e.* from directory_entities e
-       left join directory_aliases a on a.entity_id = e.id
-       where e.account_id = @accountId
-         and (e.canonical_jid = @jid or a.alias_jid = @jid)
-         ${typeClause}
-       order by case when e.canonical_jid = @jid then 0 else 1 end
+      `select * from directory_entities
+       where account_id = @accountId and canonical_jid = @jid
+         ${type ? "and entity_type = @type" : ""}
        limit 1`,
     )
-    .get({
-      accountId,
-      jid: normalizeJid(jid),
-      ...(type ? { type } : {}),
-    }) as DirectoryEntityRow | undefined;
+    .get(params) as DirectoryEntityRow | undefined;
+  if (canonical) return canonical;
+  // `alias_jid` is part of the primary key with `account_id`: at most one row,
+  // so no tie-breaking is needed.
+  return db
+    .prepare(
+      `select e.* from directory_aliases a
+       join directory_entities e on e.id = a.entity_id
+       where a.account_id = @accountId and a.alias_jid = @jid
+         ${type ? "and e.entity_type = @type" : ""}
+       limit 1`,
+    )
+    .get(params) as DirectoryEntityRow | undefined;
 }
 
 export function listDirectoryAliases(
