@@ -1,5 +1,6 @@
 import { chmod, mkdir, rm } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   createConnection,
   createServer,
@@ -44,8 +45,20 @@ export class HistoryControlServer {
   ) {}
 
   async start(): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true });
     const address = controlAddress(this.path);
+    // The fallback address lives outside the data directory, so create the
+    // directory of the address we actually bind, not of the configured path.
+    if (process.platform !== "win32") {
+      await mkdir(dirname(address), { recursive: true });
+    }
+    if (process.platform !== "win32" && address !== this.path) {
+      // EADDRINUSE on a file that does not exist sends the reader down the
+      // wrong path; say plainly where the socket really is.
+      process.stderr.write(
+        `control socket path exceeds the ${MAX_UNIX_SOCKET_BYTES}-byte limit; ` +
+          `using ${address} instead of ${this.path}\n`,
+      );
+    }
     await rm(address, { force: true }).catch(() => undefined);
     const server = createServer((socket) => this.handle(socket));
     this.server = server;
@@ -175,14 +188,40 @@ export async function requestHistoryStart(
   });
 }
 
-function controlAddress(configuredPath: string): string {
-  if (process.platform !== "win32") return configuredPath;
-  if (configuredPath.startsWith("\\\\.\\pipe\\")) return configuredPath;
-  const digest = createHash("sha256")
+/**
+ * Longest unix socket path we are willing to bind. `sun_path` holds 104 bytes
+ * on macOS and 108 on Linux, and the kernel does not reject a longer path — it
+ * truncates silently, creating the socket somewhere else entirely. The margin
+ * below the smallest limit leaves room for the trailing NUL.
+ */
+const MAX_UNIX_SOCKET_BYTES = 100;
+
+function fingerprint(configuredPath: string): string {
+  return createHash("sha256")
     .update(configuredPath, "utf8")
     .digest("hex")
-    .slice(0, 24);
-  return `\\\\.\\pipe\\whatsapp-conduit-${digest}`;
+    .slice(0, 16);
+}
+
+/**
+ * Resolve the address the server binds and the client dials. Both go through
+ * this function, so they always agree.
+ */
+export function controlAddress(configuredPath: string): string {
+  if (process.platform === "win32") {
+    if (configuredPath.startsWith("\\\\.\\pipe\\")) return configuredPath;
+    return `\\\\.\\pipe\\whatsapp-conduit-${fingerprint(configuredPath)}`;
+  }
+  // Measured in bytes, not characters: an accented path — the norm on a French
+  // Mac — overruns sooner than its apparent length suggests.
+  if (Buffer.byteLength(configuredPath, "utf8") <= MAX_UNIX_SOCKET_BYTES)
+    return configuredPath;
+  const short = join(tmpdir(), `wac-${fingerprint(configuredPath)}.sock`);
+  // macOS tmpdir() is a long /var/folders/... path, so the fallback can itself
+  // overrun. /tmp always fits.
+  return Buffer.byteLength(short, "utf8") <= MAX_UNIX_SOCKET_BYTES
+    ? short
+    : `/tmp/wac-${fingerprint(configuredPath)}.sock`;
 }
 
 function isHistoryControlRequest(
