@@ -66,6 +66,11 @@ export interface WebConfig {
   host: string;
   port: number;
   tokenFile: string;
+  /**
+   * Exact HTTPS origin accepted when the dashboard is served behind a reverse
+   * proxy. `null` keeps the loopback-only local dashboard behavior.
+   */
+  publicOrigin: string | null;
 }
 
 export type SttEngineName = "whisper-local";
@@ -197,6 +202,36 @@ function asLoopbackHost(value: unknown, fallback = "127.0.0.1"): string {
   if (value === "127.0.0.1" || value === "::1") return value;
   if (value === undefined || value === null || value === "") return fallback;
   throw new Error("Invalid web.host: only 127.0.0.1 and ::1 are allowed.");
+}
+
+function asHttpsOrigin(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") {
+    throw new Error(
+      "Invalid web.public_origin: expected an HTTPS origin without a path.",
+    );
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(
+      "Invalid web.public_origin: expected an HTTPS origin without a path.",
+    );
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error(
+      "Invalid web.public_origin: expected an HTTPS origin without a path.",
+    );
+  }
+  return parsed.origin;
 }
 
 function asStringArray(value: unknown): string[] {
@@ -388,6 +423,9 @@ export function resolveConfig(
       webRaw.token_file,
       join(dataDir, "dashboard.token"),
     ),
+    publicOrigin: asHttpsOrigin(
+      process.env.WA_DASHBOARD_PUBLIC_ORIGIN || webRaw.public_origin,
+    ),
   };
 
   return {
@@ -544,11 +582,13 @@ stt:
     model_path: ${join(dataDir, "models", "ggml-large-v3-turbo.bin")}
 
 web:
-  # The dashboard is local-only and disabled unless explicitly enabled.
+  # The dashboard is local-only by default. Set public_origin only behind an
+  # HTTPS reverse proxy that authenticates users and preserves the public Host.
   enabled: false
   host: 127.0.0.1
   port: 8765
   token_file: ${join(dataDir, "dashboard.token")}
+  public_origin: ""
 
 filters:
   # Empty allowlist: discover chats, but do not expose all chats to exports.

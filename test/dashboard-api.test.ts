@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -19,6 +20,33 @@ const accountId = "personal";
 const chatJid = "120363000000000@g.us";
 
 const resources: Array<{ close: () => void; remove: () => void }> = [];
+
+interface RawDashboardResponse {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  body: string;
+}
+
+function rawDashboardRequest(
+  url: string,
+  options: { method?: string; headers?: Record<string, string> } = {},
+): Promise<RawDashboardResponse> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(url, options, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => {
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          body: Buffer.concat(chunks).toString("utf8"),
+        });
+      });
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}
 
 afterEach(() => {
   for (const resource of resources.splice(0)) {
@@ -121,6 +149,100 @@ describe("local dashboard HTTP API", () => {
         allowed: false,
       }),
     ]);
+  });
+
+  it("uses the configured HTTPS origin behind an authenticated proxy", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wac-dashboard-public-"));
+    const config = resolveConfig(
+      { web: { public_origin: "https://dashboard.example.test" } },
+      { dataDir: dir },
+    );
+    ensureDashboardToken(config.web.tokenFile);
+    const db = openDb(":memory:", { migrate: true });
+    upsertAccount(db, { id: accountId });
+    upsertChat(db, {
+      accountId,
+      jid: chatJid,
+      name: "Équipe produit",
+      isGroup: true,
+    });
+    const dashboard = await createDashboardServer(config, {
+      db,
+      config,
+      configPath: join(dir, "config.yaml"),
+      models: new ModelDownloader(join(dir, "models")),
+      accountId,
+      pairing: { status: "disabled", qr: null, error: null },
+      startPairing: async () => undefined,
+      stopPairing: async () => undefined,
+    });
+    await new Promise<void>((resolve) =>
+      dashboard.server.listen(0, "127.0.0.1", resolve),
+    );
+    resources.push({
+      close: () => dashboard.server.close(),
+      remove: () => {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      },
+    });
+    const address = dashboard.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("dashboard did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    const proxyHeaders = { Host: "dashboard.example.test" };
+
+    const bootstrap = await rawDashboardRequest(`${base}/`, {
+      headers: proxyHeaders,
+    });
+    expect(bootstrap.status).toBe(200);
+    const setCookie = bootstrap.headers["set-cookie"]?.[0];
+    const sessionCookie = setCookie?.split(";", 1)[0];
+    expect(setCookie).toMatch(
+      /^dashboard_session=[^;]+; Path=\/; HttpOnly; SameSite=Strict; Secure$/,
+    );
+    expect(sessionCookie).toBeDefined();
+
+    const allowed = await rawDashboardRequest(
+      `${base}/api/chats/${encodeURIComponent(chatJid)}/allow`,
+      {
+        method: "POST",
+        headers: {
+          ...proxyHeaders,
+          Cookie: sessionCookie ?? "",
+          Origin: "https://dashboard.example.test",
+        },
+      },
+    );
+    expect(allowed.status).toBe(200);
+
+    const forgedOrigin = await rawDashboardRequest(
+      `${base}/api/chats/${encodeURIComponent(chatJid)}/block`,
+      {
+        method: "POST",
+        headers: {
+          ...proxyHeaders,
+          Cookie: sessionCookie ?? "",
+          Origin: "https://attacker.example.test",
+        },
+      },
+    );
+    expect(forgedOrigin.status).toBe(403);
+
+    const wrongHost = await rawDashboardRequest(`${base}/`, {
+      headers: { Host: `127.0.0.1:${address.port}` },
+    });
+    expect(wrongHost.status).toBe(421);
+    expect(wrongHost.headers["set-cookie"]).toBeUndefined();
+
+    const forwardedHostOnly = await rawDashboardRequest(`${base}/`, {
+      headers: {
+        Host: `127.0.0.1:${address.port}`,
+        "X-Forwarded-Host": "dashboard.example.test",
+        "X-Forwarded-Proto": "https",
+      },
+    });
+    expect(forwardedHostOnly.status).toBe(421);
   });
 
   it("allows only discovered chats and returns the persisted policy", async () => {

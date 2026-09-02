@@ -17,7 +17,7 @@ import {
 const INDEX_HTML = `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>whatsapp-conduit — Configuration</title><link rel="stylesheet" href="/styles.css"></head>
-<body><main><header><h1>whatsapp-conduit</h1><p>Configuration locale, lecture seule par défaut.</p></header>
+<body><main><header><h1>whatsapp-conduit</h1><p>Configuration protégée, lecture seule par défaut.</p></header>
 <section class="card"><h2>Accès local</h2><label>Jeton du dashboard <input id="token" type="password" autocomplete="off"></label><button id="connect">Se connecter</button><p id="auth" class="muted"></p></section>
 <section class="card"><h2>Connexion</h2><p id="pairing-status">Non connecté</p><div id="qr" class="qr" hidden></div><button id="pairing-start">Afficher un QR d’appairage</button><button id="pairing-stop" hidden>Arrêter</button></section>
 <section class="card"><h2>Contacts et groupes</h2><div class="toolbar"><input id="search" placeholder="Rechercher un nom ou un identifiant"><select id="kind"><option value="">Tous</option><option value="contact">Contacts</option><option value="group">Groupes</option></select><button id="refresh">Actualiser</button></div><div id="chats" class="list"></div></section>
@@ -162,10 +162,28 @@ function authorizationMethod(
   return session && verifyDashboardSession(token, session) ? "session" : null;
 }
 
-function sameOriginRequest(request: IncomingMessage): boolean {
+function requestOrigin(
+  request: IncomingMessage,
+  config: Config,
+): string | null {
+  if (config.web.publicOrigin) return config.web.publicOrigin;
   const host = request.headers.host;
-  if (!host) return false;
-  const expectedOrigin = `http://${host}`;
+  return host ? `http://${host}` : null;
+}
+
+function hasExpectedHost(
+  request: IncomingMessage,
+  publicOrigin: string,
+): boolean {
+  const host = request.headers.host;
+  return host?.toLowerCase() === new URL(publicOrigin).host.toLowerCase();
+}
+
+function sameOriginRequest(
+  request: IncomingMessage,
+  expectedOrigin: string | null,
+): boolean {
+  if (!expectedOrigin) return false;
   const origin = request.headers.origin;
   if (origin) return origin === expectedOrigin;
   const referer = request.headers.referer;
@@ -188,15 +206,20 @@ function send(
     "Content-Type": type,
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), geolocation=(), microphone=()",
     "Content-Security-Policy":
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "default-src 'self'; frame-ancestors 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'",
     ...extraHeaders,
   });
   response.end(body);
 }
 
-async function toRequest(request: IncomingMessage): Promise<Request> {
-  const host = request.headers.host ?? "127.0.0.1";
+async function toRequest(
+  request: IncomingMessage,
+  origin: string,
+): Promise<Request> {
   const method = request.method ?? "GET";
   let body: string | undefined;
   if (method !== "GET" && method !== "HEAD") {
@@ -224,7 +247,7 @@ async function toRequest(request: IncomingMessage): Promise<Request> {
     }
     if (chunks.length > 0) body = Buffer.concat(chunks).toString("utf8");
   }
-  return new Request(`http://${host}${request.url ?? "/"}`, {
+  return new Request(`${origin}${request.url ?? "/"}`, {
     method,
     headers: request.headers as Record<string, string>,
     ...(body === undefined ? {} : { body }),
@@ -243,9 +266,21 @@ export async function createDashboardServer(
   const token = readDashboardToken(config.web.tokenFile);
   const server = createServer(async (request, response) => {
     try {
+      if (
+        config.web.publicOrigin &&
+        !hasExpectedHost(request, config.web.publicOrigin)
+      ) {
+        return send(
+          response,
+          421,
+          "Misdirected Request\n",
+          "text/plain; charset=utf-8",
+        );
+      }
+      const origin = requestOrigin(request, config);
       const url = new URL(
         request.url ?? "/",
-        `http://${request.headers.host ?? config.web.host}`,
+        origin ?? `http://${config.web.host}`,
       );
       if (
         (url.pathname === "/" || url.pathname.startsWith("/conversation/")) &&
@@ -257,7 +292,7 @@ export async function createDashboardServer(
           DIRECT_INDEX_HTML,
           "text/html; charset=utf-8",
           {
-            "Set-Cookie": `${DASHBOARD_SESSION_COOKIE}=${createDashboardSession(token)}; Path=/; HttpOnly; SameSite=Strict`,
+            "Set-Cookie": `${DASHBOARD_SESSION_COOKIE}=${createDashboardSession(token)}; Path=/; HttpOnly; SameSite=Strict${config.web.publicOrigin ? "; Secure" : ""}`,
           },
         );
       }
@@ -290,7 +325,7 @@ export async function createDashboardServer(
         request.method !== "GET" &&
         request.method !== "HEAD" &&
         request.method !== "OPTIONS" &&
-        !sameOriginRequest(request)
+        !sameOriginRequest(request, origin)
       ) {
         return send(
           response,
@@ -299,7 +334,10 @@ export async function createDashboardServer(
           "application/json; charset=utf-8",
         );
       }
-      const result = await dashboardApi(await toRequest(request), context);
+      const result = await dashboardApi(
+        await toRequest(request, origin ?? `http://${config.web.host}`),
+        context,
+      );
       if (!result)
         return send(
           response,
