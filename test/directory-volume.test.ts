@@ -138,9 +138,9 @@ describe("directory at realistic volume", () => {
 
     await directory.syncJoinedGroups();
 
-    const writes = db
-      .prepare("select n from _group_writes")
-      .get() as { n: number };
+    const writes = db.prepare("select n from _group_writes").get() as {
+      n: number;
+    };
     expect(writes.n).toBeLessThanOrEqual(3);
 
     const members = db

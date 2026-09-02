@@ -19,9 +19,9 @@ function setup(): Database {
  * test seeds, and it does not turn into a wall-clock flake in CI.
  */
 function planFor(db: Database, sql: string, params: unknown): string {
-  const steps = db
-    .prepare(`explain query plan ${sql}`)
-    .all(params) as Array<{ detail: string }>;
+  const steps = db.prepare(`explain query plan ${sql}`).all(params) as Array<{
+    detail: string;
+  }>;
   return steps.map((step) => step.detail).join("\n");
 }
 
@@ -115,7 +115,11 @@ describe("getDirectoryEntityByJid semantics", () => {
        on conflict (account_id, alias_jid) do update set entity_id = excluded.entity_id`,
     ).run({ id: other?.id });
 
-    const resolved = getDirectoryEntityByJid(db, "acct", "shared@s.whatsapp.net");
+    const resolved = getDirectoryEntityByJid(
+      db,
+      "acct",
+      "shared@s.whatsapp.net",
+    );
     expect(resolved?.name).toBe("Canonical");
   });
 
@@ -126,9 +130,9 @@ describe("getDirectoryEntityByJid semantics", () => {
       jid: "120@g.us",
       name: "Equipe",
     });
-    expect(
-      getDirectoryEntityByJid(db, "acct", "120@g.us", "group")?.name,
-    ).toBe("Equipe");
+    expect(getDirectoryEntityByJid(db, "acct", "120@g.us", "group")?.name).toBe(
+      "Equipe",
+    );
     // Same JID, wrong type: the canonical row must not leak through.
     expect(
       getDirectoryEntityByJid(db, "acct", "120@g.us", "contact"),

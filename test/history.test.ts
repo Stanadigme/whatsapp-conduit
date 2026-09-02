@@ -61,7 +61,10 @@ function messageEvent(id: string, timestamp: number): TransportMessageEvent {
   };
 }
 
-function groupMessageEvent(id: string, timestamp: number): TransportMessageEvent {
+function groupMessageEvent(
+  id: string,
+  timestamp: number,
+): TransportMessageEvent {
   return {
     info: {
       id,

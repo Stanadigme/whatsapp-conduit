@@ -110,7 +110,11 @@ describe("listDashboardChats", () => {
 
   it("filters by policy", () => {
     const db = setup();
-    for (const jid of ["ok@s.whatsapp.net", "no@s.whatsapp.net", "new@s.whatsapp.net"])
+    for (const jid of [
+      "ok@s.whatsapp.net",
+      "no@s.whatsapp.net",
+      "new@s.whatsapp.net",
+    ])
       upsertChat(db, { accountId: "acct", jid });
     setChatAllowed(db, "acct", "ok@s.whatsapp.net", true);
     setChatBlocked(db, "acct", "no@s.whatsapp.net", true);
@@ -122,7 +126,9 @@ describe("listDashboardChats", () => {
       listDashboardChats(db, "acct", { policy: "blocked" }).map((c) => c.jid),
     ).toEqual(["no@s.whatsapp.net"]);
     expect(
-      listDashboardChats(db, "acct", { policy: "discovered" }).map((c) => c.jid),
+      listDashboardChats(db, "acct", { policy: "discovered" }).map(
+        (c) => c.jid,
+      ),
     ).toEqual(["new@s.whatsapp.net"]);
   });
 

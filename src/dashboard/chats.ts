@@ -92,7 +92,9 @@ export function listDashboardChats(
        left join directory_entities ea on ea.id = a.entity_id`
     : "";
   const dirName = directory ? "coalesce(ec.name, ea.name)" : "null";
-  const dirPushName = directory ? "coalesce(ec.push_name, ea.push_name)" : "null";
+  const dirPushName = directory
+    ? "coalesce(ec.push_name, ea.push_name)"
+    : "null";
   const dirSyncedAt = directory
     ? "coalesce(ec.last_synced_at, ea.last_synced_at)"
     : "null";
