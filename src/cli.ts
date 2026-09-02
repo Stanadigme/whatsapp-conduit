@@ -160,10 +160,23 @@ export function buildProgram(): Command {
 
   program
     .command("mcp")
-    .description("run the read-only MCP server over stdio")
-    .action(async () => {
+    .description(
+      "run the read-only MCP server (stdio by default, or Streamable HTTP with --http)",
+    )
+    .option("--http", "serve the Streamable HTTP transport instead of stdio")
+    .option("--host <host>", "HTTP listen host (default: mcp.http.host)")
+    .option("--port <port>", "HTTP listen port (default: mcp.http.port)")
+    .action(async (opts: { http?: boolean; host?: string; port?: string }) => {
       const globals = program.opts<GlobalOptions>();
-      await runMcp({ configPath: globals.config });
+      await runMcp({
+        configPath: globals.config,
+        http: opts.http,
+        host: opts.host,
+        port:
+          opts.port === undefined
+            ? undefined
+            : parsePositiveInt("--port", opts.port),
+      });
     });
 
   program

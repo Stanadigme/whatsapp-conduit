@@ -36,8 +36,22 @@ export interface MediaConfig {
   maxAttempts: number;
 }
 
+export interface McpHttpConfig {
+  enabled: boolean;
+  /**
+   * Listen address. Defaults to loopback. Only set to a non-loopback address
+   * behind a reverse proxy or tunnel that terminates TLS and forwards a
+   * trustworthy `Host` header (ADR-0002).
+   */
+  host: string;
+  port: number;
+  /** Owner-only file holding the bearer token; auto-created on first start. */
+  tokenFile: string;
+}
+
 export interface McpConfig {
   maxResultChars: number;
+  http: McpHttpConfig;
 }
 
 export interface WebConfig {
@@ -256,6 +270,7 @@ export function resolveConfig(
   const privacyRaw = section(raw, "privacy");
   const mediaRaw = section(raw, "media");
   const mcpRaw = section(raw, "mcp");
+  const mcpHttpRaw = section(mcpRaw, "http");
   const sttRaw = section(raw, "stt");
   const whisperRaw = section(sttRaw, "whisper");
   const webRaw = section(raw, "web");
@@ -385,6 +400,16 @@ export function resolveConfig(
         process.env.WA_MCP_MAX_RESULT_CHARS ?? mcpRaw.max_result_chars,
         12_000,
       ),
+      http: {
+        enabled: asBool(mcpHttpRaw.enabled, false),
+        host: asString(mcpHttpRaw.host, "127.0.0.1"),
+        port: asPort(mcpHttpRaw.port, 8766),
+        tokenFile: resolvePath(
+          dataDir,
+          mcpHttpRaw.token_file,
+          join(dataDir, "mcp-http.token"),
+        ),
+      },
     },
     stt,
     web,
@@ -475,6 +500,15 @@ media:
 
 mcp:
   max_result_chars: 12000
+  # Streamable HTTP transport for remote MCP clients (claude.ai, mobile, other
+  # agents). Disabled by default; stdio stays the local default. The bearer
+  # token file is created on first start. Keep host on loopback unless a
+  # reverse proxy or tunnel terminates TLS in front of it (ADR-0002).
+  http:
+    enabled: false
+    host: 127.0.0.1
+    port: 8766
+    token_file: ${join(dataDir, "mcp-http.token")}
 
 stt:
   # Voice-note transcription. Nothing runs until this is explicitly enabled and
