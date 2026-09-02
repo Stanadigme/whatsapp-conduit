@@ -95,14 +95,24 @@ export function buildProgram(): Command {
       "seconds to wait for pairing before giving up",
       "120",
     )
+    .option(
+      "--qr-out <path>",
+      "with --qr: also write each QR code as an SVG to this path (headless pairing)",
+    )
     .action(
-      async (opts: { timeout?: string; qr?: boolean; phone?: string }) => {
+      async (opts: {
+        timeout?: string;
+        qr?: boolean;
+        phone?: string;
+        qrOut?: string;
+      }) => {
         const globals = program.opts<GlobalOptions>();
         await runLink({
           configPath: globals.config,
           timeoutSec: opts.timeout ? Number(opts.timeout) : undefined,
           qr: opts.qr,
           phoneNumber: opts.phone,
+          qrOut: opts.qrOut,
         });
       },
     );

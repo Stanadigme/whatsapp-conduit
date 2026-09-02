@@ -1,43 +1,10 @@
-import { createRequire } from "node:module";
 import type { Config } from "../config.js";
 import { WhatsmeowTransport } from "../whatsmeow/transport.js";
+import { qrSvg } from "../util/qr-svg.js";
 import type { DashboardPairing } from "./api.js";
 
-interface QrCode {
-  addData(data: string): void;
-  make(): void;
-  getModuleCount(): number;
-  isDark(row: number, column: number): boolean;
-}
-interface QrCodeConstructor {
-  new (typeNumber: number, errorCorrectionLevel: number): QrCode;
-}
-
-const require = createRequire(import.meta.url);
-const QrCode = require("qrcode-terminal/vendor/QRCode") as QrCodeConstructor;
-const QrErrorCorrection =
-  require("qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel") as { M: number };
-
 /** Render the live pairing payload as a self-contained SVG. */
-export function pairingQrSvg(payload: string): string {
-  const code = new QrCode(-1, QrErrorCorrection.M);
-  code.addData(payload);
-  code.make();
-  const count = code.getModuleCount();
-  const quiet = 4;
-  const size = count + quiet * 2;
-  const cells: string[] = [];
-  for (let row = 0; row < count; row += 1) {
-    for (let column = 0; column < count; column += 1) {
-      if (code.isDark(row, column)) {
-        cells.push(
-          `<rect x="${column + quiet}" y="${row + quiet}" width="1" height="1"/>`,
-        );
-      }
-    }
-  }
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" role="img" aria-label="QR code d’appairage"><rect width="100%" height="100%" fill="white"/><g fill="black" shape-rendering="crispEdges">${cells.join("")}</g></svg>`;
-}
+export const pairingQrSvg = qrSvg;
 
 export interface PairingController {
   state: DashboardPairing;

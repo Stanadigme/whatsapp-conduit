@@ -1,7 +1,8 @@
 # AGENTS.md - Coding Agent Guidelines for whatsapp-conduit
 
 `whatsapp-conduit` is a passive, observe-only WhatsApp linked-device bridge:
-whatsmeow in, SQLite out, with a read-only local MCP stdio interface.
+Baileys (primary) or whatsmeow in, SQLite out, with a read-only local MCP
+interface (stdio or Streamable HTTP).
 Treat this repository as a private personal-inbox ingestion layer, not an AI
 agent, chatbot framework, messaging gateway, or WhatsApp Business Cloud API
 client.
@@ -47,8 +48,11 @@ whatsapp-conduit must not:
 
 - Node.js + TypeScript (strict) as the runtime and language.
 - `pnpm` as the package manager unless project policy says otherwise.
-- `whatsmeow-node` as the primary WhatsApp transport, with Baileys retained as
-  an isolated diagnostic fallback.
+- Baileys as the primary WhatsApp transport, resolving the WA Web protocol
+  version live at connect (`src/baileys/version.ts`) so it never rots into a
+  `405` (ADR-0020). `whatsmeow-node` is retained as an experimental transport
+  (`transport: whatsmeow`): its bundled protocol version cannot be refreshed,
+  but it provides directory sync and MCP-driven history download.
 - SQLite for durable local persistence; prefer `better-sqlite3` for simple
   synchronous writes.
 - A single CLI framework (e.g. `commander`, `cac`, or `clipanion`).

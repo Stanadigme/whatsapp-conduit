@@ -44,8 +44,14 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
             ...(options.port === undefined ? {} : { port: options.port }),
           },
         };
-  if (config.transport !== "whatsmeow") {
-    throw new Error("web dashboard requires transport: whatsmeow");
+  // Only the pairing controls need whatsmeow. The read-only dashboard runs on
+  // any transport when pairing is disabled (the Compose `dashboard` service
+  // already passes --no-pairing).
+  if (config.transport !== "whatsmeow" && options.pairing !== false) {
+    throw new Error(
+      "The dashboard pairing controls require transport: whatsmeow. " +
+        "Pass --no-pairing to serve the read-only dashboard on another transport.",
+    );
   }
   if (!existsSync(config.paths.sqlite)) {
     throw new Error("Database not found. Run `whatsapp-conduit init` first.");

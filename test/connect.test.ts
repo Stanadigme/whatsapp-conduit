@@ -91,7 +91,10 @@ describe("shouldReconnect", () => {
 });
 
 describe("ConduitConnection", () => {
-  function makeConn(mode: "run" | "link") {
+  function makeConn(
+    mode: "run" | "link",
+    fetchVersion?: () => Promise<[number, number, number]>,
+  ) {
     const sockets: FakeSocket[] = [];
     const socketConfigs: SocketConfig[] = [];
     const closes: CloseInfo[] = [];
@@ -102,6 +105,7 @@ describe("ConduitConnection", () => {
       logger,
       mode,
       reconnectDelayMs: 0,
+      ...(fetchVersion ? { fetchVersion } : {}),
       socketFactory: (socketConfig) => {
         socketConfigs.push(socketConfig);
         const s = new FakeSocket();
@@ -131,6 +135,41 @@ describe("ConduitConnection", () => {
     await conn.start();
 
     expect(socketConfigs[0]?.version).toEqual([2, 3000, 1033893291]);
+    conn.stop();
+  });
+
+  it("uses the resolved WA version when a resolver is provided", async () => {
+    const { conn, socketConfigs } = makeConn("run", async () => [
+      2, 3000, 7_000_000,
+    ]);
+    await conn.start();
+
+    expect(socketConfigs[0]?.version).toEqual([2, 3000, 7_000_000]);
+    conn.stop();
+  });
+
+  it("re-resolves the WA version on reconnect", async () => {
+    let call = 0;
+    const versions: Array<[number, number, number]> = [
+      [2, 3000, 1],
+      [2, 3000, 2],
+    ];
+    const { conn, sockets, socketConfigs } = makeConn("run", async () => {
+      const v = versions[Math.min(call, versions.length - 1)]!;
+      call += 1;
+      return v;
+    });
+    await conn.start();
+    expect(socketConfigs[0]?.version).toEqual([2, 3000, 1]);
+
+    sockets[0]!.emit("connection.update", {
+      connection: "close",
+      lastDisconnect: { error: boom(428), date: new Date(0) },
+    });
+    await tick(10);
+
+    expect(socketConfigs).toHaveLength(2);
+    expect(socketConfigs[1]?.version).toEqual([2, 3000, 2]);
     conn.stop();
   });
 

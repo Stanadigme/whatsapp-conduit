@@ -1,5 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WASocket } from "baileys";
@@ -117,5 +117,27 @@ describe("pairing-code readiness", () => {
       ),
     ).rejects.toThrow("status 428");
     expect(buildStatusReport(configPath).authLinked).toBe(false);
+  });
+});
+
+describe("whatsmeow link session lock", () => {
+  it("refuses to link while the ingestion daemon holds the store", async () => {
+    const configPath = join(dir, "config.yaml");
+    runInit({ configPath, dataDir: join(dir, "data") });
+    const { runConfigSet } = await import("../src/commands/config.js");
+    runConfigSet("transport.name", "whatsmeow", { configPath });
+    const { paths } = (await import("../src/config.js")).loadConfig(configPath);
+    writeFileSync(
+      `${paths.whatsmeowStore}.lock`,
+      `${JSON.stringify({
+        pid: process.pid,
+        host: hostname(),
+        startedAt: 1,
+      })}\n`,
+    );
+
+    await expect(runLink({ configPath, qr: true })).rejects.toThrow(
+      /ingestion|store/i,
+    );
   });
 });

@@ -12,9 +12,11 @@ describe("resolveConfig", () => {
     expect(cfg.privacy.includeGroups).toBe(false);
     expect(cfg.privacy.includeStatus).toBe(false);
 
+    expect(cfg.transport).toBe("baileys");
     expect(cfg.baileys.markOnlineOnConnect).toBe(false);
     expect(cfg.baileys.syncFullHistory).toBe(false);
     expect(cfg.baileys.version).toEqual(DEFAULT_BAILEYS_VERSION);
+    expect(cfg.baileys.pinVersion).toBe(false);
 
     expect(cfg.logging.level).toBe("info");
     expect(cfg.logging.baileysLevel).toBe("warn");

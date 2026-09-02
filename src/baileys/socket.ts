@@ -17,8 +17,9 @@ export interface BuildSocketConfigArgs {
   config: Config;
   authState: AuthState;
   /**
-   * WA Web protocol version. Omit to use the version bundled with the pinned
-   * Baileys package (recommended) rather than fetching the latest at connect.
+   * WA Web protocol version. Normally the value resolved live at connect by
+   * `createVersionResolver` (`src/baileys/version.ts`). When omitted,
+   * `config.baileys.version` (the offline fallback pin) is used.
    */
   version?: WAVersion;
   logger: Logger;
@@ -38,8 +39,9 @@ export interface BuildSocketConfigArgs {
  *    only the limited recent on-connect history, which an inbox sync wants.
  *  - `getMessage` is a no-op returning undefined: it exists only to support
  *    message *re-sending*, which this observe-only bridge never does.
- *  - `version` is pinned in the application config so the WhatsApp protocol
- *    version can be updated deliberately without fetching it at every start.
+ *  - `version` is the WA Web protocol version resolved live at connect
+ *    (`src/baileys/version.ts`), falling back to `config.baileys.version` when
+ *    the lookup fails or `baileys.pin_version` is set.
  */
 export function buildSocketConfig(args: BuildSocketConfigArgs): SocketConfig {
   const { config, authState, version, logger } = args;

@@ -8,6 +8,13 @@ export type ExportFormat = "jsonl";
 export type BaileysVersion = [number, number, number];
 export type TransportName = "whatsmeow" | "baileys";
 
+/**
+ * Offline fallback only. At startup the WhatsApp Web protocol version is
+ * resolved live via `fetchLatestBaileysVersion()` (see `src/baileys/version.ts`);
+ * a hardcoded tuple rots and WhatsApp then rejects the login with `<failure
+ * reason='405'>`. This value is used only when that fetch fails, or when
+ * `baileys.pin_version: true` is set for a reproducible / air-gapped run.
+ */
 export const DEFAULT_BAILEYS_VERSION: BaileysVersion = [2, 3000, 1033893291];
 
 export interface AccountConfig {
@@ -85,7 +92,10 @@ export interface SttConfig {
 }
 
 export interface BaileysConfig {
+  /** Offline fallback WA Web protocol version (see {@link DEFAULT_BAILEYS_VERSION}). */
   version: BaileysVersion;
+  /** Skip the live version fetch and use {@link BaileysConfig.version} verbatim. */
+  pinVersion: boolean;
   printQrInTerminal: boolean;
   syncFullHistory: boolean;
   markOnlineOnConnect: boolean;
@@ -212,7 +222,10 @@ function asSttEngine(value: unknown): SttEngineName {
 }
 
 function asTransport(value: unknown): TransportName {
-  return value === "baileys" ? "baileys" : "whatsmeow";
+  // Baileys is the default: it resolves the WA Web version live and is the
+  // proven path on hosted servers (ADR-0020). whatsmeow stays available but is
+  // experimental — its bundled protocol version cannot be refreshed.
+  return value === "whatsmeow" ? "whatsmeow" : "baileys";
 }
 
 function asBaileysVersion(
@@ -384,6 +397,7 @@ export function resolveConfig(
     whatsmeow,
     baileys: {
       version: asBaileysVersion(baileysRaw.version, DEFAULT_BAILEYS_VERSION),
+      pinVersion: asBool(baileysRaw.pin_version, false),
       printQrInTerminal: asBool(baileysRaw.print_qr_in_terminal, true),
       syncFullHistory: asBool(baileysRaw.sync_full_history, false),
       markOnlineOnConnect: asBool(baileysRaw.mark_online_on_connect, false),
@@ -457,7 +471,11 @@ export function defaultConfigYaml(dataDir: string): string {
 # Observe-only personal WhatsApp linked-device sync. Defaults are privacy-safe.
 
 transport:
-  name: whatsmeow
+  # baileys: WA Web version resolved live at startup, proven on hosted servers.
+  # whatsmeow: experimental — bundled protocol version cannot be refreshed
+  # (blocked on an @whatsmeow-node release); enables directory sync and
+  # MCP-driven history download.
+  name: baileys
 
 account:
   name: personal
@@ -477,7 +495,10 @@ whatsmeow:
   command_timeout_ms: 60000
 
 baileys:
+  # Offline fallback only. The live WA Web version is fetched at startup;
+  # set pin_version: true to use this tuple verbatim (reproducible / air-gapped).
   version: [${DEFAULT_BAILEYS_VERSION.join(", ")}]
+  pin_version: false
   print_qr_in_terminal: true
   sync_full_history: false
   mark_online_on_connect: false

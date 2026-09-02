@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { authStateExists, openAuthState } from "../baileys/auth.js";
 import { ConduitConnection } from "../baileys/connect.js";
@@ -10,13 +9,21 @@ import { getChat } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
 import { HistoryControlServer } from "../control/ipc.js";
 import { HistoryCoordinator } from "../history/coordinator.js";
+import { createVersionResolver } from "../baileys/version.js";
 import { registerWhatsmeowIngestion } from "../whatsmeow/ingest.js";
 import { DirectorySync } from "../whatsmeow/directory.js";
 import { WhatsmeowTransport } from "../whatsmeow/transport.js";
+import { whatsmeowSessionLinked } from "../whatsmeow/session.js";
+import {
+  acquireSessionLock,
+  type SessionLock,
+} from "../whatsmeow/session-lock.js";
 import { RuntimeStatusWriter } from "../runtime-status.js";
 
 export interface RunOptions {
   configPath?: string;
+  /** Abort a pre-link wait (used by tests and embedded callers). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -31,7 +38,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
   const log = appLogger(config);
 
   if (config.transport === "whatsmeow") {
-    return runWhatsmeow(config, log);
+    return runWhatsmeow(config, log, options.signal);
   }
 
   // Refuse to start unpaired: `run` has no QR handler, so opening a fresh auth
@@ -87,6 +94,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
       authState,
       logger: baileysLogger(config),
       mode: "run",
+      fetchVersion: createVersionResolver(config, log),
       handlers: {
         onConnecting() {
           log.info("connecting to WhatsApp");
@@ -129,14 +137,77 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
   });
 }
 
+/**
+ * Block until the whatsmeow store holds a real linked device, re-checking with
+ * a bounded backoff. Resolves `true` once linked, or `false` if the process is
+ * asked to stop first. A bare store file left by an interrupted `link` is not a
+ * session, so `run` must wait rather than exit — an exiting container under
+ * `restart: unless-stopped` becomes a tight crash loop.
+ */
+async function waitForLinkedSession(
+  storePath: string,
+  log: ReturnType<typeof appLogger>,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (whatsmeowSessionLinked(storePath)) return true;
+  log.info(
+    "no linked whatsmeow device yet; waiting. Run `link --qr` off-host and copy whatsmeow.db into the data dir.",
+  );
+  const backoffMs = [10_000, 30_000, 60_000];
+  let attempt = 0;
+  return new Promise<boolean>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const done = (linked: boolean): void => {
+      if (timer) clearTimeout(timer);
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(linked);
+    };
+    const onSignal = (): void => done(false);
+    const onAbort = (): void => done(false);
+    const tick = (): void => {
+      if (whatsmeowSessionLinked(storePath)) {
+        log.info("linked whatsmeow device detected; starting");
+        done(true);
+        return;
+      }
+      const delay =
+        backoffMs[Math.min(attempt, backoffMs.length - 1)] ?? 60_000;
+      attempt += 1;
+      timer = setTimeout(tick, delay);
+    };
+    if (signal?.aborted) {
+      done(false);
+      return;
+    }
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    tick();
+  });
+}
+
 async function runWhatsmeow(
   config: ReturnType<typeof loadConfig>,
   log: ReturnType<typeof appLogger>,
+  signal?: AbortSignal,
 ): Promise<void> {
-  if (!existsSync(config.paths.whatsmeowStore)) {
-    throw new Error(
-      "No linked whatsmeow device found. Run `whatsapp-conduit link --qr` first.",
+  const store = config.paths.whatsmeowStore;
+  if (!(await waitForLinkedSession(store, log, signal))) {
+    return; // asked to stop before a device was linked
+  }
+
+  let lock: SessionLock;
+  try {
+    lock = acquireSessionLock(store);
+  } catch (error) {
+    log.error(
+      { err: error instanceof Error ? error.message : String(error) },
+      "cannot start ingestion",
     );
+    process.exitCode = 1;
+    return;
   }
 
   const db = openDb(config.paths.sqlite, { migrate: true });
@@ -208,7 +279,7 @@ async function runWhatsmeow(
   const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
     transport: "whatsmeow",
     connection: "disconnected",
-    authLinked: true,
+    authLinked: whatsmeowSessionLinked(store),
   });
   void runtimeStatus.update();
   registerWhatsmeowIngestion(
@@ -258,6 +329,7 @@ async function runWhatsmeow(
           } catch {
             // best-effort
           }
+          lock.release();
           if (code !== 0) process.exitCode = code;
           resolve();
         });

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { authStateExists } from "../baileys/auth.js";
+import { whatsmeowSessionLinked } from "../whatsmeow/session.js";
 import { openDb } from "../db/index.js";
 import {
   countAllowedChats,
@@ -46,9 +47,12 @@ export function buildStatusReport(configPath: string): StatusReport {
     config.transport === "whatsmeow"
       ? config.paths.whatsmeowStore
       : config.paths.authDir;
+  // For whatsmeow, a store file left by an interrupted `link` still exists but
+  // holds no device. Check the store contents, not just its presence.
   const authLinked =
-    existsSync(authStore) &&
-    (config.transport === "whatsmeow" || authStateExists(config.paths.authDir));
+    config.transport === "whatsmeow"
+      ? whatsmeowSessionLinked(authStore)
+      : existsSync(authStore) && authStateExists(config.paths.authDir);
 
   const base: StatusReport = {
     configPath,

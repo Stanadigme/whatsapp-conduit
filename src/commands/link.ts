@@ -1,6 +1,9 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import qrcode from "qrcode-terminal";
+import { qrSvg } from "../util/qr-svg.js";
 import type { WASocket } from "baileys";
 import { loadConfig, type Config } from "../config.js";
 import { clearPendingPairing, openAuthState } from "../baileys/auth.js";
@@ -14,6 +17,8 @@ import { openDb } from "../db/index.js";
 import { upsertAccount } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
 import { WhatsmeowTransport } from "../whatsmeow/transport.js";
+import { acquireSessionLock } from "../whatsmeow/session-lock.js";
+import { createVersionResolver } from "../baileys/version.js";
 
 export interface LinkOptions {
   configPath?: string;
@@ -23,6 +28,12 @@ export interface LinkOptions {
   qr?: boolean;
   /** E.164 phone number without the leading plus sign. */
   phoneNumber?: string;
+  /**
+   * Write each QR payload as an SVG to this path (headless pairing). Refreshed
+   * on every rotation; the connection is restarted until the code is scanned or
+   * the timeout fires.
+   */
+  qrOut?: string;
 }
 
 export interface LinkResult {
@@ -64,10 +75,15 @@ export async function runLink(
   const log = appLogger(config);
   const authState = await openAuthState(config.paths.authDir);
 
+  const qrOut = useQr ? options.qrOut : undefined;
+  if (qrOut) mkdirSync(dirname(qrOut), { recursive: true });
+
   return new Promise<LinkResult>((resolve, reject) => {
     let settled = false;
     let pairingRequested = false;
     let pairingSocket: WASocket | undefined;
+    let qrRestarts = 0;
+    const MAX_QR_RESTARTS = 40;
 
     const connection = (
       dependencies.connectionFactory ?? ((deps) => new ConduitConnection(deps))
@@ -76,6 +92,7 @@ export async function runLink(
       authState,
       logger: baileysLogger(config),
       mode: "link",
+      fetchVersion: createVersionResolver(config, log),
       handlers: {
         onSocket(sock) {
           if (!useQr) pairingSocket = sock;
@@ -109,6 +126,17 @@ export async function runLink(
             );
             return;
           }
+          if (qrOut) {
+            try {
+              writeFileSync(qrOut, qrSvg(qr, { px: 800 }), { mode: 0o600 });
+              process.stdout.write(`QR code written to ${qrOut}\n`);
+            } catch (err) {
+              log.warn(
+                { err: err instanceof Error ? err.message : String(err) },
+                "failed to write the QR SVG",
+              );
+            }
+          }
           process.stdout.write(
             "\nScan this QR code in WhatsApp → Settings → Linked Devices → Link a device:\n\n",
           );
@@ -134,6 +162,20 @@ export async function runLink(
           if (settled) return;
           if (info.willReconnect) {
             log.info("restarting connection to complete pairing");
+            return;
+          }
+          // In QR mode a non-logged-out close is almost always an unscanned
+          // code expiring (status 408/428). Keep the pairing window open by
+          // restarting with a fresh code until the timeout fires.
+          if (useQr && !info.loggedOut && qrRestarts < MAX_QR_RESTARTS) {
+            qrRestarts += 1;
+            log.info(
+              { statusCode: info.statusCode, attempt: qrRestarts },
+              "QR code expired without a scan; issuing a new one",
+            );
+            connection.start().catch((err: unknown) => {
+              fail(err instanceof Error ? err : new Error(String(err)));
+            });
             return;
           }
           fail(
@@ -174,6 +216,9 @@ async function runWhatsmeowLink(
   timeoutSec: number,
 ): Promise<LinkResult> {
   const log = appLogger(config);
+  // A running ingestion daemon must not share the store with an interactive
+  // pairing (ADR-0009). Take the lock before touching whatsmeow at all.
+  const lock = acquireSessionLock(config.paths.whatsmeowStore);
   const transport = new WhatsmeowTransport({
     store: config.paths.whatsmeowStore,
     config: config.whatsmeow,
@@ -194,6 +239,7 @@ async function runWhatsmeowLink(
           "Auth state saved. You can now run `whatsapp-conduit run`.\n",
       );
       void transport.stop();
+      lock.release();
       resolve({ selfJid: jid, accountId });
     });
     transport.on("error", (error) => {
@@ -219,7 +265,10 @@ async function runWhatsmeowLink(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      void transport.stop().finally(() => reject(error));
+      void transport.stop().finally(() => {
+        lock.release();
+        reject(error);
+      });
     }
   });
 }

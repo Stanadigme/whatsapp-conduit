@@ -126,9 +126,23 @@ export class ConduitConnection {
 
   /** Resolve the WA version (if a resolver was provided), then open the socket. */
   async start(): Promise<void> {
-    if (this.fetchVersion) this.version = await this.fetchVersion();
+    await this.resolveVersion();
     this.started = true;
     this.spawn();
+  }
+
+  /**
+   * Refresh the WA Web version, if a resolver was provided. Best-effort: a
+   * failure keeps the previously resolved value (the resolver itself already
+   * falls back to the offline pin).
+   */
+  private async resolveVersion(): Promise<void> {
+    if (!this.fetchVersion) return;
+    try {
+      this.version = await this.fetchVersion();
+    } catch {
+      // keep this.version as-is
+    }
   }
 
   private spawn(): void {
@@ -172,7 +186,12 @@ export class ConduitConnection {
 
   private scheduleReconnect(): void {
     this.reconnectTimer = setTimeout(() => {
-      if (!this.stopped) this.spawn();
+      if (this.stopped) return;
+      // Re-resolve the WA version on reconnect: a forced disconnect can follow
+      // WhatsApp bumping the accepted protocol version.
+      void this.resolveVersion().finally(() => {
+        if (!this.stopped) this.spawn();
+      });
     }, this.reconnectDelayMs);
     // Don't keep the event loop alive solely for a pending reconnect.
     this.reconnectTimer.unref?.();

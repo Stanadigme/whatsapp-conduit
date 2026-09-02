@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import Database from "better-sqlite3";
 import { runInit } from "../src/commands/init.js";
 import { buildStatusReport } from "../src/commands/status.js";
 import { loadConfig } from "../src/config.js";
@@ -56,5 +57,17 @@ describe("buildStatusReport", () => {
     expect(report.allowedChats).toBe(1);
     expect(report.messages).toBe(1);
     expect(report.latestMessageTs).toBe(1700);
+  });
+
+  it("does not report authLinked for a whatsmeow store left by an interrupted link", () => {
+    const configPath = join(dir, "config.yaml");
+    runInit({ configPath, dataDir: join(dir, "data") });
+    const config = loadConfig(configPath);
+    // A store file exists but holds no device row (interrupted pairing).
+    const store = new Database(config.paths.whatsmeowStore);
+    store.exec("create table whatsmeow_device (jid text primary key)");
+    store.close();
+
+    expect(buildStatusReport(configPath).authLinked).toBe(false);
   });
 });
