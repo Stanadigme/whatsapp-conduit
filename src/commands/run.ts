@@ -1,7 +1,8 @@
 import { loadConfig } from "../config.js";
 import { authStateExists, openAuthState } from "../baileys/auth.js";
 import { ConduitConnection } from "../baileys/connect.js";
-import { registerIngestion } from "../baileys/ingest.js";
+import { registerIngestion, type IngestDeps } from "../baileys/ingest.js";
+import { resyncBaileysDirectory } from "../baileys/directory.js";
 import { normalizeJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
 import { upsertAccount } from "../db/queries.js";
@@ -57,6 +58,12 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
   });
 
   const authState = await openAuthState(config.paths.authDir);
+  const ingestDeps: IngestDeps = {
+    db,
+    accountId: config.account.name,
+    config,
+    logger: log,
+  };
 
   log.info(
     {
@@ -71,12 +78,27 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
 
   return new Promise<void>((resolve) => {
     let shuttingDown = false;
+    let initialResyncDone = false;
+
+    const control = new HistoryControlServer(
+      config.paths.controlSocket,
+      async (request) => {
+        if (request.op === "directory.resync") {
+          const sock = connection.socket();
+          if (!sock) throw new Error("not connected to WhatsApp");
+          return { resynced: await resyncBaileysDirectory(sock, ingestDeps) };
+        }
+        // history.start — the Baileys adapter has no HistoryCoordinator.
+        throw new Error("history download requires transport: whatsmeow");
+      },
+    );
 
     const shutdown = (code: number): void => {
       if (shuttingDown) return;
       shuttingDown = true;
       log.info("shutting down");
       connection.stop();
+      void control.close().catch(() => undefined);
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
       try {
@@ -101,6 +123,25 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
         },
         onOpen(info) {
           log.info({ selfJid: info.selfJid }, "connected");
+          if (config.baileys.resyncDirectoryOnConnect && !initialResyncDone) {
+            initialResyncDone = true;
+            const sock = connection.socket();
+            if (sock) {
+              void resyncBaileysDirectory(sock, ingestDeps)
+                .then((r) =>
+                  log.info(
+                    { contacts: r.contacts, groups: r.groups },
+                    "directory resynced on connect",
+                  ),
+                )
+                .catch((err: unknown) =>
+                  log.warn(
+                    { err: err instanceof Error ? err.message : String(err) },
+                    "directory resync on connect failed",
+                  ),
+                );
+            }
+          }
         },
         onClose(info) {
           if (info.loggedOut) {
@@ -114,18 +155,20 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           );
         },
         registerSocket(sock) {
-          registerIngestion(sock, {
-            db,
-            accountId: config.account.name,
-            config,
-            logger: log,
-          });
+          registerIngestion(sock, ingestDeps);
         },
       },
     });
 
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
+
+    control.start().catch((err: unknown) => {
+      log.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        "control socket unavailable; the dashboard cannot trigger a resync",
+      );
+    });
 
     connection.start().catch((err: unknown) => {
       log.error(
@@ -225,9 +268,22 @@ async function runWhatsmeow(
     transport,
     logger: log,
   });
+  const directory = new DirectorySync({
+    db,
+    accountId: config.account.name,
+    logger: log,
+    transport,
+  });
+  directory.register();
   const control = new HistoryControlServer(
     config.paths.controlSocket,
     async (request) => {
+      if (request.op === "directory.resync") {
+        const report = await directory.sync({ groups: true, contacts: true });
+        return {
+          resynced: { contacts: report.contacts, groups: report.groups },
+        };
+      }
       const chatJid = normalizeJid(request.chat);
       const chat = getChat(db, config.account.name, chatJid);
       if (!chat || chat.is_blocked === 1 || chat.is_allowed !== 1) {
@@ -251,13 +307,6 @@ async function runWhatsmeow(
     throw error;
   }
   history.recoverActive();
-  const directory = new DirectorySync({
-    db,
-    accountId: config.account.name,
-    logger: log,
-    transport,
-  });
-  directory.register();
   let directorySyncInFlight: Promise<void> | null = null;
   const refreshGroupDirectory = (): void => {
     if (directorySyncInFlight) return;

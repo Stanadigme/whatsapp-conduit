@@ -142,6 +142,25 @@ export function registerIngestion(sock: WASocket, deps: IngestDeps): void {
   sock.ev.on("chats.update", (chats) => {
     persistChatMetadataList(deps, chats);
   });
+
+  // Group subject changes arrive here rather than through `chats.*`.
+  const persistGroupSubjects = (
+    groups: readonly Partial<{ id: string; subject: string }>[],
+  ): void => {
+    for (const group of groups) {
+      if (typeof group.id !== "string" || !group.subject?.trim()) continue;
+      try {
+        persistChatMetadata(deps, { id: group.id, name: group.subject.trim() });
+      } catch (error) {
+        deps.logger.error(
+          { err: error instanceof Error ? error.message : String(error) },
+          "failed to persist group subject",
+        );
+      }
+    }
+  };
+  sock.ev.on("groups.upsert", persistGroupSubjects);
+  sock.ev.on("groups.update", persistGroupSubjects);
 }
 
 function persistContactMetadataList(
@@ -211,7 +230,10 @@ function persistChatMetadataList(
 }
 
 /** Persist chat names and project direct-chat names into the directory. */
-function persistChatMetadata(deps: IngestDeps, chat: Partial<Chat>): void {
+export function persistChatMetadata(
+  deps: IngestDeps,
+  chat: Partial<Chat>,
+): void {
   if (typeof chat.id !== "string" || chat.id.length === 0) return;
   const jid = normalizeJid(chat.id);
   const name = chat.displayName || chat.name || null;

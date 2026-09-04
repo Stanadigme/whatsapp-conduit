@@ -202,6 +202,11 @@ export class ConduitConnection {
     return id ? jidNormalizedUser(id) : undefined;
   }
 
+  /** The live socket while a connection is open; `undefined` otherwise. */
+  socket(): WASocket | undefined {
+    return this.sock;
+  }
+
   /** Stop reconnecting and close the current socket. */
   stop(): void {
     this.stopped = true;

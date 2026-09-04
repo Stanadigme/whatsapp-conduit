@@ -324,6 +324,9 @@ describe("local dashboard HTTP API", () => {
     upsertChat(db, { accountId, jid: chatJid, name: "Équipe produit" });
     setChatAllowed(db, accountId, chatJid, true);
     const control = new HistoryControlServer(controlPath, async (request) => {
+      if (request.op === "directory.resync") {
+        return { resynced: { contacts: 7, groups: 2 } };
+      }
       const jobId = "history-job-1";
       createHistoryJob(db, {
         id: jobId,
@@ -389,5 +392,53 @@ describe("local dashboard HTTP API", () => {
         sinceTs: 1_700_000_000,
       }),
     );
+
+    const refreshed = await fetch(`${base}/api/directory/refresh`, {
+      method: "POST",
+      headers,
+    });
+    expect(refreshed.status).toBe(202);
+    expect(await refreshed.json()).toEqual({
+      status: "done",
+      contacts: 7,
+      groups: 2,
+    });
+  });
+
+  it("returns 409 when the control socket is unreachable for a resync", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wac-dash-resync-"));
+    const config = resolveConfig({}, { dataDir: dir });
+    const token = ensureDashboardToken(config.web.tokenFile);
+    config.paths.controlSocket = join(dir, "control.sock"); // nothing listening
+    const db = openDb(":memory:", { migrate: true });
+    upsertAccount(db, { id: accountId });
+    const dashboard = await createDashboardServer(config, {
+      db,
+      config,
+      configPath: join(dir, "config.yaml"),
+      models: new ModelDownloader(join(dir, "models")),
+      accountId,
+      pairing: { status: "idle", qr: null, error: null },
+      startPairing: async () => undefined,
+      stopPairing: async () => undefined,
+    });
+    await new Promise<void>((resolve) =>
+      dashboard.server.listen(0, "127.0.0.1", resolve),
+    );
+    resources.push({
+      close: () => dashboard.server.close(),
+      remove: () => {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      },
+    });
+    const address = dashboard.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("dashboard did not bind");
+    const res = await fetch(
+      `http://127.0.0.1:${address.port}/api/directory/refresh`,
+      { method: "POST", headers: { Authorization: `Bearer ${token}` } },
+    );
+    expect(res.status).toBe(409);
   });
 });

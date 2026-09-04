@@ -17,6 +17,7 @@ describe("resolveConfig", () => {
     expect(cfg.baileys.syncFullHistory).toBe(false);
     expect(cfg.baileys.version).toEqual(DEFAULT_BAILEYS_VERSION);
     expect(cfg.baileys.pinVersion).toBe(false);
+    expect(cfg.baileys.resyncDirectoryOnConnect).toBe(true);
 
     expect(cfg.logging.level).toBe("info");
     expect(cfg.logging.baileysLevel).toBe("warn");

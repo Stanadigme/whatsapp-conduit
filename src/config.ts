@@ -101,6 +101,12 @@ export interface BaileysConfig {
   version: BaileysVersion;
   /** Skip the live version fetch and use {@link BaileysConfig.version} verbatim. */
   pinVersion: boolean;
+  /**
+   * Re-fetch contact and group names from WhatsApp once per connection
+   * (`sock.resyncAppState`). A fresh pairing can leave the initial sync parked,
+   * so local names never reach SQLite without this.
+   */
+  resyncDirectoryOnConnect: boolean;
   printQrInTerminal: boolean;
   syncFullHistory: boolean;
   markOnlineOnConnect: boolean;
@@ -436,6 +442,10 @@ export function resolveConfig(
     baileys: {
       version: asBaileysVersion(baileysRaw.version, DEFAULT_BAILEYS_VERSION),
       pinVersion: asBool(baileysRaw.pin_version, false),
+      resyncDirectoryOnConnect: asBool(
+        baileysRaw.resync_directory_on_connect,
+        true,
+      ),
       printQrInTerminal: asBool(baileysRaw.print_qr_in_terminal, true),
       syncFullHistory: asBool(baileysRaw.sync_full_history, false),
       markOnlineOnConnect: asBool(baileysRaw.mark_online_on_connect, false),
@@ -537,6 +547,8 @@ baileys:
   # set pin_version: true to use this tuple verbatim (reproducible / air-gapped).
   version: [${DEFAULT_BAILEYS_VERSION.join(", ")}]
   pin_version: false
+  # Re-fetch contact and group names from WhatsApp once per connection.
+  resync_directory_on_connect: true
   print_qr_in_terminal: true
   sync_full_history: false
   mark_online_on_connect: false

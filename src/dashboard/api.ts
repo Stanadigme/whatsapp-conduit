@@ -1,7 +1,7 @@
 import type { Database } from "better-sqlite3";
 import type { Config } from "../config.js";
 import { maskSecrets } from "../commands/config.js";
-import { requestHistoryStart } from "../control/ipc.js";
+import { requestDirectoryResync, requestHistoryStart } from "../control/ipc.js";
 import { getMessage, listMessages } from "../read/messages.js";
 import { McpRequestError } from "../mcp/types.js";
 import {
@@ -308,6 +308,23 @@ export async function dashboardApi(
       );
     } catch (error) {
       return errorResponse(error, 404);
+    }
+  }
+  if (url.pathname === "/api/directory/refresh" && request.method === "POST") {
+    try {
+      const result = await requestDirectoryResync(
+        context.config.paths.controlSocket,
+      );
+      return json(
+        {
+          status: "done",
+          contacts: result.resynced?.contacts ?? 0,
+          groups: result.resynced?.groups ?? 0,
+        },
+        202,
+      );
+    } catch (error) {
+      return errorResponse(error, 409);
     }
   }
   if (url.pathname === "/api/history/active" && request.method === "GET") {
