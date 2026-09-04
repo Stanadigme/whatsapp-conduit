@@ -203,6 +203,8 @@ describe("local dashboard HTTP API", () => {
     const appJs = await (await fetch(`${base}/app.js`)).text();
     expect(appJs).toContain("same-origin");
     expect(appJs).toContain("refreshRuntimeView");
+    expect(appJs).toContain("previousRuntimeConnection");
+    expect(appJs).toContain("previousBaileysLinkStatus");
     expect(appJs).not.toContain("Bearer");
     expect(appJs).not.toContain('id="token"');
     expect(appJs).toContain("aucun message de cette discussion");
