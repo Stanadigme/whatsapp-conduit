@@ -1,7 +1,11 @@
 import type { Database } from "better-sqlite3";
 import type { Config } from "../config.js";
 import { maskSecrets } from "../commands/config.js";
-import { requestDirectoryResync, requestHistoryStart } from "../control/ipc.js";
+import {
+  requestBaileysPairingStart,
+  requestDirectoryResync,
+  requestHistoryStart,
+} from "../control/ipc.js";
 import { getMessage, listMessages } from "../read/messages.js";
 import { McpRequestError } from "../mcp/types.js";
 import {
@@ -63,7 +67,11 @@ function errorResponse(error: unknown, status = 400): Response {
   const message =
     error instanceof Error ? error.message : "dashboard request failed";
   const safe =
-    message.includes("not available") || message.includes("cannot")
+    message.includes("not available") ||
+    message.includes("unavailable") ||
+    message.includes("cannot") ||
+    message.includes("already active") ||
+    message.includes("awaiting")
       ? message
       : "dashboard request failed";
   return json({ error: safe }, status);
@@ -355,6 +363,19 @@ export async function dashboardApi(
         ? "waiting_qr"
         : "idle",
     });
+  }
+  if (
+    url.pathname === "/api/pairing/baileys/start" &&
+    request.method === "POST"
+  ) {
+    try {
+      const result = await requestBaileysPairingStart(
+        context.config.paths.controlSocket,
+      );
+      return json({ status: result.pairing?.status ?? "starting" }, 202);
+    } catch (error) {
+      return errorResponse(error, 409);
+    }
   }
   if (
     url.pathname === "/api/pairing/baileys/qr.svg" &&

@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import {
   controlAddress,
   HistoryControlServer,
+  requestBaileysPairingStart,
   requestDirectoryResync,
   requestHistoryStart,
 } from "../src/control/ipc.js";
@@ -23,6 +24,9 @@ describe("history control IPC", () => {
       if (request.op === "directory.resync") {
         return { resynced: { contacts: 3, groups: 1 } };
       }
+      if (request.op !== "history.start") {
+        return { pairing: { status: "starting" } };
+      }
       return { jobId: `job-${request.chat}`, status: "queued", reused: false };
     });
     await server.start();
@@ -36,6 +40,10 @@ describe("history control IPC", () => {
       await expect(requestDirectoryResync(path)).resolves.toMatchObject({
         ok: true,
         resynced: { contacts: 3, groups: 1 },
+      });
+      await expect(requestBaileysPairingStart(path)).resolves.toMatchObject({
+        ok: true,
+        pairing: { status: "starting" },
       });
     } finally {
       await server.close();

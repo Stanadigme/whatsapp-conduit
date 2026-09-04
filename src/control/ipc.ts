@@ -21,8 +21,16 @@ export interface DirectoryResyncRequest {
   requestId: string;
 }
 
+export interface PairingStartRequest {
+  op: "pairing.start";
+  requestId: string;
+}
+
 /** Every request the daemon control socket accepts. */
-export type ControlRequest = HistoryStartRequest | DirectoryResyncRequest;
+export type ControlRequest =
+  | HistoryStartRequest
+  | DirectoryResyncRequest
+  | PairingStartRequest;
 
 /** @deprecated use {@link HistoryStartRequest} */
 export type HistoryControlRequest = HistoryStartRequest;
@@ -36,6 +44,8 @@ export interface ControlResponse {
   reused?: boolean;
   /** `directory.resync` */
   resynced?: { contacts: number; groups: number };
+  /** `pairing.start` */
+  pairing?: { status: "starting" };
   error?: string;
 }
 
@@ -44,7 +54,8 @@ export type HistoryControlResponse = ControlResponse;
 
 export type ControlResult =
   | { jobId: string; status: string; reused: boolean }
-  | { resynced: { contacts: number; groups: number } };
+  | { resynced: { contacts: number; groups: number } }
+  | { pairing: { status: "starting" } };
 
 export interface ControlHandler {
   (request: ControlRequest): Promise<ControlResult>;
@@ -227,6 +238,18 @@ export async function requestDirectoryResync(
   );
 }
 
+/** Ask the Baileys ingestion daemon to begin its exclusive pairing flow. */
+export async function requestBaileysPairingStart(
+  path: string,
+  timeoutMs = 5_000,
+): Promise<ControlResponse> {
+  return sendControlRequest(
+    path,
+    { op: "pairing.start", requestId: randomUUID() },
+    timeoutMs,
+  );
+}
+
 /**
  * Longest unix socket path we are willing to bind. `sun_path` holds 104 bytes
  * on macOS and 108 on Linux, and the kernel does not reject a longer path — it
@@ -267,7 +290,8 @@ function isControlRequest(value: unknown): value is ControlRequest {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
   if (typeof record.requestId !== "string") return false;
-  if (record.op === "directory.resync") return true;
+  if (record.op === "directory.resync" || record.op === "pairing.start")
+    return true;
   return (
     record.op === "history.start" &&
     typeof record.chat === "string" &&

@@ -60,11 +60,24 @@ describe("local dashboard HTTP API", () => {
     const dir = mkdtempSync(join(tmpdir(), "wac-dashboard-link-qr-"));
     const config = resolveConfig({}, { dataDir: dir });
     const token = ensureDashboardToken(config.web.tokenFile);
+    config.paths.controlSocket = join(dir, "control.sock");
     const db = openDb(":memory:", { migrate: true });
     upsertAccount(db, { id: accountId });
     const qr =
       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>';
     writeFileSync(join(dir, "pairing-qr.svg"), `${qr}\n`, { mode: 0o600 });
+    let pairingRequests = 0;
+    const control = new HistoryControlServer(
+      config.paths.controlSocket,
+      async (request) => {
+        if (request.op === "pairing.start") {
+          pairingRequests += 1;
+          return { pairing: { status: "starting" } };
+        }
+        throw new Error("not available");
+      },
+    );
+    await control.start();
     const dashboard = await createDashboardServer(config, {
       db,
       config,
@@ -84,6 +97,10 @@ describe("local dashboard HTTP API", () => {
         db.close();
         rmSync(dir, { recursive: true, force: true });
       },
+    });
+    resources.push({
+      close: () => void control.close(),
+      remove: () => undefined,
     });
     const address = dashboard.server.address();
     if (!address || typeof address === "string")
@@ -113,6 +130,14 @@ describe("local dashboard HTTP API", () => {
       connection: "disconnected",
       authLinked: false,
     });
+
+    const start = await fetch(`${base}/api/pairing/baileys/start`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(start.status).toBe(202);
+    expect(await start.json()).toEqual({ status: "starting" });
+    expect(pairingRequests).toBe(1);
 
     writeFileSync(join(dir, "pairing-qr.svg"), "<script>bad</script>");
     const unavailable = await fetch(`${base}/api/pairing/baileys/qr.svg`, {
@@ -393,6 +418,9 @@ describe("local dashboard HTTP API", () => {
     const control = new HistoryControlServer(controlPath, async (request) => {
       if (request.op === "directory.resync") {
         return { resynced: { contacts: 7, groups: 2 } };
+      }
+      if (request.op !== "history.start") {
+        return { pairing: { status: "starting" } };
       }
       const jobId = "history-job-1";
       createHistoryJob(db, {

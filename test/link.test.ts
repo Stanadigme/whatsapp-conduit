@@ -172,3 +172,23 @@ describe("whatsmeow link session lock", () => {
     );
   });
 });
+
+describe("Baileys link session lock", () => {
+  it("refuses to link while the ingestion daemon holds the auth directory", async () => {
+    const configPath = join(dir, "config.yaml");
+    runInit({ configPath, dataDir: join(dir, "data") });
+    const { paths } = (await import("../src/config.js")).loadConfig(configPath);
+    writeFileSync(
+      `${paths.authDir}.lock`,
+      `${JSON.stringify({
+        pid: process.pid,
+        host: hostname(),
+        startedAt: 1,
+      })}\n`,
+    );
+
+    await expect(runLink({ configPath, qr: true })).rejects.toThrow(
+      /Baileys.*auth|auth state/i,
+    );
+  });
+});

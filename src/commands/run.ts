@@ -1,6 +1,11 @@
 import { loadConfig } from "../config.js";
 import { authStateExists, openAuthState } from "../baileys/auth.js";
 import { ConduitConnection } from "../baileys/connect.js";
+import { acquireBaileysSessionLock } from "../baileys/session-lock.js";
+import {
+  prepareBaileysRelink,
+  restoreBaileysRelink,
+} from "../baileys/relink.js";
 import { registerIngestion, type IngestDeps } from "../baileys/ingest.js";
 import { resyncBaileysDirectory } from "../baileys/directory.js";
 import { normalizeJid } from "../baileys/jid.js";
@@ -20,6 +25,8 @@ import {
   type SessionLock,
 } from "../whatsmeow/session-lock.js";
 import { RuntimeStatusWriter } from "../runtime-status.js";
+import { runLink } from "./link.js";
+import { join } from "node:path";
 
 export interface RunOptions {
   configPath?: string;
@@ -37,20 +44,22 @@ const RUNTIME_STATUS_HEARTBEAT_MS = 15_000;
  * The returned promise resolves on graceful shutdown.
  */
 export async function runRun(options: RunOptions = {}): Promise<void> {
-  const config = loadConfig(resolveConfigPath(options.configPath));
+  const configPath = resolveConfigPath(options.configPath);
+  const config = loadConfig(configPath);
   const log = appLogger(config);
 
   if (config.transport === "whatsmeow") {
     return runWhatsmeow(config, log, options.signal);
   }
 
-  // Refuse to start unpaired: `run` has no QR handler, so opening a fresh auth
-  // state would spin in an unrecoverable pairing/reconnect loop. Require link.
+  // A fresh auth state cannot connect by itself. Keep a local control socket
+  // open so the authenticated dashboard can ask this same ingestion process to
+  // own a QR pairing session (ADR-0026), rather than opening Baileys itself.
   if (!authStateExists(config.paths.authDir)) {
-    throw new Error(
-      "No linked device found. Run `whatsapp-conduit link` before `run`.",
-    );
+    return runBaileysWaitingForPairing(config, configPath, log, options.signal);
   }
+
+  const sessionLock = acquireBaileysSessionLock(config.paths.authDir);
 
   const db = openDb(config.paths.sqlite, { migrate: true });
 
@@ -87,6 +96,8 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
   return new Promise<void>((resolve) => {
     let shuttingDown = false;
     let initialResyncDone = false;
+    let pairingInFlight = false;
+    let pairingAbort: AbortController | undefined;
     const heartbeat = setInterval(
       () => void runtimeStatus.update(),
       RUNTIME_STATUS_HEARTBEAT_MS,
@@ -95,6 +106,18 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     const control = new HistoryControlServer(
       config.paths.controlSocket,
       async (request) => {
+        if (request.op === "pairing.start") {
+          if (pairingInFlight) {
+            throw new Error("Baileys pairing is already active");
+          }
+          pairingInFlight = true;
+          pairingAbort = new AbortController();
+          void beginBaileysPairing();
+          return { pairing: { status: "starting" } };
+        }
+        if (pairingInFlight) {
+          throw new Error("Baileys pairing is already active");
+        }
         if (request.op === "directory.resync") {
           const sock = connection.socket();
           if (!sock) throw new Error("not connected to WhatsApp");
@@ -111,8 +134,10 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
       log.info("shutting down");
       clearInterval(heartbeat);
       void runtimeStatus.update({ connection: "disconnected" });
-      connection.stop();
+      pairingAbort?.abort();
+      void connection.stop();
       void control.close().catch(() => undefined);
+      sessionLock.release();
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
       try {
@@ -124,6 +149,55 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
       resolve();
     };
     const onSignal = (): void => shutdown(0);
+
+    async function beginBaileysPairing(): Promise<void> {
+      let archivedAuthDir: string | null = null;
+      try {
+        // `stop()` awaits Baileys' socket close before the auth directory is
+        // moved. This is the boundary between the daemon and the QR session.
+        await connection.stop();
+        sessionLock.release();
+        if (shuttingDown) return;
+        archivedAuthDir = prepareBaileysRelink(config.paths.authDir);
+        if (shuttingDown) {
+          restoreBaileysRelink(config.paths.authDir, archivedAuthDir);
+          return;
+        }
+        await runLink({
+          configPath,
+          qr: true,
+          qrOut: join(config.paths.dataDir, "pairing-qr.svg"),
+          timeoutSec: 600,
+          signal: pairingAbort?.signal,
+        });
+      } catch (error) {
+        if (archivedAuthDir) {
+          try {
+            restoreBaileysRelink(config.paths.authDir, archivedAuthDir);
+          } catch (restoreError) {
+            log.error(
+              {
+                err:
+                  restoreError instanceof Error
+                    ? restoreError.message
+                    : String(restoreError),
+              },
+              "failed to restore the previous Baileys auth state",
+            );
+          }
+        }
+        if (!shuttingDown) {
+          log.warn(
+            { err: error instanceof Error ? error.message : String(error) },
+            "Baileys dashboard pairing did not complete; previous auth restored",
+          );
+        }
+      } finally {
+        // Docker's `unless-stopped` policy starts a clean daemon with either
+        // the newly linked state or the restored previous state.
+        if (!shuttingDown) shutdown(0);
+      }
+    }
 
     const connection = new ConduitConnection({
       config,
@@ -199,6 +273,105 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
         "failed to start connection",
       );
       shutdown(1);
+    });
+  });
+}
+
+/**
+ * Keep the ingestion process controllable when there is no completed Baileys
+ * session. It deliberately does not create a WhatsApp socket until the local,
+ * authenticated dashboard has requested pairing through the control socket.
+ */
+async function runBaileysWaitingForPairing(
+  config: ReturnType<typeof loadConfig>,
+  configPath: string,
+  log: ReturnType<typeof appLogger>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
+    transport: "baileys",
+    connection: "disconnected",
+    authLinked: false,
+  });
+  await runtimeStatus.update();
+  log.info("no linked Baileys device yet; waiting for dashboard pairing");
+
+  return new Promise<void>((resolve, reject) => {
+    let stopped = false;
+    let pairingInFlight = false;
+    let finishing: Promise<void> | undefined;
+    const pairingAbort = new AbortController();
+
+    const finish = (): Promise<void> => {
+      if (finishing) return finishing;
+      stopped = true;
+      pairingAbort.abort();
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+      signal?.removeEventListener("abort", onAbort);
+      finishing = runtimeStatus
+        .update({
+          connection: "disconnected",
+          authLinked: authStateExists(config.paths.authDir),
+        })
+        .catch(() => undefined)
+        .then(() => control.close().catch(() => undefined))
+        .then(() => resolve());
+      return finishing;
+    };
+    const onSignal = (): void => void finish();
+    const onAbort = (): void => void finish();
+
+    const beginPairing = async (): Promise<void> => {
+      try {
+        await runLink({
+          configPath,
+          qr: true,
+          qrOut: join(config.paths.dataDir, "pairing-qr.svg"),
+          timeoutSec: 600,
+          signal: pairingAbort.signal,
+        });
+      } catch (error) {
+        if (!stopped) {
+          log.warn(
+            { err: error instanceof Error ? error.message : String(error) },
+            "Baileys dashboard pairing did not complete",
+          );
+        }
+      } finally {
+        void finish();
+      }
+    };
+
+    const control = new HistoryControlServer(
+      config.paths.controlSocket,
+      async (request) => {
+        if (request.op !== "pairing.start") {
+          throw new Error("Baileys is awaiting an operator pairing request");
+        }
+        if (pairingInFlight) {
+          throw new Error("Baileys pairing is already active");
+        }
+        pairingInFlight = true;
+        void beginPairing();
+        return { pairing: { status: "starting" } };
+      },
+    );
+
+    if (signal?.aborted) {
+      void finish();
+      return;
+    }
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    control.start().catch((error: unknown) => {
+      if (stopped) return;
+      stopped = true;
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+      signal?.removeEventListener("abort", onAbort);
+      reject(error instanceof Error ? error : new Error(String(error)));
     });
   });
 }
@@ -306,6 +479,9 @@ async function runWhatsmeow(
         return {
           resynced: { contacts: report.contacts, groups: report.groups },
         };
+      }
+      if (request.op !== "history.start") {
+        throw new Error("Baileys pairing is not available with whatsmeow");
       }
       const chatJid = normalizeJid(request.chat);
       const chat = getChat(db, config.account.name, chatJid);

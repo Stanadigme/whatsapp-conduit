@@ -208,11 +208,11 @@ export class ConduitConnection {
   }
 
   /** Stop reconnecting and close the current socket. */
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     try {
-      this.sock?.end(undefined);
+      await this.sock?.end(undefined);
     } catch {
       // best-effort close
     }
