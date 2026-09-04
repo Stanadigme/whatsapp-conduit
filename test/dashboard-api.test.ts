@@ -106,6 +106,14 @@ describe("local dashboard HTTP API", () => {
     expect(svg.headers.get("content-type")).toContain("image/svg+xml");
     expect(await svg.text()).toBe(qr);
 
+    const runtime = await fetch(`${base}/api/runtime`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(await runtime.json()).toEqual({
+      connection: "disconnected",
+      authLinked: false,
+    });
+
     writeFileSync(join(dir, "pairing-qr.svg"), "<script>bad</script>");
     const unavailable = await fetch(`${base}/api/pairing/baileys/qr.svg`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -155,6 +163,7 @@ describe("local dashboard HTTP API", () => {
     expect(staticResponse.status).toBe(200);
     const staticHtml = await staticResponse.text();
     expect(staticHtml).toContain("Contacts et groupes");
+    expect(staticHtml).toContain("data-requires-connection hidden");
     expect(staticHtml).not.toContain('id="token"');
     const setCookie = staticResponse.headers.get("set-cookie");
     expect(setCookie).toMatch(
@@ -168,6 +177,7 @@ describe("local dashboard HTTP API", () => {
     );
     const appJs = await (await fetch(`${base}/app.js`)).text();
     expect(appJs).toContain("same-origin");
+    expect(appJs).toContain("refreshRuntimeView");
     expect(appJs).not.toContain("Bearer");
     expect(appJs).not.toContain('id="token"');
     expect(appJs).toContain("aucun message de cette discussion");

@@ -27,6 +27,8 @@ export interface RunOptions {
   signal?: AbortSignal;
 }
 
+const RUNTIME_STATUS_HEARTBEAT_MS = 15_000;
+
 /**
  * Run the foreground observe-only sync daemon: connect, reconnect on transient
  * drops, and stay alive until SIGINT/SIGTERM. Message ingestion handlers are
@@ -58,6 +60,12 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
   });
 
   const authState = await openAuthState(config.paths.authDir);
+  const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
+    transport: "baileys",
+    connection: "disconnected",
+    authLinked: true,
+  });
+  void runtimeStatus.update();
   const ingestDeps: IngestDeps = {
     db,
     accountId: config.account.name,
@@ -79,6 +87,10 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
   return new Promise<void>((resolve) => {
     let shuttingDown = false;
     let initialResyncDone = false;
+    const heartbeat = setInterval(
+      () => void runtimeStatus.update(),
+      RUNTIME_STATUS_HEARTBEAT_MS,
+    );
 
     const control = new HistoryControlServer(
       config.paths.controlSocket,
@@ -97,6 +109,8 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
       if (shuttingDown) return;
       shuttingDown = true;
       log.info("shutting down");
+      clearInterval(heartbeat);
+      void runtimeStatus.update({ connection: "disconnected" });
       connection.stop();
       void control.close().catch(() => undefined);
       process.off("SIGINT", onSignal);
@@ -119,9 +133,14 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
       fetchVersion: createVersionResolver(config, log),
       handlers: {
         onConnecting() {
+          void runtimeStatus.update({ connection: "unknown" });
           log.info("connecting to WhatsApp");
         },
         onOpen(info) {
+          void runtimeStatus.update({
+            connection: "connected",
+            authLinked: true,
+          });
           log.info({ selfJid: info.selfJid }, "connected");
           if (config.baileys.resyncDirectoryOnConnect && !initialResyncDone) {
             initialResyncDone = true;
@@ -144,6 +163,10 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           }
         },
         onClose(info) {
+          void runtimeStatus.update({
+            connection: "disconnected",
+            authLinked: !info.loggedOut,
+          });
           if (info.loggedOut) {
             log.error("logged out — re-link required; stopping");
             shutdown(1);
@@ -364,10 +387,15 @@ async function runWhatsmeow(
 
   return new Promise<void>((resolve) => {
     let shuttingDown = false;
+    const heartbeat = setInterval(
+      () => void runtimeStatus.update(),
+      RUNTIME_STATUS_HEARTBEAT_MS,
+    );
     const shutdown = (code: number): void => {
       if (shuttingDown) return;
       shuttingDown = true;
       log.info("shutting down");
+      clearInterval(heartbeat);
       void runtimeStatus.update({ connection: "disconnected" });
       void control
         .close()

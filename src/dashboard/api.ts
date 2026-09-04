@@ -19,6 +19,7 @@ import { findCatalogueModel } from "../stt/models.js";
 import type { ModelDownloader } from "./models.js";
 import { applySttSettings, sttHealth, sttView } from "./stt.js";
 import { readLiveBaileysLinkQr } from "./baileys-link-qr.js";
+import { readRuntimeStatus } from "../runtime-status.js";
 
 export interface DashboardPairing {
   status: "disabled" | "idle" | "waiting_qr" | "connected" | "error";
@@ -129,6 +130,13 @@ export async function dashboardApi(
     return json({
       service: "whatsapp-conduit",
       pairing: context.pairing.status,
+    });
+  }
+  if (url.pathname === "/api/runtime" && request.method === "GET") {
+    const runtime = await readRuntimeStatus(context.config.paths.runtimeStatus);
+    return json({
+      connection: runtime?.connection ?? "disconnected",
+      authLinked: runtime?.authLinked ?? false,
     });
   }
   if (url.pathname === "/api/config" && request.method === "GET") {
