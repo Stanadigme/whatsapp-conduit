@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import qrcode from "qrcode-terminal";
 import { qrSvg } from "../util/qr-svg.js";
@@ -117,15 +117,6 @@ export async function runLink(
               });
             return;
           }
-          if (!config.baileys.printQrInTerminal) {
-            // The QR payload is a live pairing token; honor the operator's
-            // choice to keep it out of (possibly captured) stdout.
-            log.warn(
-              "a QR code is available but baileys.print_qr_in_terminal is false; " +
-                "enable it to display the code and link a device",
-            );
-            return;
-          }
           if (qrOut) {
             try {
               writeFileSync(qrOut, qrSvg(qr, { px: 800 }), { mode: 0o600 });
@@ -135,7 +126,21 @@ export async function runLink(
                 { err: err instanceof Error ? err.message : String(err) },
                 "failed to write the QR SVG",
               );
+              fail(new Error("failed to write QR SVG"));
+              return;
             }
+            // `--qr-out` is used by a protected dashboard. Never render the
+            // live credential to stdout as container logs may retain it.
+            return;
+          }
+          if (!config.baileys.printQrInTerminal) {
+            // The QR payload is a live pairing token; honor the operator's
+            // choice to keep it out of (possibly captured) stdout.
+            log.warn(
+              "a QR code is available but baileys.print_qr_in_terminal is false; " +
+                "enable it to display the code and link a device",
+            );
+            return;
           }
           process.stdout.write(
             "\nScan this QR code in WhatsApp → Settings → Linked Devices → Link a device:\n\n",
@@ -149,6 +154,7 @@ export async function runLink(
           if (settled) return;
           settled = true;
           if (timer) clearTimeout(timer);
+          removeQrOutput();
 
           const accountId = persistAccount(config, info.selfJid);
           process.stdout.write(
@@ -202,11 +208,22 @@ export async function runLink(
       settled = true;
       clearTimeout(timer);
       connection.stop();
+      removeQrOutput();
       void clearPendingPairing(authState)
         .catch(() => {
           log.warn("failed to clear incomplete pairing state");
         })
         .finally(() => reject(error));
+    }
+
+    function removeQrOutput(): void {
+      if (!qrOut) return;
+      try {
+        unlinkSync(qrOut);
+      } catch {
+        // It may not have been written yet, or the data volume may already
+        // have been removed by the operator. In both cases fail closed.
+      }
     }
   });
 }

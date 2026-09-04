@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,6 +56,63 @@ afterEach(() => {
 });
 
 describe("local dashboard HTTP API", () => {
+  it("serves only a live Baileys link QR through the authenticated dashboard", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wac-dashboard-link-qr-"));
+    const config = resolveConfig({}, { dataDir: dir });
+    const token = ensureDashboardToken(config.web.tokenFile);
+    const db = openDb(":memory:", { migrate: true });
+    upsertAccount(db, { id: accountId });
+    const qr =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>';
+    writeFileSync(join(dir, "pairing-qr.svg"), `${qr}\n`, { mode: 0o600 });
+    const dashboard = await createDashboardServer(config, {
+      db,
+      config,
+      configPath: join(dir, "config.yaml"),
+      models: new ModelDownloader(join(dir, "models")),
+      accountId,
+      pairing: { status: "disabled", qr: null, error: null },
+      startPairing: async () => undefined,
+      stopPairing: async () => undefined,
+    });
+    await new Promise<void>((resolve) =>
+      dashboard.server.listen(0, "127.0.0.1", resolve),
+    );
+    resources.push({
+      close: () => dashboard.server.close(),
+      remove: () => {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      },
+    });
+    const address = dashboard.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("dashboard did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+
+    expect((await fetch(`${base}/api/pairing/baileys/status`)).status).toBe(
+      401,
+    );
+    const status = await fetch(`${base}/api/pairing/baileys/status`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({ status: "waiting_qr" });
+
+    const svg = await fetch(`${base}/api/pairing/baileys/qr.svg`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(svg.status).toBe(200);
+    expect(svg.headers.get("content-type")).toContain("image/svg+xml");
+    expect(await svg.text()).toBe(qr);
+
+    writeFileSync(join(dir, "pairing-qr.svg"), "<script>bad</script>");
+    const unavailable = await fetch(`${base}/api/pairing/baileys/qr.svg`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(unavailable.status).toBe(404);
+  });
+
   it("requires the bearer token while serving the static dashboard", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wac-dashboard-api-"));
     const config = resolveConfig({}, { dataDir: dir });

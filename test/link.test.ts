@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +21,37 @@ afterEach(() => {
 });
 
 describe("pairing-code readiness", () => {
+  it("writes a headless QR without retaining it after a successful link", async () => {
+    const configPath = join(dir, "config.yaml");
+    const dataDir = join(dir, "data");
+    const qrOut = join(dataDir, "pairing-qr.svg");
+    runInit({ configPath, dataDir });
+    let connected: (() => void) | undefined;
+    const connectionFactory = ({ handlers }: ConnectionDeps) => ({
+      async start(): Promise<void> {
+        handlers.onQr?.("opaque-qr-payload");
+        connected = () =>
+          handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+      },
+      stop(): void {},
+    });
+
+    const linking = runLink(
+      { configPath, qr: true, qrOut },
+      { connectionFactory },
+    );
+    await vi.waitFor(() => expect(existsSync(qrOut)).toBe(true));
+    expect(process.stdout.write).toHaveBeenCalledWith(
+      `QR code written to ${qrOut}\n`,
+    );
+
+    connected?.();
+    await expect(linking).resolves.toEqual(
+      expect.objectContaining({ selfJid: "49123@s.whatsapp.net" }),
+    );
+    expect(existsSync(qrOut)).toBe(false);
+  });
+
   it("waits for the WebSocket before requesting a code", async () => {
     let releaseReady!: () => void;
     const waitForSocketOpen = vi.fn(

@@ -18,6 +18,7 @@ import {
 import { findCatalogueModel } from "../stt/models.js";
 import type { ModelDownloader } from "./models.js";
 import { applySttSettings, sttHealth, sttView } from "./stt.js";
+import { readLiveBaileysLinkQr } from "./baileys-link-qr.js";
 
 export interface DashboardPairing {
   status: "disabled" | "idle" | "waiting_qr" | "connected" | "error";
@@ -42,6 +43,16 @@ function json(data: unknown, status = 200): Response {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function svg(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
       "Cache-Control": "no-store",
     },
   });
@@ -326,6 +337,23 @@ export async function dashboardApi(
     } catch (error) {
       return errorResponse(error, 409);
     }
+  }
+  if (
+    url.pathname === "/api/pairing/baileys/status" &&
+    request.method === "GET"
+  ) {
+    return json({
+      status: readLiveBaileysLinkQr(context.config.paths.dataDir)
+        ? "waiting_qr"
+        : "idle",
+    });
+  }
+  if (
+    url.pathname === "/api/pairing/baileys/qr.svg" &&
+    request.method === "GET"
+  ) {
+    const qr = readLiveBaileysLinkQr(context.config.paths.dataDir);
+    return qr ? svg(qr) : json({ error: "QR code is not available" }, 404);
   }
   if (url.pathname === "/api/history/active" && request.method === "GET") {
     const job = getActiveHistoryJob(context.db, context.accountId);
