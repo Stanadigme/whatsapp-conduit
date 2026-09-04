@@ -8,6 +8,7 @@ import type {
   ParticipantRow,
 } from "../db/queries.js";
 import {
+  directoryDisplayName,
   directoryTablesAvailable,
   getDirectoryEntityByJid,
   listDirectoryAliases,
@@ -72,8 +73,8 @@ function chatView(
 ): ChatView {
   return {
     jid: row.jid,
-    name: row.name ?? entity?.name ?? row.push_name ?? row.jid,
-    label: row.name ?? entity?.name ?? row.push_name ?? row.jid,
+    name: directoryDisplayName(entity) || row.name || row.push_name || row.jid,
+    label: directoryDisplayName(entity) || row.name || row.push_name || row.jid,
     pushName: entity?.push_name ?? row.push_name,
     isGroup: row.is_group === 1,
     isStatus: row.is_status === 1,
@@ -168,7 +169,8 @@ export function searchContacts(
              or lower(coalesce(e.verified_name, '')) like lower(?)
              or exists (select 1 from directory_aliases a
                         where a.entity_id = e.id and lower(a.alias_jid) like lower(?)))
-         order by coalesce(e.name, e.canonical_jid)
+         order by coalesce(e.display_name, e.verified_name, e.push_name,
+                           e.name, e.canonical_jid)
          limit ?`,
       )
       .all(ctx.accountId, like, like, like, like, like, like, limit);
@@ -201,7 +203,7 @@ export function searchContacts(
             or lower(coalesce(p.display_name, '')) like lower(?)
             or lower(coalesce(p.push_name, '')) like lower(?)
             or lower(coalesce(p.verified_name, '')) like lower(?))
-       order by coalesce(p.display_name, p.push_name, p.jid)
+       order by coalesce(p.display_name, p.verified_name, p.push_name, p.jid)
        limit ?`,
     )
     .all(
@@ -248,7 +250,7 @@ export function listGroupParticipants(
           aliases.find((alias) => alias.alias_type === "lid")?.alias_jid ??
           null,
         phone: projection?.phone ?? null,
-        display_name: member.display_name ?? member.name,
+        display_name: directoryDisplayName(member),
         push_name: member.push_name,
         verified_name: member.verified_name,
         first_seen_at: member.first_seen_at,
@@ -282,7 +284,7 @@ export function listGroupParticipants(
                and gm2.is_active = 1
            )
        )
-       order by coalesce(display_name, push_name, jid)
+         order by coalesce(display_name, verified_name, push_name, jid)
        limit ?`,
     )
     .all(ctx.accountId, chat.jid, chat.jid, ctx.accountId, chat.jid, limit);
@@ -553,6 +555,9 @@ export function chatStats(
   chatJid: string,
 ): Record<string, unknown> {
   const chat = allowedChat(ctx, chatJid);
+  const entity = directoryTablesAvailable(ctx.db)
+    ? getDirectoryEntityByJid(ctx.db, ctx.accountId, chat.jid)
+    : undefined;
   const row =
     ctx.db
       .prepare<[string, string], Record<string, number | null>>(
@@ -566,7 +571,8 @@ export function chatStats(
       .get(ctx.accountId, chat.jid) ?? {};
   return {
     chatJid: chat.jid,
-    name: chat.name,
+    name:
+      directoryDisplayName(entity) || chat.name || chat.push_name || chat.jid,
     isGroup: chat.is_group === 1,
     messages: row.messages ?? 0,
     audio: row.audio ?? 0,

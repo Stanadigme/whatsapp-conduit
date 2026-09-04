@@ -1,5 +1,6 @@
 import type { Database } from "better-sqlite3";
 import {
+  directoryDisplayName,
   directoryTablesAvailable,
   getDirectoryEntityByJid,
 } from "../db/directory.js";
@@ -118,19 +119,28 @@ function participantName(
       senderJid,
       "contact",
     );
-    const name = entity?.name ?? entity?.display_name ?? entity?.push_name;
+    const name = directoryDisplayName(entity);
     if (name) return name;
   }
   const participant = ctx.db
     .prepare<
       [string, string],
-      { display_name: string | null; push_name: string | null }
+      {
+        display_name: string | null;
+        verified_name: string | null;
+        push_name: string | null;
+      }
     >(
-      `select display_name, push_name from participants
+      `select display_name, verified_name, push_name from participants
        where account_id = ? and jid = ?`,
     )
     .get(ctx.accountId, senderJid);
-  return participant?.display_name ?? participant?.push_name ?? null;
+  return (
+    participant?.display_name ||
+    participant?.verified_name ||
+    participant?.push_name ||
+    null
+  );
 }
 
 export function messageView(

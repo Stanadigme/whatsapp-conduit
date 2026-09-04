@@ -133,7 +133,8 @@ describe("MCP server", () => {
       name: "wa_chats_list",
       arguments: {},
     });
-    expect(JSON.stringify(chats)).toContain("Allowed chat");
+    expect(JSON.stringify(chats)).toContain("Allowed contact");
+    expect(JSON.stringify(chats)).not.toContain("Allowed chat");
     expect(JSON.stringify(chats)).not.toContain("Hidden chat");
 
     const messages = await client.callTool({

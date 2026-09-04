@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import { openDb } from "../src/db/index.js";
 import { loadMigrations, runMigrations } from "../src/db/migrations.js";
+import { directoryDisplayName } from "../src/db/directory.js";
 import {
   listGroupMembers,
   upsertAccount,
@@ -218,6 +219,36 @@ describe("DirectorySync", () => {
     db.close();
   });
 
+  it("resolves contact names local, verified, public, then JID", () => {
+    const { db } = setup();
+    const local = upsertParticipantAndGetEntity(db, {
+      jid: "491235@s.whatsapp.net",
+      displayName: "Nom local",
+      verifiedName: "Entreprise vérifiée",
+      pushName: "Nom public",
+    });
+    expect(directoryDisplayName(local)).toBe("Nom local");
+
+    const verified = upsertParticipantAndGetEntity(db, {
+      jid: "491236@s.whatsapp.net",
+      verifiedName: "Entreprise vérifiée",
+      pushName: "Nom public",
+    });
+    expect(directoryDisplayName(verified)).toBe("Entreprise vérifiée");
+
+    const publicName = upsertParticipantAndGetEntity(db, {
+      jid: "491237@s.whatsapp.net",
+      pushName: "Nom public",
+    });
+    expect(directoryDisplayName(publicName)).toBe("Nom public");
+
+    const jid = upsertParticipantAndGetEntity(db, {
+      jid: "491238@s.whatsapp.net",
+    });
+    expect(directoryDisplayName(jid)).toBe("491238@s.whatsapp.net");
+    db.close();
+  });
+
   it("applies group deltas immediately and preserves a role on partial joins", async () => {
     const { db, transport, directory } = setup();
     directory.register();
@@ -251,3 +282,20 @@ describe("DirectorySync", () => {
     db.close();
   });
 });
+
+function upsertParticipantAndGetEntity(
+  db: ReturnType<typeof setup>["db"],
+  input: {
+    jid: string;
+    displayName?: string;
+    verifiedName?: string;
+    pushName?: string;
+  },
+) {
+  upsertParticipant(db, { accountId: "acct", ...input });
+  return db
+    .prepare(
+      "select * from directory_entities where account_id = 'acct' and canonical_jid = ?",
+    )
+    .get(input.jid) as Parameters<typeof directoryDisplayName>[0];
+}
