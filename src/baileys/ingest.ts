@@ -23,6 +23,7 @@ import {
 } from "../db/queries.js";
 import { nowSec } from "../util/time.js";
 import { isGroupJid, isStatusJid, normalizeJid, phoneFromJid } from "./jid.js";
+import { downloadAudioIfEnabled } from "./media.js";
 import {
   normalizeMessage,
   normalizeReaction,
@@ -70,7 +71,18 @@ export function registerIngestion(sock: WASocket, deps: IngestDeps): void {
     if (type !== "notify" && type !== "append") return;
     for (const msg of messages) {
       try {
-        ingestMessage(deps, msg);
+        const stored = ingestMessage(deps, msg);
+        // Fire-and-forget: a media outage must never stall ingestion.
+        if (stored) {
+          void downloadAudioIfEnabled(msg, stored, deps).catch(
+            (err: unknown) => {
+              deps.logger.error(
+                { err: err instanceof Error ? err.message : String(err) },
+                "failed to schedule audio download",
+              );
+            },
+          );
+        }
       } catch (err) {
         deps.logger.error(
           { err: err instanceof Error ? err.message : String(err) },
@@ -337,14 +349,30 @@ function senderPasses(
 }
 
 /** Ingest a single message from `messages.upsert`. */
-export function ingestMessage(deps: IngestDeps, msg: WAMessage): void {
+/**
+ * Normalize and persist one inbound message.
+ *
+ * Returns the stored message, or `null` when nothing was written — a skip, or
+ * a chat/sender the filters reject. Callers use that to decide whether to
+ * follow up on the message: media is only ever fetched for a conversation we
+ * actually persisted.
+ */
+export function ingestMessage(
+  deps: IngestDeps,
+  msg: WAMessage,
+): NormalizedMessage | null {
   const result = normalizeMessage(msg);
   if (result.action === "skip") {
     deps.logger.debug({ reason: result.reason }, "skipped message");
-    return;
+    return null;
   }
 
-  ingestNormalizedResult(deps, result, rawJsonOf(deps.config, msg));
+  const stored = ingestNormalizedResult(
+    deps,
+    result,
+    rawJsonOf(deps.config, msg),
+  );
+  return stored && result.action === "store" ? result.message : null;
 }
 
 /** Persist a transport-independent normalized event. */

@@ -531,3 +531,60 @@ describe("ingestMessage persistence", () => {
     d.db.close();
   });
 });
+
+/**
+ * The media download hook keys off this return value, so it doubles as the
+ * privacy guard: a chat the filters reject must never yield a message to
+ * follow up on, or we would fetch audio for a conversation we refused to
+ * store.
+ */
+describe("ingestMessage return value gates follow-up work", () => {
+  const audio = () =>
+    msg({
+      key: { remoteJid: "c@s.whatsapp.net", fromMe: false, id: "AUDIO1" },
+      message: { audioMessage: { seconds: 3, mimetype: "audio/ogg" } },
+    });
+
+  it("returns the stored message for a persisted audio note", () => {
+    const d = deps(baseConfig);
+    const stored = ingestMessage(d, audio());
+    expect(stored?.messageType).toBe("audio");
+    expect(stored?.messageId).toBe("AUDIO1");
+    d.db.close();
+  });
+
+  it("returns null for a blocked chat", () => {
+    const d = deps(
+      resolveConfig(
+        { filters: { blocked_chats: ["c@s.whatsapp.net"] } },
+        { dataDir: "/data" },
+      ),
+    );
+    expect(ingestMessage(d, audio())).toBeNull();
+    expect(countMessages(d.db)).toBe(0);
+    d.db.close();
+  });
+
+  it("returns null for a chat blocked in the database", () => {
+    const d = deps(baseConfig);
+    ingestMessage(d, msg({ message: { conversation: "first" } }));
+    setChatBlocked(d.db, "personal", "c@s.whatsapp.net", true);
+    expect(ingestMessage(d, audio())).toBeNull();
+    d.db.close();
+  });
+
+  // The gate is "was it persisted", not "is it audio".
+  it("returns the stored message for a plain text message", () => {
+    const d = deps(baseConfig);
+    expect(
+      ingestMessage(d, msg({ message: { conversation: "hi" } }))?.messageType,
+    ).toBe("text");
+    d.db.close();
+  });
+
+  it("returns null for an unparseable message", () => {
+    const d = deps(baseConfig);
+    expect(ingestMessage(d, msg({ message: null }))).toBeNull();
+    d.db.close();
+  });
+});
