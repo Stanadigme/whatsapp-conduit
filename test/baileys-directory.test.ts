@@ -78,4 +78,21 @@ describe("resyncBaileysDirectory", () => {
     expect(result.groups).toBe(1);
     d.db.close();
   });
+
+  it("surfaces a group refresh failure during a strict rebuild", async () => {
+    const d = deps();
+    upsertChat(d.db, { accountId: "personal", jid: "120@g.us", isGroup: true });
+
+    await expect(
+      resyncBaileysDirectory(
+        {
+          resyncAppState: vi.fn().mockResolvedValue(undefined),
+          groupMetadata: vi.fn().mockRejectedValue(new Error("not connected")),
+        } as never,
+        d,
+        { strict: true },
+      ),
+    ).rejects.toThrow("not connected");
+    d.db.close();
+  });
 });

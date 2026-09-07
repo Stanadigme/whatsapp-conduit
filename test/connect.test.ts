@@ -182,6 +182,43 @@ describe("ConduitConnection", () => {
     conn.stop();
   });
 
+  it("notifies pairing readiness only after credentials are persisted", async () => {
+    let finishSave!: () => void;
+    const save = new Promise<void>((resolve) => {
+      finishSave = resolve;
+    });
+    const socket = new FakeSocket();
+    let keyWasReported = false;
+    const connection = new ConduitConnection({
+      config,
+      authState: {
+        state: {
+          creds: {},
+          keys: { get: async () => ({}), set: async () => undefined },
+        },
+        saveCreds: async () => save,
+      } as unknown as AuthState,
+      logger,
+      mode: "link",
+      socketFactory: () => socket as unknown as WASocket,
+      handlers: {
+        onCredsUpdate(update) {
+          keyWasReported = update.myAppStateKeyId === "app-state-key";
+        },
+      },
+    });
+
+    await connection.start();
+    socket.emit("creds.update", { myAppStateKeyId: "app-state-key" });
+    await Promise.resolve();
+    expect(keyWasReported).toBe(false);
+
+    finishSave();
+    await tick();
+    expect(keyWasReported).toBe(true);
+    connection.stop();
+  });
+
   it("reconnects on a transient close in run mode", async () => {
     const { conn, sockets, closes } = makeConn("run");
     await conn.start();

@@ -2,6 +2,7 @@ import {
   DisconnectReason,
   jidNormalizedUser,
   type ConnectionState,
+  type AuthenticationCreds,
 } from "baileys";
 import type { Logger } from "pino";
 import type { Config } from "../config.js";
@@ -29,6 +30,8 @@ export interface ConnectionHandlers {
   onConnecting?(): void;
   onOpen?(info: { selfJid?: string }): void;
   onClose?(info: CloseInfo): void;
+  /** Fired only after a credential update has been persisted to the auth store. */
+  onCredsUpdate?(update: Partial<AuthenticationCreds>): void;
   /** Hook to wire ingestion event handlers onto each (re)created socket. */
   registerSocket?(sock: WASocket): void;
 }
@@ -157,8 +160,13 @@ export class ConduitConnection {
     const sock = this.socketFactory(socketConfig);
     this.sock = sock;
 
-    sock.ev.on("creds.update", () => {
-      void this.authState.saveCreds();
+    sock.ev.on("creds.update", (update) => {
+      void this.authState
+        .saveCreds()
+        .then(() => this.handlers.onCredsUpdate?.(update))
+        .catch(() => {
+          this.logger.warn("failed to persist Baileys credentials");
+        });
     });
     this.handlers.onSocket?.(sock);
     this.handlers.registerSocket?.(sock);

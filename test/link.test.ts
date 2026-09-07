@@ -26,12 +26,14 @@ describe("pairing-code readiness", () => {
     const dataDir = join(dir, "data");
     const qrOut = join(dataDir, "pairing-qr.svg");
     runInit({ configPath, dataDir });
-    let connected: (() => void) | undefined;
+    let opened: (() => void) | undefined;
+    let appStateKeySaved: (() => void) | undefined;
     const connectionFactory = ({ handlers }: ConnectionDeps) => ({
       async start(): Promise<void> {
         handlers.onQr?.("opaque-qr-payload");
-        connected = () =>
-          handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+        opened = () => handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+        appStateKeySaved = () =>
+          handlers.onCredsUpdate?.({ myAppStateKeyId: "app-state-key" });
       },
       stop(): void {},
     });
@@ -45,10 +47,37 @@ describe("pairing-code readiness", () => {
       `QR code written to ${qrOut}\n`,
     );
 
-    connected?.();
+    opened?.();
+    // Opening the websocket proves the QR was scanned, but the app-state key
+    // can arrive shortly afterwards. The QR must remain unavailable only once
+    // this credential has been persisted.
+    expect(existsSync(qrOut)).toBe(true);
+    appStateKeySaved?.();
     await expect(linking).resolves.toEqual(
       expect.objectContaining({ selfJid: "49123@s.whatsapp.net" }),
     );
+    expect(existsSync(qrOut)).toBe(false);
+  });
+
+  it("does not declare a scanned QR successful before the app-state key is saved", async () => {
+    const configPath = join(dir, "config.yaml");
+    const dataDir = join(dir, "data");
+    const qrOut = join(dataDir, "pairing-qr.svg");
+    runInit({ configPath, dataDir });
+    const connectionFactory = ({ handlers }: ConnectionDeps) => ({
+      async start(): Promise<void> {
+        handlers.onQr?.("opaque-qr-payload");
+        handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+      },
+      stop(): void {},
+    });
+
+    await expect(
+      runLink(
+        { configPath, qr: true, qrOut, timeoutSec: 0.01 },
+        { connectionFactory },
+      ),
+    ).rejects.toThrow("timed out");
     expect(existsSync(qrOut)).toBe(false);
   });
 
@@ -108,6 +137,7 @@ describe("pairing-code readiness", () => {
         handlers.onQr?.("opaque-qr-payload");
         await Promise.resolve();
         handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+        handlers.onCredsUpdate?.({ myAppStateKeyId: "app-state-key" });
       },
       stop(): void {},
     });

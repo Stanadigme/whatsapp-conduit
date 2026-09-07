@@ -6,7 +6,11 @@ import qrcode from "qrcode-terminal";
 import { qrSvg } from "../util/qr-svg.js";
 import type { WASocket } from "baileys";
 import { loadConfig, type Config } from "../config.js";
-import { clearPendingPairing, openAuthState } from "../baileys/auth.js";
+import {
+  clearAppStateSyncVersions,
+  clearPendingPairing,
+  openAuthState,
+} from "../baileys/auth.js";
 import {
   ConduitConnection,
   statusCodeOf,
@@ -20,6 +24,12 @@ import { WhatsmeowTransport } from "../whatsmeow/transport.js";
 import { acquireSessionLock } from "../whatsmeow/session-lock.js";
 import { createVersionResolver } from "../baileys/version.js";
 import { acquireBaileysSessionLock } from "../baileys/session-lock.js";
+import { BAILEYS_DIRECTORY_APP_STATE_COLLECTIONS } from "../baileys/directory.js";
+import {
+  markDirectoryRebuildResult,
+  runMaintenanceOperation,
+  startMaintenanceOperation,
+} from "../db/maintenance.js";
 
 export interface LinkOptions {
   configPath?: string;
@@ -42,11 +52,13 @@ export interface LinkOptions {
 export interface LinkResult {
   selfJid?: string;
   accountId: string;
+  /** False only when the new auth works but the local directory reset failed. */
+  directoryRebuildReady: boolean;
 }
 
 export interface LinkConnection {
   start(): Promise<void>;
-  stop(): void;
+  stop(): void | Promise<void>;
 }
 
 export interface LinkDependencies {
@@ -55,9 +67,10 @@ export interface LinkDependencies {
 
 /**
  * Link the WhatsApp account as a secondary device via QR code, persisting auth
- * state. Resolves once the connection reaches `open`; rejects on logout, an
- * unrecoverable close, or timeout. Strictly observe-only — it only reads the
- * connection lifecycle and stores the account identity.
+ * state. Resolves only after the connection reaches `open` and Baileys has
+ * persisted its `myAppStateKeyId`; rejects on logout, an unrecoverable close,
+ * or timeout. Strictly observe-only — it only reads the connection lifecycle
+ * and stores the account identity.
  */
 export async function runLink(
   options: LinkOptions = {},
@@ -83,164 +96,185 @@ export async function runLink(
     const qrOut = useQr ? options.qrOut : undefined;
     if (qrOut) mkdirSync(dirname(qrOut), { recursive: true });
 
-    return await new Promise<LinkResult>((resolve, reject) => {
-      let settled = false;
-      let pairingRequested = false;
-      let pairingSocket: WASocket | undefined;
-      let qrRestarts = 0;
-      const MAX_QR_RESTARTS = 40;
+    const linked = await new Promise<Omit<LinkResult, "directoryRebuildReady">>(
+      (resolve, reject) => {
+        let settled = false;
+        let pairingRequested = false;
+        let pairingSocket: WASocket | undefined;
+        let qrRestarts = 0;
+        let opened: { selfJid?: string } | undefined;
+        let appStateKeySaved = false;
+        const MAX_QR_RESTARTS = 40;
 
-      const connection = (
-        dependencies.connectionFactory ??
-        ((deps) => new ConduitConnection(deps))
-      )({
-        config,
-        authState,
-        logger: baileysLogger(config),
-        mode: "link",
-        fetchVersion: createVersionResolver(config, log),
-        handlers: {
-          onSocket(sock) {
-            if (!useQr) pairingSocket = sock;
-          },
-          onQr(qr) {
-            if (!useQr) {
-              if (pairingRequested || !pairingSocket || !phoneNumber) return;
-              pairingRequested = true;
-              void requestPairingCode(pairingSocket, phoneNumber)
-                .then((code) => {
-                  process.stdout.write(
-                    "\nEnter this pairing code in WhatsApp → Settings → Linked Devices:\n\n" +
-                      `${code}\n\n`,
-                  );
-                })
-                .catch((err: unknown) => {
-                  log.error(
-                    { statusCode: statusCodeOf(err) },
-                    "failed to request pairing code",
-                  );
-                  fail(pairingFailure(err));
-                });
-              return;
-            }
-            if (qrOut) {
-              try {
-                writeFileSync(qrOut, qrSvg(qr, { px: 800 }), { mode: 0o600 });
-                process.stdout.write(`QR code written to ${qrOut}\n`);
-              } catch (err) {
-                log.warn(
-                  { err: err instanceof Error ? err.message : String(err) },
-                  "failed to write the QR SVG",
-                );
-                fail(new Error("failed to write QR SVG"));
+        const connection = (
+          dependencies.connectionFactory ??
+          ((deps) => new ConduitConnection(deps))
+        )({
+          config,
+          authState,
+          logger: baileysLogger(config),
+          mode: "link",
+          fetchVersion: createVersionResolver(config, log),
+          handlers: {
+            onSocket(sock) {
+              if (!useQr) pairingSocket = sock;
+            },
+            onQr(qr) {
+              if (!useQr) {
+                if (pairingRequested || !pairingSocket || !phoneNumber) return;
+                pairingRequested = true;
+                void requestPairingCode(pairingSocket, phoneNumber)
+                  .then((code) => {
+                    process.stdout.write(
+                      "\nEnter this pairing code in WhatsApp → Settings → Linked Devices:\n\n" +
+                        `${code}\n\n`,
+                    );
+                  })
+                  .catch((err: unknown) => {
+                    log.error(
+                      { statusCode: statusCodeOf(err) },
+                      "failed to request pairing code",
+                    );
+                    fail(pairingFailure(err));
+                  });
                 return;
               }
-              // `--qr-out` is used by a protected dashboard. Never render the
-              // live credential to stdout as container logs may retain it.
-              return;
-            }
-            if (!config.baileys.printQrInTerminal) {
-              // The QR payload is a live pairing token; honor the operator's
-              // choice to keep it out of (possibly captured) stdout.
-              log.warn(
-                "a QR code is available but baileys.print_qr_in_terminal is false; " +
-                  "enable it to display the code and link a device",
+              if (qrOut) {
+                try {
+                  writeFileSync(qrOut, qrSvg(qr, { px: 800 }), { mode: 0o600 });
+                  process.stdout.write(`QR code written to ${qrOut}\n`);
+                } catch (err) {
+                  log.warn(
+                    { err: err instanceof Error ? err.message : String(err) },
+                    "failed to write the QR SVG",
+                  );
+                  fail(new Error("failed to write QR SVG"));
+                  return;
+                }
+                // `--qr-out` is used by a protected dashboard. Never render the
+                // live credential to stdout as container logs may retain it.
+                return;
+              }
+              if (!config.baileys.printQrInTerminal) {
+                // The QR payload is a live pairing token; honor the operator's
+                // choice to keep it out of (possibly captured) stdout.
+                log.warn(
+                  "a QR code is available but baileys.print_qr_in_terminal is false; " +
+                    "enable it to display the code and link a device",
+                );
+                return;
+              }
+              process.stdout.write(
+                "\nScan this QR code in WhatsApp → Settings → Linked Devices → Link a device:\n\n",
               );
-              return;
-            }
-            process.stdout.write(
-              "\nScan this QR code in WhatsApp → Settings → Linked Devices → Link a device:\n\n",
-            );
-            qrcode.generate(qr, { small: true });
-          },
-          onConnecting() {
-            log.info("connecting to WhatsApp");
-          },
-          onOpen(info) {
-            if (settled) return;
-            settled = true;
-            if (timer) clearTimeout(timer);
-            options.signal?.removeEventListener("abort", onAbort);
-            removeQrOutput();
-
-            const accountId = persistAccount(config, info.selfJid);
-            process.stdout.write(
-              `\nLinked successfully${info.selfJid ? ` as ${info.selfJid}` : ""}.\n` +
-                "Auth state saved. You can now run `whatsapp-conduit run`.\n",
-            );
-            connection.stop();
-            resolve({ selfJid: info.selfJid, accountId });
-          },
-          onClose(info) {
-            if (settled) return;
-            if (info.willReconnect) {
-              log.info("restarting connection to complete pairing");
-              return;
-            }
-            // In QR mode a non-logged-out close is almost always an unscanned
-            // code expiring (status 408/428). Keep the pairing window open by
-            // restarting with a fresh code until the timeout fires.
-            if (useQr && !info.loggedOut && qrRestarts < MAX_QR_RESTARTS) {
-              qrRestarts += 1;
-              log.info(
-                { statusCode: info.statusCode, attempt: qrRestarts },
-                "QR code expired without a scan; issuing a new one",
+              qrcode.generate(qr, { small: true });
+            },
+            onConnecting() {
+              log.info("connecting to WhatsApp");
+            },
+            onOpen(info) {
+              opened = info;
+              completeWhenReady();
+            },
+            onCredsUpdate(update) {
+              if (update.myAppStateKeyId) {
+                appStateKeySaved = true;
+                completeWhenReady();
+              }
+            },
+            onClose(info) {
+              if (settled) return;
+              if (info.willReconnect) {
+                log.info("restarting connection to complete pairing");
+                return;
+              }
+              // In QR mode a non-logged-out close is almost always an unscanned
+              // code expiring (status 408/428). Keep the pairing window open by
+              // restarting with a fresh code until the timeout fires.
+              if (useQr && !info.loggedOut && qrRestarts < MAX_QR_RESTARTS) {
+                qrRestarts += 1;
+                log.info(
+                  { statusCode: info.statusCode, attempt: qrRestarts },
+                  "QR code expired without a scan; issuing a new one",
+                );
+                connection.start().catch((err: unknown) => {
+                  fail(err instanceof Error ? err : new Error(String(err)));
+                });
+                return;
+              }
+              fail(
+                new Error(
+                  info.loggedOut
+                    ? "Linking failed: logged out. Remove the auth directory and try again."
+                    : `Linking failed: connection closed (status ${info.statusCode ?? "unknown"}).`,
+                ),
               );
-              connection.start().catch((err: unknown) => {
-                fail(err instanceof Error ? err : new Error(String(err)));
-              });
-              return;
-            }
-            fail(
-              new Error(
-                info.loggedOut
-                  ? "Linking failed: logged out. Remove the auth directory and try again."
-                  : `Linking failed: connection closed (status ${info.statusCode ?? "unknown"}).`,
-              ),
-            );
+            },
           },
-        },
-      });
+        });
 
-      const timer = setTimeout(() => {
-        fail(new Error(`Linking timed out after ${timeoutSec}s.`));
-      }, timeoutSec * 1000);
+        const timer = setTimeout(() => {
+          fail(new Error(`Linking timed out after ${timeoutSec}s.`));
+        }, timeoutSec * 1000);
 
-      const onAbort = (): void => fail(new Error("Linking cancelled."));
-      if (options.signal?.aborted) {
-        onAbort();
-        return;
-      }
-      options.signal?.addEventListener("abort", onAbort, { once: true });
-
-      connection.start().catch((err: unknown) => {
-        fail(err instanceof Error ? err : new Error(String(err)));
-      });
-
-      function fail(error: Error): void {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        options.signal?.removeEventListener("abort", onAbort);
-        connection.stop();
-        removeQrOutput();
-        void clearPendingPairing(authState)
-          .catch(() => {
-            log.warn("failed to clear incomplete pairing state");
-          })
-          .finally(() => reject(error));
-      }
-
-      function removeQrOutput(): void {
-        if (!qrOut) return;
-        try {
-          unlinkSync(qrOut);
-        } catch {
-          // It may not have been written yet, or the data volume may already
-          // have been removed by the operator. In both cases fail closed.
+        const onAbort = (): void => fail(new Error("Linking cancelled."));
+        if (options.signal?.aborted) {
+          onAbort();
+          return;
         }
-      }
-    });
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+
+        connection.start().catch((err: unknown) => {
+          fail(err instanceof Error ? err : new Error(String(err)));
+        });
+
+        function fail(error: Error): void {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          options.signal?.removeEventListener("abort", onAbort);
+          void Promise.resolve(connection.stop());
+          removeQrOutput();
+          void clearPendingPairing(authState)
+            .catch(() => {
+              log.warn("failed to clear incomplete pairing state");
+            })
+            .finally(() => reject(error));
+        }
+
+        function removeQrOutput(): void {
+          if (!qrOut) return;
+          try {
+            unlinkSync(qrOut);
+          } catch {
+            // It may not have been written yet, or the data volume may already
+            // have been removed by the operator. In both cases fail closed.
+          }
+        }
+
+        function completeWhenReady(): void {
+          if (settled || !opened || !appStateKeySaved) return;
+          settled = true;
+          clearTimeout(timer);
+          options.signal?.removeEventListener("abort", onAbort);
+          void Promise.resolve(connection.stop()).finally(() => {
+            removeQrOutput();
+            const accountId = persistAccount(config, opened?.selfJid);
+            process.stdout.write(
+              `\nLinked successfully${opened?.selfJid ? ` as ${opened.selfJid}` : ""}.\n` +
+                "Auth state saved. Directory reconstruction will start on the next connection.\n",
+            );
+            resolve({ selfJid: opened?.selfJid, accountId });
+          });
+        }
+      },
+    );
+    const directoryRebuildReady = await prepareDirectoryRebuild(
+      config,
+      authState,
+      log,
+    );
+    return { ...linked, directoryRebuildReady };
   } finally {
     sessionLock.release();
   }
@@ -275,7 +309,7 @@ async function runWhatsmeowLink(
       );
       void transport.stop();
       lock.release();
-      resolve({ selfJid: jid, accountId });
+      resolve({ selfJid: jid, accountId, directoryRebuildReady: true });
     });
     transport.on("error", (error) => {
       if (!settled) fail(error);
@@ -306,6 +340,61 @@ async function runWhatsmeowLink(
       });
     }
   });
+}
+
+/**
+ * The linking socket must not keep partial app-state cursors.  It has no
+ * ingestion handlers, so a clean daemon will rebuild the directory from a
+ * snapshot after it has registered those handlers.
+ */
+async function prepareDirectoryRebuild(
+  config: Config,
+  authState: Awaited<ReturnType<typeof openAuthState>>,
+  log: ReturnType<typeof appLogger>,
+): Promise<boolean> {
+  let readinessError: string | null = null;
+  try {
+    await clearAppStateSyncVersions(
+      authState,
+      BAILEYS_DIRECTORY_APP_STATE_COLLECTIONS,
+    );
+  } catch (error) {
+    readinessError = "unable to reset app-state cursors";
+    log.warn(
+      { err: error instanceof Error ? error.message : String(error) },
+      "could not reset Baileys app-state cursors after linking",
+    );
+  }
+  const db = openDb(config.paths.sqlite, { migrate: true });
+  try {
+    const operation = startMaintenanceOperation(
+      db,
+      config.account.name,
+      "directory",
+    );
+    await runMaintenanceOperation({
+      db,
+      accountId: config.account.name,
+      scope: "directory",
+      mediaDir: config.paths.mediaDir,
+      operationId: operation.id,
+    });
+    if (readinessError) {
+      markDirectoryRebuildResult(db, config.account.name, readinessError);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    const safe = "directory reset failed after linking";
+    markDirectoryRebuildResult(db, config.account.name, safe);
+    log.warn(
+      { err: error instanceof Error ? error.message : String(error) },
+      "could not reset the directory after linking",
+    );
+    return false;
+  } finally {
+    db.close();
+  }
 }
 
 async function resolvePhoneNumber(phoneNumber?: string): Promise<string> {
