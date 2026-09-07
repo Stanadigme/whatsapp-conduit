@@ -4,7 +4,6 @@ import { parse as parseYaml } from "yaml";
 import { defaultDataDir } from "./paths.js";
 import { LOG_LEVELS, type LogLevel } from "./util/logging.js";
 
-export type ExportFormat = "jsonl";
 export type BaileysVersion = [number, number, number];
 export type TransportName = "whatsmeow" | "baileys";
 
@@ -44,7 +43,6 @@ export interface MediaConfig {
 }
 
 export interface McpHttpConfig {
-  enabled: boolean;
   /**
    * Listen address. Defaults to loopback. Only set to a non-loopback address
    * behind a reverse proxy or tunnel that terminates TLS and forwards a
@@ -62,7 +60,6 @@ export interface McpConfig {
 }
 
 export interface WebConfig {
-  enabled: boolean;
   host: string;
   port: number;
   tokenFile: string;
@@ -132,7 +129,6 @@ export interface FiltersConfig {
 }
 
 export interface ExportsConfig {
-  defaultFormat: ExportFormat;
   redactPhoneNumbers: boolean;
   includeRawJson: boolean;
 }
@@ -421,7 +417,6 @@ export function resolveConfig(
   };
 
   const web: WebConfig = {
-    enabled: asBool(webRaw.enabled, false),
     host: asLoopbackHost(webRaw.host),
     port: asPort(webRaw.port, 8765),
     tokenFile: resolvePath(
@@ -463,7 +458,6 @@ export function resolveConfig(
         12_000,
       ),
       http: {
-        enabled: asBool(mcpHttpRaw.enabled, false),
         host: asString(mcpHttpRaw.host, "127.0.0.1"),
         port: asPort(mcpHttpRaw.port, 8766),
         tokenFile: resolvePath(
@@ -482,7 +476,6 @@ export function resolveConfig(
       blockedSenders: asStringArray(filtersRaw.blocked_senders),
     },
     exports: {
-      defaultFormat: "jsonl",
       redactPhoneNumbers: asBool(exportsRaw.redact_phone_numbers, false),
       includeRawJson: asBool(exportsRaw.include_raw_json, false),
     },
@@ -572,11 +565,10 @@ media:
 mcp:
   max_result_chars: 12000
   # Streamable HTTP transport for remote MCP clients (claude.ai, mobile, other
-  # agents). Disabled by default; stdio stays the local default. The bearer
-  # token file is created on first start. Keep host on loopback unless a
-  # reverse proxy or tunnel terminates TLS in front of it (ADR-0002).
+  # agents). Started by the mcp --http flag; stdio stays the local default.
+  # The bearer token file is created on first start. Keep host on loopback
+  # unless a reverse proxy or tunnel terminates TLS in front of it (ADR-0002).
   http:
-    enabled: false
     host: 127.0.0.1
     port: 8766
     token_file: ${join(dataDir, "mcp-http.token")}
@@ -596,7 +588,6 @@ stt:
 web:
   # The dashboard is local-only by default. Set public_origin only behind an
   # HTTPS reverse proxy that authenticates users and preserves the public Host.
-  enabled: false
   host: 127.0.0.1
   port: 8765
   token_file: ${join(dataDir, "dashboard.token")}
@@ -610,7 +601,6 @@ filters:
   blocked_senders: []
 
 exports:
-  default_format: jsonl
   redact_phone_numbers: false
   include_raw_json: false
 

@@ -23,8 +23,6 @@ describe("resolveConfig", () => {
     expect(cfg.logging.baileysLevel).toBe("warn");
     expect(cfg.logging.baileysLogMessageText).toBe(false);
     expect(cfg.logging.logMessageText).toBe(false);
-
-    expect(cfg.exports.defaultFormat).toBe("jsonl");
   });
 
   it("derives paths from the data directory", () => {

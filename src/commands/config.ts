@@ -50,8 +50,8 @@ function flatten(value: unknown, prefix: string, out: string[]): void {
 }
 
 export interface ConfigShowOptions {
-  configPath?: string;
-  json?: boolean;
+  configPath?: string | undefined;
+  json?: boolean | undefined;
 }
 
 /** Print the resolved effective config (defaults applied), secrets masked. */
@@ -105,7 +105,6 @@ const EDITABLE_KEYS = new Set<string>([
   "stt.enabled",
   "stt.language",
   "stt.whisper.model_path",
-  "web.enabled",
   "web.port",
   "exports.redact_phone_numbers",
   "exports.include_raw_json",
@@ -147,7 +146,7 @@ function atomicWrite(path: string, contents: string): void {
 }
 
 export interface ConfigSetOptions {
-  configPath?: string;
+  configPath?: string | undefined;
 }
 
 /**
