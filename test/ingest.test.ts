@@ -9,6 +9,7 @@ import {
   type IngestDeps,
 } from "../src/baileys/ingest.js";
 import { openDb } from "../src/db/index.js";
+import { getDirectoryEntityByJid } from "../src/db/directory.js";
 import {
   countMessages,
   getChat,
@@ -17,6 +18,7 @@ import {
   upsertParticipant,
   upsertAccount,
 } from "../src/db/queries.js";
+import { listDashboardChats } from "../src/dashboard/chats.js";
 import { createLogger } from "../src/util/logging.js";
 
 function deps(config: Config): IngestDeps {
@@ -131,6 +133,146 @@ describe("ingestMessage persistence", () => {
     expect(participant).toEqual({
       jid: "49111@s.whatsapp.net",
       lid: "9001@lid",
+    });
+    d.db.close();
+  });
+
+  it("persists phone-only contacts and keeps local, verified, and public names separate", () => {
+    const d = deps(baseConfig);
+    const socket = new FakeEventSocket();
+    registerIngestion(socket as unknown as WASocket, d);
+
+    socket.emit("contacts.upsert", [
+      {
+        id: "49111@s.whatsapp.net",
+        name: "Nom local",
+        notify: "Nom public",
+        verifiedName: "Entreprise vérifiée",
+      },
+    ]);
+
+    expect(
+      d.db
+        .prepare(
+          "select jid, lid, phone, display_name, push_name, verified_name from participants",
+        )
+        .get(),
+    ).toEqual({
+      jid: "49111@s.whatsapp.net",
+      lid: null,
+      phone: "49111",
+      display_name: "Nom local",
+      push_name: "Nom public",
+      verified_name: "Entreprise vérifiée",
+    });
+    const entity = getDirectoryEntityByJid(
+      d.db,
+      "personal",
+      "49111@s.whatsapp.net",
+      "contact",
+    );
+    expect(entity?.name).toBe("Nom local");
+    expect(entity?.name_source).toBe("display_name");
+    d.db.close();
+  });
+
+  it("applies partial contact updates without erasing existing metadata", () => {
+    const d = deps(baseConfig);
+    const socket = new FakeEventSocket();
+    registerIngestion(socket as unknown as WASocket, d);
+
+    socket.emit("contacts.upsert", [
+      {
+        id: "49112@s.whatsapp.net",
+        name: "Nom local",
+        notify: "Public initial",
+        verifiedName: "Entreprise initiale",
+      },
+    ]);
+    socket.emit("contacts.update", [
+      { id: "49112@s.whatsapp.net", notify: "Public actualisé" },
+    ]);
+    socket.emit("contacts.update", [
+      { id: "49112@s.whatsapp.net", name: "", verifiedName: "" },
+    ]);
+
+    expect(
+      d.db
+        .prepare(
+          "select display_name, push_name, verified_name from participants",
+        )
+        .get(),
+    ).toEqual({
+      display_name: "Nom local",
+      push_name: "Public actualisé",
+      verified_name: "Entreprise initiale",
+    });
+    d.db.close();
+  });
+
+  it("merges a LID-first contact with its phone JID", () => {
+    const d = deps(baseConfig);
+    const socket = new FakeEventSocket();
+    registerIngestion(socket as unknown as WASocket, d);
+
+    socket.emit("contacts.upsert", [
+      { id: "9001@lid", name: "Nom local LID", notify: "Public LID" },
+    ]);
+    socket.emit("contacts.upsert", [
+      { id: "49113@s.whatsapp.net", lid: "9001@lid" },
+    ]);
+
+    expect(
+      d.db
+        .prepare("select jid, lid, display_name, push_name from participants")
+        .all(),
+    ).toEqual([
+      {
+        jid: "49113@s.whatsapp.net",
+        lid: "9001@lid",
+        display_name: "Nom local LID",
+        push_name: "Public LID",
+      },
+    ]);
+    expect(
+      d.db
+        .prepare(
+          "select canonical_jid from directory_entities where entity_type = 'contact'",
+        )
+        .all(),
+    ).toEqual([{ canonical_jid: "49113@s.whatsapp.net" }]);
+    d.db.close();
+  });
+
+  it("ingests contact and chat metadata from messaging-history.set", () => {
+    const d = deps(baseConfig);
+    const socket = new FakeEventSocket();
+    registerIngestion(socket as unknown as WASocket, d);
+
+    socket.emit("messaging-history.set", {
+      contacts: [
+        {
+          id: "49114@s.whatsapp.net",
+          name: "Nom historique local",
+          notify: "Nom historique public",
+        },
+      ],
+      chats: [{ id: "49114@s.whatsapp.net", name: "Nom chat historique" }],
+      lidPnMappings: [{ lid: "9002@lid", pn: "49114@s.whatsapp.net" }],
+      messages: [],
+    });
+
+    expect(getChat(d.db, "personal", "49114@s.whatsapp.net")?.name).toBe(
+      "Nom chat historique",
+    );
+    expect(
+      listDashboardChats(d.db, "personal").find(
+        (chat) => chat.jid === "49114@s.whatsapp.net",
+      )?.name,
+    ).toBe("Nom historique local");
+    expect(d.db.prepare("select jid, lid from participants").get()).toEqual({
+      jid: "49114@s.whatsapp.net",
+      lid: "9002@lid",
     });
     d.db.close();
   });

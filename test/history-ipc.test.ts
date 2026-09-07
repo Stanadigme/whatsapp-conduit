@@ -6,6 +6,8 @@ import { existsSync } from "node:fs";
 import {
   controlAddress,
   HistoryControlServer,
+  requestBaileysPairingStart,
+  requestDirectoryResync,
   requestHistoryStart,
 } from "../src/control/ipc.js";
 
@@ -18,11 +20,15 @@ describe("history control IPC", () => {
   it("accepts a local start request and returns a job handle", async () => {
     const root = await mkdtemp(join(tmpdir(), "wac-history-ipc-"));
     const path = join(root, "control.sock");
-    const server = new HistoryControlServer(path, async (request) => ({
-      jobId: `job-${request.chat}`,
-      status: "queued",
-      reused: false,
-    }));
+    const server = new HistoryControlServer(path, async (request) => {
+      if (request.op === "directory.resync") {
+        return { resynced: { contacts: 3, groups: 1 } };
+      }
+      if (request.op !== "history.start") {
+        return { pairing: { status: "starting" } };
+      }
+      return { jobId: `job-${request.chat}`, status: "queued", reused: false };
+    });
     await server.start();
     try {
       await expect(
@@ -31,6 +37,31 @@ describe("history control IPC", () => {
           since: 1_700_000_000,
         }),
       ).resolves.toMatchObject({ ok: true, status: "queued", reused: false });
+      await expect(requestDirectoryResync(path)).resolves.toMatchObject({
+        ok: true,
+        resynced: { contacts: 3, groups: 1 },
+      });
+      await expect(requestBaileysPairingStart(path)).resolves.toMatchObject({
+        ok: true,
+        pairing: { status: "starting" },
+      });
+    } finally {
+      await server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a handler failure message back to the caller", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wac-history-ipc-"));
+    const path = join(root, "control.sock");
+    const server = new HistoryControlServer(path, async () => {
+      throw new Error("not connected to WhatsApp");
+    });
+    await server.start();
+    try {
+      await expect(requestDirectoryResync(path)).rejects.toThrow(
+        "not connected to WhatsApp",
+      );
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });

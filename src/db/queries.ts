@@ -636,7 +636,7 @@ export function listGroupMembers(
        join participants p on p.account_id = gm.account_id
          and p.jid = gm.participant_jid
        where gm.account_id = ? and gm.group_jid = ? and gm.is_active = 1
-       order by coalesce(p.display_name, p.push_name, p.jid)
+       order by coalesce(p.display_name, p.verified_name, p.push_name, p.jid)
        limit ?`,
     )
     .all(accountId, normalizeJid(groupJid), limit);
@@ -1142,12 +1142,30 @@ export function selectExportMessages(
   }
   if (sel.limit != null) params.limit = sel.limit;
 
+  const directory = directoryTablesAvailable(db);
+  const directoryChatName = directory
+    ? "coalesce(nullif(trim(ec.display_name), ''), " +
+      "nullif(trim(ec.verified_name), ''), nullif(trim(ec.push_name), ''), " +
+      "nullif(trim(ec.name), ''), nullif(trim(ec.canonical_jid), ''), " +
+      "nullif(trim(ea.display_name), ''), nullif(trim(ea.verified_name), ''), " +
+      "nullif(trim(ea.push_name), ''), nullif(trim(ea.name), ''), " +
+      "nullif(trim(ea.canonical_jid), ''), " +
+      "nullif(trim(c.name), ''), nullif(trim(c.push_name), ''), c.jid)"
+    : "coalesce(nullif(trim(c.name), ''), nullif(trim(c.push_name), ''), c.jid)";
+  const directoryJoins = directory
+    ? "left join directory_entities ec " +
+      "on ec.account_id = c.account_id and ec.canonical_jid = c.jid " +
+      "left join directory_aliases da " +
+      "on da.account_id = c.account_id and da.alias_jid = c.jid " +
+      "left join directory_entities ea on ea.id = da.entity_id "
+    : "";
   const sql =
     `select m.rowid as export_rowid, m.*, ` +
-    `c.name as chat_name, c.is_group as chat_is_group, ` +
+    `${directoryChatName} as chat_name, c.is_group as chat_is_group, ` +
     `c.is_status as chat_is_status, c.is_allowed as chat_is_allowed ` +
     `from messages m ` +
     `join chats c on c.account_id = m.account_id and c.jid = m.chat_jid ` +
+    directoryJoins +
     `${where.length ? `where ${where.join(" and ")}` : ""} ` +
     `order by m.rowid asc ` +
     `${sel.limit != null ? "limit @limit" : ""}`;

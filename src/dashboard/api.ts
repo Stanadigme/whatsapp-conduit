@@ -1,7 +1,12 @@
 import type { Database } from "better-sqlite3";
 import type { Config } from "../config.js";
 import { maskSecrets } from "../commands/config.js";
-import { requestHistoryStart } from "../control/ipc.js";
+import {
+  requestBaileysPairingStart,
+  requestDirectoryResync,
+  requestHistoryStart,
+  requestMaintenanceReset,
+} from "../control/ipc.js";
 import { getMessage, listMessages } from "../read/messages.js";
 import { McpRequestError } from "../mcp/types.js";
 import {
@@ -18,6 +23,16 @@ import {
 import { findCatalogueModel } from "../stt/models.js";
 import type { ModelDownloader } from "./models.js";
 import { applySttSettings, sttHealth, sttView } from "./stt.js";
+import { readLiveBaileysLinkQr } from "./baileys-link-qr.js";
+import { readRuntimeStatus } from "../runtime-status.js";
+import {
+  getMaintenanceOperation,
+  isMaintenanceScope,
+  maintenanceConfirmation,
+  maintenanceOperationView,
+  readMaintenanceState,
+  type MaintenanceScope,
+} from "../db/maintenance.js";
 
 export interface DashboardPairing {
   status: "disabled" | "idle" | "waiting_qr" | "connected" | "error";
@@ -47,11 +62,25 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+function svg(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
 function errorResponse(error: unknown, status = 400): Response {
   const message =
     error instanceof Error ? error.message : "dashboard request failed";
   const safe =
-    message.includes("not available") || message.includes("cannot")
+    message.includes("not available") ||
+    message.includes("unavailable") ||
+    message.includes("cannot") ||
+    message.includes("already active") ||
+    message.includes("awaiting")
       ? message
       : "dashboard request failed";
   return json({ error: safe }, status);
@@ -83,6 +112,34 @@ async function correctionBody(
     return null;
   }
   return { textCorrected: (body as { textCorrected: string }).textCorrected };
+}
+
+async function maintenanceBody(
+  request: Request,
+): Promise<{ scope: MaintenanceScope; confirmation: string } | null> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) return null;
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return null;
+  }
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    Array.isArray(body) ||
+    Object.keys(body).length !== 2 ||
+    !Object.prototype.hasOwnProperty.call(body, "scope") ||
+    !Object.prototype.hasOwnProperty.call(body, "confirmation")
+  ) {
+    return null;
+  }
+  const record = body as Record<string, unknown>;
+  return isMaintenanceScope(record.scope) &&
+    typeof record.confirmation === "string"
+    ? { scope: record.scope, confirmation: record.confirmation }
+    : null;
 }
 
 function historyView(job: HistoryJobRow): Record<string, unknown> {
@@ -118,6 +175,13 @@ export async function dashboardApi(
     return json({
       service: "whatsapp-conduit",
       pairing: context.pairing.status,
+    });
+  }
+  if (url.pathname === "/api/runtime" && request.method === "GET") {
+    const runtime = await readRuntimeStatus(context.config.paths.runtimeStatus);
+    return json({
+      connection: runtime?.connection ?? "disconnected",
+      authLinked: runtime?.authLinked ?? false,
     });
   }
   if (url.pathname === "/api/config" && request.method === "GET") {
@@ -309,6 +373,101 @@ export async function dashboardApi(
     } catch (error) {
       return errorResponse(error, 404);
     }
+  }
+  if (url.pathname === "/api/directory/refresh" && request.method === "POST") {
+    try {
+      const result = await requestDirectoryResync(
+        context.config.paths.controlSocket,
+      );
+      return json(
+        {
+          status: "done",
+          contacts: result.resynced?.contacts ?? 0,
+          groups: result.resynced?.groups ?? 0,
+        },
+        202,
+      );
+    } catch (error) {
+      return errorResponse(error, 409);
+    }
+  }
+  if (url.pathname === "/api/maintenance/state" && request.method === "GET") {
+    try {
+      return json(readMaintenanceState(context.db, context.accountId));
+    } catch {
+      return json({ error: "maintenance unavailable" }, 409);
+    }
+  }
+  if (url.pathname === "/api/maintenance/resets" && request.method === "POST") {
+    const body = await maintenanceBody(request);
+    if (!body) return json({ error: "invalid maintenance request" }, 400);
+    if (body.confirmation !== maintenanceConfirmation(body.scope)) {
+      return json({ error: "invalid maintenance confirmation" }, 400);
+    }
+    try {
+      const result = await requestMaintenanceReset(
+        context.config.paths.controlSocket,
+        body,
+      );
+      return json(
+        {
+          operationId: result.maintenance?.operationId,
+          status: result.maintenance?.status ?? "queued",
+        },
+        202,
+      );
+    } catch (error) {
+      return errorResponse(error, 409);
+    }
+  }
+  if (
+    url.pathname.startsWith("/api/maintenance/operations/") &&
+    request.method === "GET"
+  ) {
+    const id = url.pathname.slice("/api/maintenance/operations/".length);
+    if (!id || id.includes("/")) return json({ error: "not found" }, 404);
+    try {
+      const operation = getMaintenanceOperation(
+        context.db,
+        context.accountId,
+        id,
+      );
+      return operation
+        ? json(maintenanceOperationView(operation))
+        : json({ error: "not found" }, 404);
+    } catch {
+      return json({ error: "maintenance unavailable" }, 409);
+    }
+  }
+  if (
+    url.pathname === "/api/pairing/baileys/status" &&
+    request.method === "GET"
+  ) {
+    return json({
+      status: readLiveBaileysLinkQr(context.config.paths.dataDir)
+        ? "waiting_qr"
+        : "idle",
+    });
+  }
+  if (
+    url.pathname === "/api/pairing/baileys/start" &&
+    request.method === "POST"
+  ) {
+    try {
+      const result = await requestBaileysPairingStart(
+        context.config.paths.controlSocket,
+      );
+      return json({ status: result.pairing?.status ?? "starting" }, 202);
+    } catch (error) {
+      return errorResponse(error, 409);
+    }
+  }
+  if (
+    url.pathname === "/api/pairing/baileys/qr.svg" &&
+    request.method === "GET"
+  ) {
+    const qr = readLiveBaileysLinkQr(context.config.paths.dataDir);
+    return qr ? svg(qr) : json({ error: "QR code is not available" }, 404);
   }
   if (url.pathname === "/api/history/active" && request.method === "GET") {
     const job = getActiveHistoryJob(context.db, context.accountId);

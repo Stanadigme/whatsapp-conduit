@@ -17,12 +17,15 @@ import {
 const INDEX_HTML = `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>whatsapp-conduit — Configuration</title><link rel="stylesheet" href="/styles.css"></head>
-<body><main><header><h1>whatsapp-conduit</h1><p>Configuration locale, lecture seule par défaut.</p></header>
-<section class="card"><h2>Accès local</h2><label>Jeton du dashboard <input id="token" type="password" autocomplete="off"></label><button id="connect">Se connecter</button><p id="auth" class="muted"></p></section>
-<section class="card"><h2>Connexion</h2><p id="pairing-status">Non connecté</p><div id="qr" class="qr" hidden></div><button id="pairing-start">Afficher un QR d’appairage</button><button id="pairing-stop" hidden>Arrêter</button></section>
-<section class="card"><h2>Contacts et groupes</h2><div class="toolbar"><input id="search" placeholder="Rechercher un nom ou un identifiant"><select id="kind"><option value="">Tous</option><option value="contact">Contacts</option><option value="group">Groupes</option></select><button id="refresh">Actualiser</button></div><div id="chats" class="list"></div></section>
-<section class="card"><h2>Synchronisation historique</h2><p class="muted">Autorisez d’abord une discussion, puis choisissez la date la plus ancienne à récupérer. Les messages historiques sont ajoutés à SQLite sans être affichés ici.</p><label>Depuis <input id="history-since" type="date"></label><p id="history-status" class="muted">Aucune synchronisation lancée.</p></section>
-<section class="card"><h2>Transcription</h2><p id="stt-worker" class="muted">État inconnu</p><label><input id="stt-enabled" type="checkbox"> Transcrire les notes vocales</label><label>Langue <select id="stt-language"><option value="fr">Français</option><option value="en">Anglais</option><option value="auto">Détection automatique</option></select></label><div id="stt-models" class="list"></div><p id="stt-download" class="muted" hidden></p><div class="conversation-actions"><button id="stt-save">Enregistrer</button></div><p id="stt-status" class="muted"></p><details><summary>Avancé</summary><dl id="stt-details" class="message"></dl><button id="stt-check">Vérifier le moteur</button><p id="stt-check-result" class="muted"></p><div id="stt-failures" class="muted"></div></details></section>
+<body><main><header><h1>whatsapp-conduit</h1><p>Configuration protégée, lecture seule par défaut.</p></header>
+<section class="card" id="access-card"><h2>Accès local</h2><label>Jeton du dashboard <input id="token" type="password" autocomplete="off"></label><button id="connect">Se connecter</button><p id="auth" class="muted"></p></section>
+<section class="card" id="legacy-pairing-card"><h2>Connexion</h2><p id="pairing-status">Non connecté</p><div id="qr" class="qr" hidden></div><button id="pairing-start">Afficher un QR d’appairage</button><button id="pairing-stop" hidden>Arrêter</button></section>
+<section class="card" id="offline-card"><h2>Connexion WhatsApp interrompue</h2><p class="muted">L’ingestion n’est pas connectée. Lancez une session de ré-appairage si nécessaire ; les fonctions de consultation réapparaîtront à la reconnexion.</p></section>
+<section class="card" id="baileys-link-card"><h2>Ré-appairage WhatsApp</h2><p id="baileys-link-status" class="muted">Aucune session d’appairage active.</p><button id="baileys-link-start">Démarrer le ré-appairage</button><img id="baileys-link-qr" class="pairing-qr" alt="QR d’appairage WhatsApp" hidden><p class="muted">Cette action remplace le linked device actuel. Le QR est éphémère, se renouvelle automatiquement et disparaît dès la fin de la session.</p></section>
+<section class="card" id="maintenance-card"><h2>Données locales</h2><p class="muted">Chaque action est irréversible et exige la saisie de sa phrase de confirmation. La session WhatsApp, la configuration et les règles Autoriser/Bloquer sont conservées.</p><div class="maintenance-actions"><button data-maintenance-scope="directory">Réinitialiser l’annuaire</button><button data-maintenance-scope="live_messages">Effacer les messages live</button><button data-maintenance-scope="history">Effacer l’historique et jobs</button><button data-maintenance-scope="transcriptions">Effacer les transcriptions</button><button data-maintenance-scope="media">Effacer les médias</button><button data-maintenance-scope="audit">Effacer l’audit et curseurs</button><button data-maintenance-scope="all">Tout réinitialiser</button></div><p id="maintenance-status" class="muted">Aucune opération de maintenance active.</p></section>
+<section class="card" data-requires-connection hidden><h2>Contacts et groupes</h2><div class="toolbar"><input id="search" placeholder="Rechercher un nom ou un identifiant"><select id="kind"><option value="">Tous</option><option value="contact">Contacts</option><option value="group">Groupes</option></select><button id="refresh">Actualiser</button><button id="dir-refresh">Rafraîchir les noms</button></div><p id="dir-refresh-status" class="muted"></p><div id="chats" class="list"></div></section>
+<section class="card" data-requires-connection hidden><h2>Synchronisation historique</h2><p class="muted">Autorisez d’abord une discussion, puis choisissez la date la plus ancienne à récupérer. Les messages historiques sont ajoutés à SQLite sans être affichés ici.</p><label>Depuis <input id="history-since" type="date"></label><p id="history-status" class="muted">Aucune synchronisation lancée.</p></section>
+<section class="card" data-requires-connection hidden><h2>Transcription</h2><p id="stt-worker" class="muted">État inconnu</p><label><input id="stt-enabled" type="checkbox"> Transcrire les notes vocales</label><label>Langue <select id="stt-language"><option value="fr">Français</option><option value="en">Anglais</option><option value="auto">Détection automatique</option></select></label><div id="stt-models" class="list"></div><p id="stt-download" class="muted" hidden></p><div class="conversation-actions"><button id="stt-save">Enregistrer</button></div><p id="stt-status" class="muted"></p><details><summary>Avancé</summary><dl id="stt-details" class="message"></dl><button id="stt-check">Vérifier le moteur</button><p id="stt-check-result" class="muted"></p><div id="stt-failures" class="muted"></div></details></section>
 <p class="muted">Le contenu des messages n’est jamais affiché ici. Le JID reste la référence technique.</p></main><script src="/app.js"></script></body></html>`;
 
 const APP_JS = `(() => {
@@ -37,9 +40,26 @@ async function pollHistory(jobId) { clearTimeout(historyPoll); try { const job =
 async function refreshHistory() { try { const active = await api('/api/history/active'); if (active.job) { $('history-status').textContent = historyLabel(active.job); pollHistory(active.job.id); } } catch (error) { showError(error); } }
 async function refresh() { if (!token) return; try { const chats = await api('/api/chats?query=' + encodeURIComponent($('search').value) + '&kind=' + encodeURIComponent($('kind').value)); $('chats').innerHTML = chats.map(chat => '<article class="chat"><div><strong>' + escapeHtml(chat.name) + '</strong><small>' + escapeHtml(chat.jid) + '</small></div><span>' + (chat.allowed ? 'Autorisé' : chat.blocked ? 'Bloqué' : 'Découvert') + '</span><div class="chat-actions"><button data-action="' + (chat.allowed ? 'block' : 'allow') + '" data-jid="' + encodeURIComponent(chat.jid) + '">' + (chat.allowed ? 'Retirer' : 'Autoriser') + '</button><button data-action="history" data-jid="' + encodeURIComponent(chat.jid) + '"' + (chat.allowed ? '' : ' disabled') + '>Synchroniser</button></div></article>').join('') || '<p class="muted">Aucune conversation découverte.</p>'; await refreshHistory(); await refreshStt(); } catch (error) { showError(error); } }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char])); }
-function updatePairingControls(state) { const disabled = state.status === 'disabled'; $('pairing-status').textContent = disabled ? 'Désactivé dans Docker Compose' : state.status; $('pairing-start').hidden = disabled; $('pairing-stop').hidden = disabled || state.status !== 'waiting_qr'; if (disabled) $('qr').hidden = true; }
-$('connect').onclick = () => { token = $('token').value; $('auth').textContent = 'Jeton conservé uniquement en mémoire.'; $('auth').className = 'muted'; refresh(); api('/api/pairing/status').then(updatePairingControls).catch(showError); };
+function updatePairingControls(state) { const disabled = state.status === 'disabled'; $('legacy-pairing-card').hidden = disabled; $('pairing-status').textContent = disabled ? 'Désactivé dans Docker Compose' : state.status; $('pairing-start').hidden = disabled; $('pairing-stop').hidden = disabled || state.status !== 'waiting_qr'; if (disabled) $('qr').hidden = true; }
+let runtimePoll = 0;
+let previousRuntimeConnection = 'unknown';
+function updateRuntimeView(state) { const connected = state.connection === 'connected'; const reconnected = connected && previousRuntimeConnection !== 'connected'; previousRuntimeConnection = state.connection; document.querySelectorAll('[data-requires-connection]').forEach(element => { element.hidden = !connected; }); $('offline-card').hidden = connected; if (connected) { baileysPairingRequested = false; baileysPairingError = ''; if (reconnected) void refresh(); } }
+async function refreshRuntimeView() { clearTimeout(runtimePoll); try { updateRuntimeView(await api('/api/runtime')); } catch (error) { updateRuntimeView({ connection: 'disconnected' }); } finally { runtimePoll = setTimeout(refreshRuntimeView, 5000); } }
+let baileysLinkQrPoll = 0;
+let baileysPairingRequested = false;
+let baileysPairingError = '';
+let previousBaileysLinkStatus = 'idle';
+async function refreshBaileysLinkQr() { clearTimeout(baileysLinkQrPoll); try { const state = await api('/api/pairing/baileys/status'); const waiting = state.status === 'waiting_qr'; const pairingFinished = previousBaileysLinkStatus === 'waiting_qr' && !waiting; previousBaileysLinkStatus = state.status; if (waiting) baileysPairingError = ''; const button = $('baileys-link-start'); button.disabled = baileysPairingRequested || waiting; $('baileys-link-status').textContent = waiting ? 'QR disponible — scannez-le dans WhatsApp → Réglages → Appareils connectés.' : baileysPairingRequested ? 'Connexion en cours…' : baileysPairingError || 'Aucune session d’appairage active.'; $('baileys-link-status').className = baileysPairingError ? 'error' : 'muted'; $('baileys-link-qr').hidden = !waiting; if (waiting) $('baileys-link-qr').src = '/api/pairing/baileys/qr.svg?t=' + Date.now(); if (pairingFinished) void refreshRuntimeView(); } catch (error) { $('baileys-link-status').textContent = 'État du QR indisponible.'; $('baileys-link-status').className = 'error'; $('baileys-link-qr').hidden = true; } finally { baileysLinkQrPoll = setTimeout(refreshBaileysLinkQr, 2000); } }
+$('baileys-link-qr').onerror = () => { $('baileys-link-qr').hidden = true; };
+$('baileys-link-start').onclick = async () => { if (!window.confirm('Le linked device actuel sera remplacé. Continuer ?')) return; baileysPairingRequested = true; baileysPairingError = ''; try { await api('/api/pairing/baileys/start', { method: 'POST' }); await refreshBaileysLinkQr(); } catch (error) { baileysPairingRequested = false; baileysPairingError = error.message; await refreshBaileysLinkQr(); } };
+let maintenancePoll = 0;
+function maintenanceLabel(operation) { const scope = operation.scope.replaceAll('_', ' '); if (operation.status === 'completed') { const counts = operation.counts ? Object.values(operation.counts).reduce((total, count) => total + count, 0) : 0; return 'Réinitialisation terminée (' + scope + ', ' + counts + ' élément(s)).'; } if (operation.status === 'failed') return 'Réinitialisation échouée : ' + (operation.error || 'erreur locale'); return 'Réinitialisation en cours (' + scope + ')…'; }
+async function pollMaintenance(id) { clearTimeout(maintenancePoll); try { const operation = await api('/api/maintenance/operations/' + encodeURIComponent(id)); $('maintenance-status').textContent = maintenanceLabel(operation); $('maintenance-status').className = operation.status === 'failed' ? 'error' : 'muted'; if (operation.status === 'queued' || operation.status === 'running') { maintenancePoll = setTimeout(() => pollMaintenance(id), 1000); return; } document.querySelectorAll('[data-maintenance-scope]').forEach(button => { button.disabled = false; }); await refresh(); await refreshRuntimeView(); } catch (error) { $('maintenance-status').textContent = 'Échec : ' + error.message; $('maintenance-status').className = 'error'; document.querySelectorAll('[data-maintenance-scope]').forEach(button => { button.disabled = false; }); } }
+async function refreshMaintenanceState() { try { const state = await api('/api/maintenance/state'); if (state.active) { $('maintenance-status').textContent = 'Réinitialisation en cours…'; $('maintenance-status').className = 'muted'; document.querySelectorAll('[data-maintenance-scope]').forEach(button => { button.disabled = true; }); return; } if (state.directoryRebuildRequired) { $('maintenance-status').textContent = state.directoryRebuildError ? 'Annuaire à reconstruire : ' + state.directoryRebuildError : 'Annuaire à reconstruire à la prochaine connexion.'; $('maintenance-status').className = state.directoryRebuildError ? 'error' : 'muted'; } } catch (error) { /* le daemon peut être arrêté, la carte reste utilisable au prochain démarrage */ } }
+$('maintenance-card').onclick = async event => { const button = event.target.closest('button[data-maintenance-scope]'); if (!button) return; const scope = button.dataset.maintenanceScope; if (!scope) return; const phrase = 'RÉINITIALISER ' + scope; const confirmation = window.prompt('Action irréversible. Saisissez exactement : ' + phrase); if (confirmation === null) return; button.disabled = true; $('maintenance-status').textContent = 'Demande de réinitialisation…'; $('maintenance-status').className = 'muted'; try { const result = await api('/api/maintenance/resets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope, confirmation }) }); document.querySelectorAll('[data-maintenance-scope]').forEach(item => { item.disabled = true; }); await pollMaintenance(result.operationId); } catch (error) { button.disabled = false; $('maintenance-status').textContent = 'Échec : ' + error.message; $('maintenance-status').className = 'error'; } };
+$('connect').onclick = () => { token = $('token').value; $('auth').textContent = 'Jeton conservé uniquement en mémoire.'; $('auth').className = 'muted'; refresh(); void refreshRuntimeView(); void refreshBaileysLinkQr(); void refreshMaintenanceState(); api('/api/pairing/status').then(updatePairingControls).catch(showError); };
 $('refresh').onclick = refresh; $('search').oninput = refresh; $('kind').onchange = refresh;
+$('dir-refresh').onclick = async () => { const b = $('dir-refresh'); b.disabled = true; $('dir-refresh-status').textContent = 'Rafraîchissement des noms en cours…'; $('dir-refresh-status').className = 'muted'; try { const r = await api('/api/directory/refresh', { method: 'POST' }); $('dir-refresh-status').textContent = 'Noms rafraîchis (' + r.contacts + ' contact(s), ' + r.groups + ' groupe(s)).'; await refresh(); } catch (error) { $('dir-refresh-status').textContent = 'Échec : ' + error.message; $('dir-refresh-status').className = 'error'; } finally { b.disabled = false; } };
 $('stt-save').onclick = saveStt;
 $('stt-check').onclick = async () => { $('stt-check-result').textContent = 'Vérification…'; try { const health = await api('/api/stt/check', { method: 'POST' }); $('stt-check-result').textContent = health.ok ? 'Moteur disponible.' : 'Indisponible : ' + health.detail; $('stt-check-result').className = health.ok ? 'muted' : 'error'; } catch (error) { showError(error); } };
 $('stt-models').onclick = async (event) => { const button = event.target.closest('button[data-model]'); if (!button) return; button.disabled = true; try { await api('/api/stt/models/pull?model=' + encodeURIComponent(button.dataset.model), { method: 'POST' }); await refreshStt(); } catch (error) { button.disabled = false; showError(error); } };
@@ -49,7 +69,7 @@ $('pairing-stop').onclick = async () => { try { await api('/api/pairing/stop', {
 async function pollPairing() { try { const state = await api('/api/pairing/status'); $('pairing-status').textContent = state.status; if (state.status === 'waiting_qr') { const qr = await api('/api/pairing/qr'); $('qr').innerHTML = qr.qr; $('qr').hidden = false; } if (state.status === 'waiting_qr' || state.status === 'starting') setTimeout(pollPairing, 2000); } catch (error) { showError(error); } }
 })();`;
 
-const STYLES_CSS = `:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{margin:0;background:#f4f5f7;color:#1f2933}main{max-width:960px;margin:0 auto;padding:24px}header{margin-bottom:20px}.card{background:white;border:1px solid #d9dee5;border-radius:10px;padding:18px;margin:14px 0;box-shadow:0 1px 2px #0001}h1,h2{margin-top:0}label{display:flex;gap:12px;align-items:center}input,select,button{font:inherit;padding:8px;border:1px solid #bbc4cf;border-radius:6px}button{cursor:pointer;background:#155eef;border-color:#155eef;color:#ffffff;font-weight:600}button:hover{background:#004eeb;border-color:#004eeb}button:focus-visible{outline:3px solid #84adff;outline-offset:2px}.toolbar{display:flex;gap:8px;margin-bottom:12px}.toolbar input{flex:1}.chat{display:flex;gap:12px;align-items:center;justify-content:space-between;border-top:1px solid #e5e7eb;padding:12px 0}.chat div{display:flex;flex-direction:column}.chat small{color:#68737d}.chat span{font-size:.9em;color:#68737d}.qr{background:#fff;color:#000;font:12px/1 monospace;overflow:auto;padding:12px;white-space:pre}.muted{color:#68737d}.error{color:#b42318}@media(prefers-color-scheme:dark){body{background:#111827;color:#e5e7eb}.card{background:#1f2937;border-color:#374151}.chat{border-color:#374151}.qr{background:#fff;color:#000}input,select{background:#111827;color:#e5e7eb;border-color:#4b5563}}`;
+const STYLES_CSS = `:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{margin:0;background:#f4f5f7;color:#1f2933}main{max-width:960px;margin:0 auto;padding:24px}header{margin-bottom:20px}.card{background:white;border:1px solid #d9dee5;border-radius:10px;padding:18px;margin:14px 0;box-shadow:0 1px 2px #0001}h1,h2{margin-top:0}label{display:flex;gap:12px;align-items:center}input,select,button{font:inherit;padding:8px;border:1px solid #bbc4cf;border-radius:6px}button{cursor:pointer;background:#155eef;border-color:#155eef;color:#ffffff;font-weight:600}button:hover{background:#004eeb;border-color:#004eeb}button:focus-visible{outline:3px solid #84adff;outline-offset:2px}.toolbar,.maintenance-actions{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}.toolbar input{flex:1}.chat{display:flex;gap:12px;align-items:center;justify-content:space-between;border-top:1px solid #e5e7eb;padding:12px 0}.chat div{display:flex;flex-direction:column}.chat small{color:#68737d}.chat span{font-size:.9em;color:#68737d}.qr{background:#fff;color:#000;font:12px/1 monospace;overflow:auto;padding:12px;white-space:pre}.pairing-qr{display:block;box-sizing:border-box;width:min(100%,480px);margin:12px auto;background:#fff;padding:12px}.pairing-qr[hidden]{display:none}.muted{color:#68737d}.error{color:#b42318}@media(prefers-color-scheme:dark){body{background:#111827;color:#e5e7eb}.card{background:#1f2937;border-color:#374151}.chat{border-color:#374151}.qr{background:#fff;color:#000}input,select{background:#111827;color:#e5e7eb;border-color:#4b5563}}`;
 
 const MAX_DASHBOARD_BODY_BYTES = 256 * 1024;
 
@@ -112,7 +132,7 @@ function renderSttDetails(view) { $('stt-details').innerHTML = metadataRow('Mote
 function renderStt(view) { sttState = view; $('stt-enabled').checked = view.enabled; $('stt-language').value = view.language; $('stt-worker').textContent = sttWorkerLabel(view); $('stt-worker').className = view.worker.running ? 'muted' : 'error'; renderSttModels(view); renderSttDetails(view); const queue = view.queue === null ? 'Service de transcription non installé.' : view.queue.pending + ' vocal(aux) en attente, ' + view.queue.failed + ' en échec.'; const missing = view.models.length === 0 ? ' Aucun modèle installé : téléchargez-en un ci-dessus.' : ''; $('stt-status').textContent = queue + missing; const download = view.download; if (download.status === 'downloading' || download.status === 'verifying') { const percent = download.totalBytes > 0 ? Math.round((download.receivedBytes / download.totalBytes) * 100) : 0; $('stt-download').hidden = false; $('stt-download').className = 'muted'; $('stt-download').textContent = download.status === 'verifying' ? 'Vérification de l’empreinte…' : 'Téléchargement ' + download.modelId + ' — ' + percent + '%'; if (!sttPoll) sttPoll = setTimeout(() => { sttPoll = null; void refreshStt(); }, 2000); } else if (download.status === 'failed') { $('stt-download').hidden = false; $('stt-download').className = 'error'; $('stt-download').textContent = 'Téléchargement échoué : ' + download.error; } else if (download.status === 'done') { $('stt-download').hidden = false; $('stt-download').className = 'muted'; $('stt-download').textContent = 'Modèle ' + download.modelId + ' installé.'; } else { $('stt-download').hidden = true; } }
 async function refreshStt() { try { renderStt(await api('/api/stt')); } catch (error) { showError(error); } }
 async function saveStt() { const selected = document.querySelector('input[name=\"stt-model\"]:checked'); const query = new URLSearchParams({ enabled: String($('stt-enabled').checked), language: $('stt-language').value }); if (selected) query.set('modelPath', selected.value); try { renderStt(await api('/api/stt?' + query.toString(), { method: 'POST' })); $('stt-status').textContent = 'Réglages enregistrés. ' + $('stt-status').textContent; } catch (error) { $('stt-status').textContent = error.message; $('stt-status').className = 'error'; } }
-function bootstrap() { const jid = conversationJid(); if (jid) { void showConversation(jid); return; } void refresh(); api('/api/pairing/status').then(updatePairingControls).catch(showError); }
+function bootstrap() { const jid = conversationJid(); if (jid) { void showConversation(jid); return; } void refresh(); void refreshRuntimeView(); void refreshBaileysLinkQr(); void refreshMaintenanceState(); api('/api/pairing/status').then(updatePairingControls).catch(showError); }
 $('conversation-older').onclick = () => { void loadConversation(false); };
 $('conversation-refresh').onclick = () => { if (conversationState) { conversationState.nextCursor = null; void loadConversation(true); } };
 $('conversation-messages').onclick = async event => { const button = event.target.closest('button[data-transcript-action]'); if (!button || !conversationState) return; const messageId = button.dataset.messageId; const action = button.dataset.transcriptAction; if (!messageId || !action) return; if (action === 'edit') { conversationState.editingMessageId = messageId; renderConversation(); document.querySelector('.transcript-editor textarea')?.focus(); return; } if (action === 'cancel') { conversationState.editingMessageId = null; renderConversation(); return; } if (action !== 'save') return; const editor = button.closest('.transcript-editor'); const textarea = editor?.querySelector('textarea'); const status = editor?.querySelector('[data-transcript-status]'); if (!textarea) return; button.disabled = true; if (status) { status.textContent = 'Enregistrement…'; status.className = 'muted'; } try { const updated = await api('/api/chats/' + encodeURIComponent(conversationState.jid) + '/messages/' + encodeURIComponent(messageId) + '/transcription/correction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ textCorrected: textarea.value }) }); const index = conversationState.items.findIndex(item => item.messageId === messageId); if (index >= 0) conversationState.items[index] = updated; conversationState.editingMessageId = null; renderConversation(); $('conversation-status').textContent = 'Correction enregistrée.'; $('conversation-status').className = 'muted'; } catch (error) { if (status) { status.textContent = error.message; status.className = 'error'; } button.disabled = false; } };
@@ -123,7 +143,7 @@ bootstrap();
 
 const DIRECT_STYLES_CSS =
   STYLES_CSS +
-  ".chat-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.chat-link{color:#155eef;font-weight:600}.message-list{display:flex;flex-direction:column;gap:12px;max-height:65vh;overflow:auto;padding:4px}.message{background:#f8fafc;border:1px solid #d9dee5;border-radius:10px;padding:12px;max-width:85%}.message-from-me{align-self:flex-end;background:#eaf2ff}.message-deleted{opacity:.7}.message header{display:flex;justify-content:space-between;gap:16px;font-size:.9em}.message time{color:#68737d}.message-text{white-space:pre-wrap;overflow-wrap:anywhere}.transcript{border-left:3px solid #84adff;padding-left:10px}.transcript p{white-space:pre-wrap;overflow-wrap:anywhere}.transcript-editor textarea{display:block;box-sizing:border-box;width:100%;min-height:8em;resize:vertical;font:inherit}.transcript-editor .conversation-actions{margin-top:8px}.message dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;font-size:.85em}.message dd{margin:0;overflow-wrap:anywhere}.conversation-actions{display:flex;gap:8px;margin-top:12px}@media(prefers-color-scheme:dark){.message{background:#1f2937;border-color:#374151}.message-from-me{background:#17315f}.chat-link{color:#84adff}}";
+  "#access-card{display:none}.chat-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.chat-link{color:#155eef;font-weight:600}.message-list{display:flex;flex-direction:column;gap:12px;max-height:65vh;overflow:auto;padding:4px}.message{background:#f8fafc;border:1px solid #d9dee5;border-radius:10px;padding:12px;max-width:85%}.message-from-me{align-self:flex-end;background:#eaf2ff}.message-deleted{opacity:.7}.message header{display:flex;justify-content:space-between;gap:16px;font-size:.9em}.message time{color:#68737d}.message-text{white-space:pre-wrap;overflow-wrap:anywhere}.transcript{border-left:3px solid #84adff;padding-left:10px}.transcript-editor textarea{display:block;box-sizing:border-box;width:100%;min-height:8em;resize:vertical;font:inherit}.transcript-editor .conversation-actions{margin-top:8px}.message dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;font-size:.85em}.message dd{margin:0;overflow-wrap:anywhere}.conversation-actions{display:flex;gap:8px;margin-top:12px}@media(prefers-color-scheme:dark){.message{background:#1f2937;border-color:#374151}.message-from-me{background:#17315f}.chat-link{color:#84adff}}";
 
 type AuthorizationMethod = "bearer" | "session";
 
@@ -162,10 +182,28 @@ function authorizationMethod(
   return session && verifyDashboardSession(token, session) ? "session" : null;
 }
 
-function sameOriginRequest(request: IncomingMessage): boolean {
+function requestOrigin(
+  request: IncomingMessage,
+  config: Config,
+): string | null {
+  if (config.web.publicOrigin) return config.web.publicOrigin;
   const host = request.headers.host;
-  if (!host) return false;
-  const expectedOrigin = `http://${host}`;
+  return host ? `http://${host}` : null;
+}
+
+function hasExpectedHost(
+  request: IncomingMessage,
+  publicOrigin: string,
+): boolean {
+  const host = request.headers.host;
+  return host?.toLowerCase() === new URL(publicOrigin).host.toLowerCase();
+}
+
+function sameOriginRequest(
+  request: IncomingMessage,
+  expectedOrigin: string | null,
+): boolean {
+  if (!expectedOrigin) return false;
   const origin = request.headers.origin;
   if (origin) return origin === expectedOrigin;
   const referer = request.headers.referer;
@@ -188,15 +226,20 @@ function send(
     "Content-Type": type,
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), geolocation=(), microphone=()",
     "Content-Security-Policy":
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "default-src 'self'; frame-ancestors 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'",
     ...extraHeaders,
   });
   response.end(body);
 }
 
-async function toRequest(request: IncomingMessage): Promise<Request> {
-  const host = request.headers.host ?? "127.0.0.1";
+async function toRequest(
+  request: IncomingMessage,
+  origin: string,
+): Promise<Request> {
   const method = request.method ?? "GET";
   let body: string | undefined;
   if (method !== "GET" && method !== "HEAD") {
@@ -224,7 +267,7 @@ async function toRequest(request: IncomingMessage): Promise<Request> {
     }
     if (chunks.length > 0) body = Buffer.concat(chunks).toString("utf8");
   }
-  return new Request(`http://${host}${request.url ?? "/"}`, {
+  return new Request(`${origin}${request.url ?? "/"}`, {
     method,
     headers: request.headers as Record<string, string>,
     ...(body === undefined ? {} : { body }),
@@ -243,9 +286,21 @@ export async function createDashboardServer(
   const token = readDashboardToken(config.web.tokenFile);
   const server = createServer(async (request, response) => {
     try {
+      if (
+        config.web.publicOrigin &&
+        !hasExpectedHost(request, config.web.publicOrigin)
+      ) {
+        return send(
+          response,
+          421,
+          "Misdirected Request\n",
+          "text/plain; charset=utf-8",
+        );
+      }
+      const origin = requestOrigin(request, config);
       const url = new URL(
         request.url ?? "/",
-        `http://${request.headers.host ?? config.web.host}`,
+        origin ?? `http://${config.web.host}`,
       );
       if (
         (url.pathname === "/" || url.pathname.startsWith("/conversation/")) &&
@@ -257,7 +312,7 @@ export async function createDashboardServer(
           DIRECT_INDEX_HTML,
           "text/html; charset=utf-8",
           {
-            "Set-Cookie": `${DASHBOARD_SESSION_COOKIE}=${createDashboardSession(token)}; Path=/; HttpOnly; SameSite=Strict`,
+            "Set-Cookie": `${DASHBOARD_SESSION_COOKIE}=${createDashboardSession(token)}; Path=/; HttpOnly; SameSite=Strict${config.web.publicOrigin ? "; Secure" : ""}`,
           },
         );
       }
@@ -290,7 +345,7 @@ export async function createDashboardServer(
         request.method !== "GET" &&
         request.method !== "HEAD" &&
         request.method !== "OPTIONS" &&
-        !sameOriginRequest(request)
+        !sameOriginRequest(request, origin)
       ) {
         return send(
           response,
@@ -299,7 +354,10 @@ export async function createDashboardServer(
           "application/json; charset=utf-8",
         );
       }
-      const result = await dashboardApi(await toRequest(request), context);
+      const result = await dashboardApi(
+        await toRequest(request, origin ?? `http://${config.web.host}`),
+        context,
+      );
       if (!result)
         return send(
           response,

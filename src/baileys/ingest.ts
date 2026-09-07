@@ -1,7 +1,18 @@
-import { proto, type WAMessage, type WASocket } from "baileys";
+import {
+  proto,
+  type Chat,
+  type Contact,
+  type WAMessage,
+  type WASocket,
+} from "baileys";
 import type { Logger } from "pino";
 import type { Config } from "../config.js";
 import type { Database } from "../db/index.js";
+import {
+  directoryTablesAvailable,
+  upsertDirectoryContact,
+  upsertDirectoryGroup,
+} from "../db/directory.js";
 import {
   getChat,
   insertEvent,
@@ -101,13 +112,166 @@ export function registerIngestion(sock: WASocket, deps: IngestDeps): void {
   });
 
   sock.ev.on("contacts.upsert", (contacts) => {
-    for (const contact of contacts) {
-      const jid = contact.phoneNumber ?? contact.id;
-      const lid =
-        contact.lid ?? (contact.id.endsWith("@lid") ? contact.id : null);
-      if (!jid || !lid || jid.endsWith("@lid")) continue;
-      persistLidMapping(deps, jid, lid, contact.name ?? contact.notify ?? null);
+    persistContactMetadataList(deps, contacts);
+  });
+
+  sock.ev.on("contacts.update", (contacts) => {
+    persistContactMetadataList(deps, contacts);
+  });
+
+  sock.ev.on(
+    "messaging-history.set",
+    ({ contacts = [], chats = [], lidPnMappings = [] }) => {
+      for (const mapping of lidPnMappings) {
+        if (mapping.pn && mapping.lid) {
+          persistLidMapping(deps, mapping.pn, mapping.lid);
+        }
+      }
+      // History carries contact and chat metadata separately from the message
+      // upserts. Persist both so the first dashboard view uses the local name
+      // even when no recent message has supplied a push name yet.
+      persistChatMetadataList(deps, chats);
+      persistContactMetadataList(deps, contacts);
+    },
+  );
+
+  sock.ev.on("chats.upsert", (chats) => {
+    persistChatMetadataList(deps, chats);
+  });
+
+  sock.ev.on("chats.update", (chats) => {
+    persistChatMetadataList(deps, chats);
+  });
+
+  // Group subject changes arrive here rather than through `chats.*`.
+  const persistGroupSubjects = (
+    groups: readonly Partial<{ id: string; subject: string }>[],
+  ): void => {
+    for (const group of groups) {
+      if (typeof group.id !== "string" || !group.subject?.trim()) continue;
+      try {
+        persistChatMetadata(deps, { id: group.id, name: group.subject.trim() });
+      } catch (error) {
+        deps.logger.error(
+          { err: error instanceof Error ? error.message : String(error) },
+          "failed to persist group subject",
+        );
+      }
     }
+  };
+  sock.ev.on("groups.upsert", persistGroupSubjects);
+  sock.ev.on("groups.update", persistGroupSubjects);
+}
+
+function persistContactMetadataList(
+  deps: IngestDeps,
+  contacts: readonly Partial<Contact>[],
+): void {
+  for (const contact of contacts) {
+    try {
+      persistContactMetadata(deps, contact);
+    } catch (error) {
+      deps.logger.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        "failed to persist contact metadata",
+      );
+    }
+  }
+}
+
+/** Persist all contact names while keeping local, public, and verified names separate. */
+function persistContactMetadata(
+  deps: IngestDeps,
+  contact: Partial<Contact>,
+): void {
+  const id = typeof contact.id === "string" ? contact.id : null;
+  const phoneJid =
+    typeof contact.phoneNumber === "string" ? contact.phoneNumber : null;
+  const jid = phoneJid ?? id;
+  if (!jid) return;
+
+  const normalizedJid = normalizeJid(jid);
+  if (isGroupJid(normalizedJid) || isStatusJid(normalizedJid)) return;
+
+  const lid =
+    typeof contact.lid === "string"
+      ? contact.lid
+      : id?.endsWith("@lid")
+        ? id
+        : null;
+  const phone = phoneFromJid(normalizedJid);
+  upsertParticipant(deps.db, {
+    accountId: deps.accountId,
+    jid: normalizedJid,
+    ...(lid ? { lid: normalizeJid(lid) } : {}),
+    ...(phone ? { phone } : {}),
+    ...(contact.name !== undefined ? { displayName: contact.name } : {}),
+    ...(contact.notify !== undefined ? { pushName: contact.notify } : {}),
+    ...(contact.verifiedName !== undefined
+      ? { verifiedName: contact.verifiedName }
+      : {}),
+  });
+}
+
+function persistChatMetadataList(
+  deps: IngestDeps,
+  chats: readonly Partial<Chat>[],
+): void {
+  for (const chat of chats) {
+    try {
+      persistChatMetadata(deps, chat);
+    } catch (error) {
+      deps.logger.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        "failed to persist chat metadata",
+      );
+    }
+  }
+}
+
+/** Persist chat names and project direct-chat names into the directory. */
+export function persistChatMetadata(
+  deps: IngestDeps,
+  chat: Partial<Chat>,
+): void {
+  if (typeof chat.id !== "string" || chat.id.length === 0) return;
+  const jid = normalizeJid(chat.id);
+  const name = chat.displayName || chat.name || null;
+  const isGroup = isGroupJid(jid);
+  const isStatus = isStatusJid(jid);
+
+  upsertChat(deps.db, {
+    accountId: deps.accountId,
+    jid,
+    ...(name !== null ? { name } : {}),
+    isGroup,
+    isStatus,
+  });
+
+  if (!directoryTablesAvailable(deps.db) || isStatus) return;
+  if (isGroup) {
+    upsertDirectoryGroup(deps.db, {
+      accountId: deps.accountId,
+      jid,
+      ...(name !== null ? { name, nameSource: "group_info" } : {}),
+    });
+    return;
+  }
+
+  const phoneJid = typeof chat.pnJid === "string" ? chat.pnJid : jid;
+  const lid =
+    typeof chat.lidJid === "string"
+      ? chat.lidJid
+      : typeof chat.accountLid === "string"
+        ? chat.accountLid
+        : jid.endsWith("@lid")
+          ? jid
+          : null;
+  upsertDirectoryContact(deps.db, {
+    accountId: deps.accountId,
+    jid: phoneJid,
+    ...(lid ? { lid } : {}),
+    ...(name !== null ? { displayName: name } : {}),
   });
 }
 

@@ -8,30 +8,76 @@ import {
   type Socket,
 } from "node:net";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  isMaintenanceScope,
+  type MaintenanceScope,
+} from "../db/maintenance.js";
 
-export interface HistoryControlRequest {
+export interface HistoryStartRequest {
   op: "history.start";
   requestId: string;
   chat: string;
   since: number;
 }
 
-export interface HistoryControlResponse {
+export interface DirectoryResyncRequest {
+  op: "directory.resync";
+  requestId: string;
+}
+
+export interface PairingStartRequest {
+  op: "pairing.start";
+  requestId: string;
+}
+
+export interface MaintenanceResetRequest {
+  op: "maintenance.reset";
+  requestId: string;
+  scope: MaintenanceScope;
+  confirmation: string;
+}
+
+/** Every request the daemon control socket accepts. */
+export type ControlRequest =
+  | HistoryStartRequest
+  | DirectoryResyncRequest
+  | PairingStartRequest
+  | MaintenanceResetRequest;
+
+/** @deprecated use {@link HistoryStartRequest} */
+export type HistoryControlRequest = HistoryStartRequest;
+
+export interface ControlResponse {
   ok: boolean;
   requestId: string;
+  /** `history.start` */
   jobId?: string;
   status?: string;
   reused?: boolean;
+  /** `directory.resync` */
+  resynced?: { contacts: number; groups: number };
+  /** `pairing.start` */
+  pairing?: { status: "starting" };
+  /** `maintenance.reset` */
+  maintenance?: { operationId: string; status: "queued" };
   error?: string;
 }
 
-export interface HistoryControlHandler {
-  (request: HistoryControlRequest): Promise<{
-    jobId: string;
-    status: string;
-    reused: boolean;
-  }>;
+/** @deprecated use {@link ControlResponse} */
+export type HistoryControlResponse = ControlResponse;
+
+export type ControlResult =
+  | { jobId: string; status: string; reused: boolean }
+  | { resynced: { contacts: number; groups: number } }
+  | { pairing: { status: "starting" } }
+  | { maintenance: { operationId: string; status: "queued" } };
+
+export interface ControlHandler {
+  (request: ControlRequest): Promise<ControlResult>;
 }
+
+/** @deprecated use {@link ControlHandler} */
+export type HistoryControlHandler = ControlHandler;
 
 const MAX_FRAME_BYTES = 64 * 1024;
 
@@ -41,7 +87,7 @@ export class HistoryControlServer {
 
   constructor(
     private readonly path: string,
-    private readonly handler: HistoryControlHandler,
+    private readonly handler: ControlHandler,
   ) {}
 
   async start(): Promise<void> {
@@ -114,41 +160,35 @@ export class HistoryControlServer {
     let requestId = "unknown";
     try {
       const parsed: unknown = JSON.parse(frame);
-      if (!isHistoryControlRequest(parsed)) throw new Error("invalid request");
+      if (!isControlRequest(parsed)) throw new Error("invalid request");
       requestId = parsed.requestId;
       const result = await this.handler(parsed);
       socket.end(
         `${JSON.stringify({
           ok: true,
           requestId,
-          jobId: result.jobId,
-          status: result.status,
-          reused: result.reused,
-        } satisfies HistoryControlResponse)}\n`,
+          ...result,
+        } satisfies ControlResponse)}\n`,
       );
-    } catch {
+    } catch (error) {
       socket.end(
         `${JSON.stringify({
           ok: false,
           requestId,
-          error: "history control request failed",
-        } satisfies HistoryControlResponse)}\n`,
+          error:
+            error instanceof Error ? error.message : "control request failed",
+        } satisfies ControlResponse)}\n`,
       );
     }
   }
 }
 
-export async function requestHistoryStart(
+function sendControlRequest(
   path: string,
-  input: Omit<HistoryControlRequest, "op" | "requestId">,
-  timeoutMs = 5_000,
-): Promise<HistoryControlResponse> {
-  const request: HistoryControlRequest = {
-    op: "history.start",
-    requestId: randomUUID(),
-    ...input,
-  };
-  return new Promise<HistoryControlResponse>((resolve, reject) => {
+  request: ControlRequest,
+  timeoutMs: number,
+): Promise<ControlResponse> {
+  return new Promise<ControlResponse>((resolve, reject) => {
     const socket = createConnection(controlAddress(path));
     let buffer = "";
     let settled = false;
@@ -160,32 +200,82 @@ export async function requestHistoryStart(
     };
     socket.setEncoding("utf8");
     socket.setTimeout(timeoutMs, () =>
-      finish(() => reject(new Error("history control unavailable"))),
+      finish(() => reject(new Error("control socket unavailable"))),
     );
     socket.on("error", () =>
-      finish(() => reject(new Error("history control unavailable"))),
+      finish(() => reject(new Error("control socket unavailable"))),
     );
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       if (Buffer.byteLength(buffer, "utf8") > MAX_FRAME_BYTES) {
-        finish(() => reject(new Error("history control response too large")));
+        finish(() => reject(new Error("control response too large")));
         return;
       }
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
       try {
         const parsed: unknown = JSON.parse(buffer.slice(0, newline));
-        if (!isHistoryControlResponse(parsed))
-          throw new Error("invalid response");
+        if (!isControlResponse(parsed)) throw new Error("invalid response");
         finish(() =>
-          parsed.ok ? resolve(parsed) : reject(new Error(parsed.error)),
+          parsed.ok
+            ? resolve(parsed)
+            : reject(new Error(parsed.error ?? "control request failed")),
         );
       } catch {
-        finish(() => reject(new Error("history control response invalid")));
+        finish(() => reject(new Error("control response invalid")));
       }
     });
     socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
   });
+}
+
+export async function requestHistoryStart(
+  path: string,
+  input: Omit<HistoryStartRequest, "op" | "requestId">,
+  timeoutMs = 5_000,
+): Promise<ControlResponse> {
+  return sendControlRequest(
+    path,
+    { op: "history.start", requestId: randomUUID(), ...input },
+    timeoutMs,
+  );
+}
+
+/** Ask the running daemon to re-fetch contact and group names from WhatsApp. */
+export async function requestDirectoryResync(
+  path: string,
+  timeoutMs = 30_000,
+): Promise<ControlResponse> {
+  return sendControlRequest(
+    path,
+    { op: "directory.resync", requestId: randomUUID() },
+    timeoutMs,
+  );
+}
+
+/** Ask the Baileys ingestion daemon to begin its exclusive pairing flow. */
+export async function requestBaileysPairingStart(
+  path: string,
+  timeoutMs = 5_000,
+): Promise<ControlResponse> {
+  return sendControlRequest(
+    path,
+    { op: "pairing.start", requestId: randomUUID() },
+    timeoutMs,
+  );
+}
+
+/** Queue a destructive reset in the daemon that owns SQLite writes. */
+export async function requestMaintenanceReset(
+  path: string,
+  input: Omit<MaintenanceResetRequest, "op" | "requestId">,
+  timeoutMs = 5_000,
+): Promise<ControlResponse> {
+  return sendControlRequest(
+    path,
+    { op: "maintenance.reset", requestId: randomUUID(), ...input },
+    timeoutMs,
+  );
 }
 
 /**
@@ -224,23 +314,28 @@ export function controlAddress(configuredPath: string): string {
     : `/tmp/wac-${fingerprint(configuredPath)}.sock`;
 }
 
-function isHistoryControlRequest(
-  value: unknown,
-): value is HistoryControlRequest {
+function isControlRequest(value: unknown): value is ControlRequest {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
+  if (typeof record.requestId !== "string") return false;
+  if (record.op === "directory.resync" || record.op === "pairing.start")
+    return true;
+  if (
+    record.op === "maintenance.reset" &&
+    isMaintenanceScope(record.scope) &&
+    typeof record.confirmation === "string"
+  ) {
+    return true;
+  }
   return (
     record.op === "history.start" &&
-    typeof record.requestId === "string" &&
     typeof record.chat === "string" &&
     typeof record.since === "number" &&
     Number.isInteger(record.since)
   );
 }
 
-function isHistoryControlResponse(
-  value: unknown,
-): value is HistoryControlResponse {
+function isControlResponse(value: unknown): value is ControlResponse {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
   return record.ok === true || record.ok === false;

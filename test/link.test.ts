@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +21,66 @@ afterEach(() => {
 });
 
 describe("pairing-code readiness", () => {
+  it("writes a headless QR without retaining it after a successful link", async () => {
+    const configPath = join(dir, "config.yaml");
+    const dataDir = join(dir, "data");
+    const qrOut = join(dataDir, "pairing-qr.svg");
+    runInit({ configPath, dataDir });
+    let opened: (() => void) | undefined;
+    let appStateKeySaved: (() => void) | undefined;
+    const connectionFactory = ({ handlers }: ConnectionDeps) => ({
+      async start(): Promise<void> {
+        handlers.onQr?.("opaque-qr-payload");
+        opened = () => handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+        appStateKeySaved = () =>
+          handlers.onCredsUpdate?.({ myAppStateKeyId: "app-state-key" });
+      },
+      stop(): void {},
+    });
+
+    const linking = runLink(
+      { configPath, qr: true, qrOut },
+      { connectionFactory },
+    );
+    await vi.waitFor(() => expect(existsSync(qrOut)).toBe(true));
+    expect(process.stdout.write).toHaveBeenCalledWith(
+      `QR code written to ${qrOut}\n`,
+    );
+
+    opened?.();
+    // Opening the websocket proves the QR was scanned, but the app-state key
+    // can arrive shortly afterwards. The QR must remain unavailable only once
+    // this credential has been persisted.
+    expect(existsSync(qrOut)).toBe(true);
+    appStateKeySaved?.();
+    await expect(linking).resolves.toEqual(
+      expect.objectContaining({ selfJid: "49123@s.whatsapp.net" }),
+    );
+    expect(existsSync(qrOut)).toBe(false);
+  });
+
+  it("does not declare a scanned QR successful before the app-state key is saved", async () => {
+    const configPath = join(dir, "config.yaml");
+    const dataDir = join(dir, "data");
+    const qrOut = join(dataDir, "pairing-qr.svg");
+    runInit({ configPath, dataDir });
+    const connectionFactory = ({ handlers }: ConnectionDeps) => ({
+      async start(): Promise<void> {
+        handlers.onQr?.("opaque-qr-payload");
+        handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+      },
+      stop(): void {},
+    });
+
+    await expect(
+      runLink(
+        { configPath, qr: true, qrOut, timeoutSec: 0.01 },
+        { connectionFactory },
+      ),
+    ).rejects.toThrow("timed out");
+    expect(existsSync(qrOut)).toBe(false);
+  });
+
   it("waits for the WebSocket before requesting a code", async () => {
     let releaseReady!: () => void;
     const waitForSocketOpen = vi.fn(
@@ -77,6 +137,7 @@ describe("pairing-code readiness", () => {
         handlers.onQr?.("opaque-qr-payload");
         await Promise.resolve();
         handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+        handlers.onCredsUpdate?.({ myAppStateKeyId: "app-state-key" });
       },
       stop(): void {},
     });
@@ -138,6 +199,26 @@ describe("whatsmeow link session lock", () => {
 
     await expect(runLink({ configPath, qr: true })).rejects.toThrow(
       /ingestion|store/i,
+    );
+  });
+});
+
+describe("Baileys link session lock", () => {
+  it("refuses to link while the ingestion daemon holds the auth directory", async () => {
+    const configPath = join(dir, "config.yaml");
+    runInit({ configPath, dataDir: join(dir, "data") });
+    const { paths } = (await import("../src/config.js")).loadConfig(configPath);
+    writeFileSync(
+      `${paths.authDir}.lock`,
+      `${JSON.stringify({
+        pid: process.pid,
+        host: hostname(),
+        startedAt: 1,
+      })}\n`,
+    );
+
+    await expect(runLink({ configPath, qr: true })).rejects.toThrow(
+      /Baileys.*auth|auth state/i,
     );
   });
 });

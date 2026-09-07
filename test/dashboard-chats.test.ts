@@ -35,6 +35,26 @@ describe("listDashboardChats", () => {
     expect(found[0]?.name).toBe("Amelie Dupont");
   });
 
+  it("prefers the local contact name over stale chat and public names", () => {
+    const db = setup();
+    upsertChat(db, {
+      accountId: "acct",
+      jid: "491235@s.whatsapp.net",
+      name: "Ancien nom de chat",
+      pushName: "Nom public",
+      lastMessageTs: 100,
+    });
+    upsertDirectoryContact(db, {
+      accountId: "acct",
+      jid: "491235@s.whatsapp.net",
+      displayName: "Nom local",
+      verifiedName: "Entreprise vérifiée",
+      pushName: "Nom public",
+    });
+
+    expect(listDashboardChats(db, "acct")[0]?.name).toBe("Nom local");
+  });
+
   it("resolves the directory name through an alias JID", () => {
     const db = setup();
     upsertChat(db, { accountId: "acct", jid: "9001@lid", lastMessageTs: 100 });

@@ -80,6 +80,29 @@ export interface DirectoryGroupMemberRow extends DirectoryEntityRow {
   is_active: number;
 }
 
+/**
+ * Resolve the user-facing name from the directory fields.
+ *
+ * Contact names have a deliberate precedence: the local address-book name,
+ * then the verified business name, then the public WhatsApp name, and finally
+ * the canonical JID. Groups only have one display name, stored in `name`.
+ */
+export function directoryDisplayName(
+  entity: DirectoryEntityRow | undefined,
+): string | null {
+  if (!entity) return null;
+  if (entity.entity_type === "group") {
+    return clean(entity.name) ?? clean(entity.canonical_jid);
+  }
+  return (
+    clean(entity.display_name) ??
+    clean(entity.verified_name) ??
+    clean(entity.push_name) ??
+    clean(entity.name) ??
+    clean(entity.canonical_jid)
+  );
+}
+
 const NAME_RANK: Record<string, number> = {
   message: 10,
   push_name: 30,

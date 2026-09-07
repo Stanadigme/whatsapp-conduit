@@ -1,5 +1,6 @@
 import type { Database } from "better-sqlite3";
 import {
+  directoryDisplayName,
   directoryTablesAvailable,
   getDirectoryEntityByJid,
 } from "../db/directory.js";
@@ -33,7 +34,8 @@ function toDashboardChat(db: Database, row: ChatRow): DashboardChat {
   const entity = directoryTablesAvailable(db)
     ? getDirectoryEntityByJid(db, row.account_id, row.jid)
     : undefined;
-  const name = entity?.name ?? row.name ?? row.push_name ?? row.jid;
+  const name =
+    directoryDisplayName(entity) || row.name || row.push_name || row.jid;
   return {
     jid: row.jid,
     name,
@@ -91,7 +93,14 @@ export function listDashboardChats(
               on a.account_id = c.account_id and a.alias_jid = c.jid
        left join directory_entities ea on ea.id = a.entity_id`
     : "";
-  const dirName = directory ? "coalesce(ec.name, ea.name)" : "null";
+  const dirName = directory
+    ? "coalesce(nullif(trim(ec.display_name), ''), " +
+      "nullif(trim(ec.verified_name), ''), nullif(trim(ec.push_name), ''), " +
+      "nullif(trim(ec.name), ''), nullif(trim(ec.canonical_jid), ''), " +
+      "nullif(trim(ea.display_name), ''), nullif(trim(ea.verified_name), ''), " +
+      "nullif(trim(ea.push_name), ''), nullif(trim(ea.name), ''), " +
+      "nullif(trim(ea.canonical_jid), ''))"
+    : "null";
   const dirPushName = directory
     ? "coalesce(ec.push_name, ea.push_name)"
     : "null";
@@ -123,7 +132,7 @@ export function listDashboardChats(
     .all(params) as ResolvedChatRow[];
   return rows.map((row) => ({
     jid: row.jid,
-    name: row.dir_name ?? row.name ?? row.push_name ?? row.jid,
+    name: row.dir_name || row.name || row.push_name || row.jid,
     pushName: row.dir_push_name ?? row.push_name,
     kind:
       row.is_status === 1 ? "status" : row.is_group === 1 ? "group" : "contact",

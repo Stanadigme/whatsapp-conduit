@@ -8,6 +8,7 @@ import {
   type ChatRow,
 } from "../db/queries.js";
 import {
+  directoryDisplayName,
   directoryTablesAvailable,
   getDirectoryEntityByJid,
   listDirectoryAliases,
@@ -44,7 +45,7 @@ function toView(
     : undefined;
   const view: ChatView = {
     jid: row.jid,
-    name: row.name ?? entity?.name ?? row.push_name ?? row.jid,
+    name: directoryDisplayName(entity) || row.name || row.push_name || row.jid,
     pushName: entity?.push_name ?? row.push_name,
     isGroup: row.is_group === 1,
     isStatus: row.is_status === 1,

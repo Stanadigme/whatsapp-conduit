@@ -6,6 +6,7 @@ import { runInit } from "../src/commands/init.js";
 import { runExport, type ExportRecord } from "../src/commands/export.js";
 import { loadConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
+import { upsertDirectoryContact } from "../src/db/directory.js";
 import {
   getConsumerOffset,
   selectExportMessages,
@@ -142,6 +143,37 @@ describe("runExport", () => {
       blockedChats: ["b@s.whatsapp.net"],
     });
     expect(rows.map((r) => r.chat_jid)).toEqual(["a@s.whatsapp.net"]);
+    db.close();
+  });
+
+  it("exports the local directory name before stale chat and public names", () => {
+    const config = loadConfig(configPath);
+    const db = openDb(config.paths.sqlite);
+    upsertAccount(db, { id: config.account.name });
+    upsertChat(db, {
+      accountId: config.account.name,
+      jid: "c@s.whatsapp.net",
+      name: "Ancien nom de chat",
+      pushName: "Nom public",
+    });
+    upsertDirectoryContact(db, {
+      accountId: config.account.name,
+      jid: "c@s.whatsapp.net",
+      displayName: "Nom local",
+      verifiedName: "Entreprise vérifiée",
+      pushName: "Nom public",
+    });
+    upsertMessage(db, {
+      accountId: config.account.name,
+      chatJid: "c@s.whatsapp.net",
+      messageId: "C1",
+      timestamp: 3000,
+      text: "message",
+    });
+
+    expect(
+      selectExportMessages(db, { accountId: config.account.name }),
+    ).toEqual([expect.objectContaining({ chat_name: "Nom local" })]);
     db.close();
   });
 
