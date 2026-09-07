@@ -8,6 +8,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { Logger } from "pino";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { getVersion } from "../version.js";
 import { createMcpServer } from "./server.js";
@@ -189,7 +190,11 @@ export function createMcpHttpServer(
       }
       void server.close();
     };
-    await server.connect(transport);
+    // The MCP SDK declares `sessionId?: string` on the Transport interface but
+    // `string | undefined` on its own transport classes, so its implementations do
+    // not satisfy its own interface under exactOptionalPropertyTypes. Cast until
+    // the SDK is consistent; nothing here changes at runtime.
+    await server.connect(transport as unknown as Transport);
     return transport;
   }
 

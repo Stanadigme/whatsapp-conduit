@@ -6,11 +6,11 @@ import { createSttAdapter } from "../stt/index.js";
 import { runTranscribeLoop, transcribeOnce } from "../stt/worker.js";
 
 export interface TranscribeOptions {
-  configPath?: string;
+  configPath?: string | undefined;
   /** Run a single pass and exit instead of polling. */
-  once?: boolean;
+  once?: boolean | undefined;
   /** Only report whether the engine is usable, then exit. */
-  check?: boolean;
+  check?: boolean | undefined;
 }
 
 /**

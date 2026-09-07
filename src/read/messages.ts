@@ -84,16 +84,16 @@ export interface TranscriptRow {
 }
 
 export interface MessageFilters {
-  chat?: string;
-  sender?: string;
-  fromMe?: boolean;
-  kind?: string;
-  hasMedia?: boolean;
-  ingestionSource?: string;
-  after?: number;
-  before?: number;
-  limit?: number;
-  cursor?: string;
+  chat?: string | undefined;
+  sender?: string | undefined;
+  fromMe?: boolean | undefined;
+  kind?: string | undefined;
+  hasMedia?: boolean | undefined;
+  ingestionSource?: string | undefined;
+  after?: number | undefined;
+  before?: number | undefined;
+  limit?: number | undefined;
+  cursor?: string | undefined;
 }
 
 export function allowedChat(ctx: MessageReadContext, chatJid: string): ChatRow {

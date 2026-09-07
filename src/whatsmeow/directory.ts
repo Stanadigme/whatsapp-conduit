@@ -34,9 +34,9 @@ export interface DirectorySyncReport {
 }
 
 export interface DirectorySyncSelection {
-  groups?: boolean;
-  contacts?: boolean;
-  jid?: string;
+  groups?: boolean | undefined;
+  contacts?: boolean | undefined;
+  jid?: string | undefined;
 }
 
 export class DirectorySync {

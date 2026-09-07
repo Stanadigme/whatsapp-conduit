@@ -10,10 +10,10 @@ import { ModelDownloader } from "../dashboard/models.js";
 import { modelsDir } from "../stt/models.js";
 
 export interface WebOptions {
-  configPath?: string;
-  bind?: string;
-  port?: number;
-  pairing?: boolean;
+  configPath?: string | undefined;
+  bind?: string | undefined;
+  port?: number | undefined;
+  pairing?: boolean | undefined;
 }
 
 export async function runWeb(options: WebOptions = {}): Promise<void> {

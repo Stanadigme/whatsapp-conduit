@@ -66,7 +66,7 @@ export async function openAuthState(authDir: string): Promise<AuthState> {
 export async function clearPendingPairing(authState: AuthState): Promise<void> {
   const creds = authState.state.creds;
   if (creds.account) return;
-  creds.me = undefined;
+  delete creds.me;
   creds.pairingCode = undefined;
   await authState.saveCreds();
 }

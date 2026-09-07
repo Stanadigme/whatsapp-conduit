@@ -13,8 +13,8 @@ export interface DoctorReport {
 }
 
 export interface DoctorOptions {
-  configPath?: string;
-  json?: boolean;
+  configPath?: string | undefined;
+  json?: boolean | undefined;
 }
 
 export function buildDoctorReport(configPath: string): DoctorReport {

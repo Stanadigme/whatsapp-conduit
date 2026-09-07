@@ -32,25 +32,25 @@ import {
 } from "../db/maintenance.js";
 
 export interface LinkOptions {
-  configPath?: string;
+  configPath?: string | undefined;
   /** Seconds to wait for pairing before giving up. Default 120. */
-  timeoutSec?: number;
+  timeoutSec?: number | undefined;
   /** Use the QR fallback instead of pairing-code linking. */
-  qr?: boolean;
+  qr?: boolean | undefined;
   /** E.164 phone number without the leading plus sign. */
-  phoneNumber?: string;
+  phoneNumber?: string | undefined;
   /**
    * Write each QR payload as an SVG to this path (headless pairing). Refreshed
    * on every rotation; the connection is restarted until the code is scanned or
    * the timeout fires.
    */
-  qrOut?: string;
+  qrOut?: string | undefined;
   /** Abort an in-progress QR session without retaining a live QR file. */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
 export interface LinkResult {
-  selfJid?: string;
+  selfJid?: string | undefined;
   accountId: string;
   /** False only when the new auth works but the local directory reset failed. */
   directoryRebuildReady: boolean;
@@ -102,7 +102,7 @@ export async function runLink(
         let pairingRequested = false;
         let pairingSocket: WASocket | undefined;
         let qrRestarts = 0;
-        let opened: { selfJid?: string } | undefined;
+        let opened: { selfJid?: string | undefined } | undefined;
         let appStateKeySaved = false;
         const MAX_QR_RESTARTS = 40;
 
@@ -438,7 +438,7 @@ function pairingFailure(error: unknown): Error {
   );
 }
 
-function persistAccount(config: Config, selfJid?: string): string {
+function persistAccount(config: Config, selfJid?: string | undefined): string {
   const db = openDb(config.paths.sqlite, { migrate: true });
   try {
     const normalizedSelfJid = selfJid ? normalizeJid(selfJid) : undefined;

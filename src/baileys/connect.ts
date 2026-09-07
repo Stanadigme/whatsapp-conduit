@@ -18,7 +18,7 @@ import {
 export type ConnectionMode = "link" | "run";
 
 export interface CloseInfo {
-  statusCode?: number;
+  statusCode?: number | undefined;
   loggedOut: boolean;
   willReconnect: boolean;
 }
@@ -28,7 +28,7 @@ export interface ConnectionHandlers {
   /** Hook called for each newly-created socket, before connection events. */
   onSocket?(sock: WASocket): void;
   onConnecting?(): void;
-  onOpen?(info: { selfJid?: string }): void;
+  onOpen?(info: { selfJid?: string | undefined }): void;
   onClose?(info: CloseInfo): void;
   /** Fired only after a credential update has been persisted to the auth store. */
   onCredsUpdate?(update: Partial<AuthenticationCreds>): void;
@@ -60,7 +60,7 @@ export function statusCodeOf(error: unknown): number | undefined {
 }
 
 export interface DisconnectClassification {
-  statusCode?: number;
+  statusCode?: number | undefined;
   loggedOut: boolean;
 }
 
@@ -104,7 +104,7 @@ export class ConduitConnection {
   private readonly mode: ConnectionMode;
   private readonly handlers: ConnectionHandlers;
   private readonly socketFactory: SocketFactory;
-  private readonly fetchVersion?: () => Promise<WAVersion>;
+  private readonly fetchVersion?: (() => Promise<WAVersion>) | undefined;
   private readonly reconnectDelayMs: number;
 
   private sock?: WASocket;

@@ -24,10 +24,10 @@ export interface DashboardChat {
 }
 
 export interface DashboardChatFilter {
-  query?: string;
-  kind?: "contact" | "group" | "status";
-  policy?: "allowed" | "blocked" | "discovered";
-  limit?: number;
+  query?: string | undefined;
+  kind?: "contact" | "group" | "status" | undefined;
+  policy?: "allowed" | "blocked" | "discovered" | undefined;
+  limit?: number | undefined;
 }
 
 function toDashboardChat(db: Database, row: ChatRow): DashboardChat {

@@ -5,11 +5,11 @@ import { resolveConfigPath } from "../runtime.js";
 import { parseSinceSec } from "../util/time.js";
 
 export interface MessagesListOptions {
-  configPath?: string;
-  chat?: string;
-  since?: string;
-  limit?: number;
-  json?: boolean;
+  configPath?: string | undefined;
+  chat?: string | undefined;
+  since?: string | undefined;
+  limit?: number | undefined;
+  json?: boolean | undefined;
 }
 
 interface MessageView {

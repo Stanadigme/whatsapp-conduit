@@ -11,20 +11,20 @@ import { resolveConfigPath } from "../runtime.js";
 import { parseSinceSec } from "../util/time.js";
 
 export interface ExportOptions {
-  configPath?: string;
-  since?: string;
-  sinceLast?: string;
+  configPath?: string | undefined;
+  since?: string | undefined;
+  sinceLast?: string | undefined;
   /**
    * Export every chat, including ones not marked allowed. Defaults false:
    * exports are allowed-only by default so newly discovered chats are not
    * leaked to downstream consumers.
    */
-  all?: boolean;
-  redactPhoneNumbers?: boolean;
-  includeRawJson?: boolean;
-  limit?: number;
+  all?: boolean | undefined;
+  redactPhoneNumbers?: boolean | undefined;
+  includeRawJson?: boolean | undefined;
+  limit?: number | undefined;
   /** Advance the consumer offset after a successful --since-last export. */
-  commit?: boolean;
+  commit?: boolean | undefined;
 }
 
 export interface ExportRecord {

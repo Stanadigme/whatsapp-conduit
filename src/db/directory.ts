@@ -28,10 +28,10 @@ export interface DirectoryContactInput {
 export interface DirectoryGroupInput {
   accountId: string;
   jid: string;
-  name?: string | null;
-  nameSource?: DirectoryNameSource;
-  rawJson?: string | null;
-  lastSyncedAt?: number | null;
+  name?: string | null | undefined;
+  nameSource?: DirectoryNameSource | undefined;
+  rawJson?: string | null | undefined;
+  lastSyncedAt?: number | null | undefined;
 }
 
 export interface DirectoryEntityRow {
@@ -63,14 +63,14 @@ export interface DirectoryGroupMemberInput {
   accountId: string;
   groupJid: string;
   participantJid: string;
-  role?: DirectoryMemberRole | null;
-  isActive?: boolean;
+  role?: DirectoryMemberRole | null | undefined;
+  isActive?: boolean | undefined;
   /**
    * Group entity already resolved by the caller. Supplied during a full group
    * snapshot, it avoids re-upserting the group once per member. When omitted,
    * the group is resolved as before.
    */
-  groupEntityId?: number;
+  groupEntityId?: number | undefined;
 }
 
 export interface DirectoryGroupMemberRow extends DirectoryEntityRow {

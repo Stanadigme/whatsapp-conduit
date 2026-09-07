@@ -7,13 +7,13 @@ import { startMcpHttpServer } from "../mcp/http.js";
 import { ensureTokenFile } from "../util/token-file.js";
 
 export interface McpOptions {
-  configPath?: string;
+  configPath?: string | undefined;
   /** Serve the Streamable HTTP transport instead of stdio. */
-  http?: boolean;
+  http?: boolean | undefined;
   /** HTTP listen host override (defaults to `mcp.http.host`). */
-  host?: string;
+  host?: string | undefined;
   /** HTTP listen port override (defaults to `mcp.http.port`). */
-  port?: number;
+  port?: number | undefined;
 }
 
 /** Run the read-only MCP server over stdin/stdout, or over Streamable HTTP. */

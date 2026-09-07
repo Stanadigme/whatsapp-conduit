@@ -5,8 +5,8 @@ import { runMigrations } from "../db/migrations.js";
 import { defaultConfigPath } from "../paths.js";
 
 export interface DbCommandOptions {
-  configPath?: string;
-  json?: boolean;
+  configPath?: string | undefined;
+  json?: boolean | undefined;
 }
 
 function resolveConfigPath(options: DbCommandOptions): string {

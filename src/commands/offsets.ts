@@ -4,9 +4,9 @@ import { getConsumerOffset, setConsumerOffset } from "../db/queries.js";
 import { resolveConfigPath } from "../runtime.js";
 
 export interface OffsetsCommitOptions {
-  configPath?: string;
+  configPath?: string | undefined;
   through: number;
-  timestamp?: number;
+  timestamp?: number | undefined;
 }
 
 /**
@@ -33,8 +33,8 @@ export function runOffsetsCommit(
 }
 
 export interface OffsetsShowOptions {
-  configPath?: string;
-  json?: boolean;
+  configPath?: string | undefined;
+  json?: boolean | undefined;
 }
 
 export function runOffsetsShow(

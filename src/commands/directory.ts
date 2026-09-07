@@ -7,11 +7,11 @@ import { DirectorySync } from "../whatsmeow/directory.js";
 import { WhatsmeowTransport } from "../whatsmeow/transport.js";
 
 export interface DirectorySyncOptions {
-  configPath?: string;
-  groups?: boolean;
-  contacts?: boolean;
-  jid?: string;
-  json?: boolean;
+  configPath?: string | undefined;
+  groups?: boolean | undefined;
+  contacts?: boolean | undefined;
+  jid?: string | undefined;
+  json?: boolean | undefined;
 }
 
 /** Run an explicit metadata-only directory synchronization. */

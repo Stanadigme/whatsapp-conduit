@@ -1,6 +1,7 @@
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
 import { openDb, type Database } from "../src/db/index.js";
@@ -104,7 +105,7 @@ function authedClient() {
 describe("MCP Streamable HTTP transport", () => {
   it("exposes the same read tools as stdio over an authenticated session", async () => {
     const { transport, client } = authedClient();
-    await client.connect(transport);
+    await client.connect(transport as unknown as Transport);
     try {
       const tools = await client.listTools();
       expect(tools.tools).toHaveLength(13);
@@ -123,7 +124,7 @@ describe("MCP Streamable HTTP transport", () => {
 
   it("enforces the allowlist over HTTP", async () => {
     const { transport, client } = authedClient();
-    await client.connect(transport);
+    await client.connect(transport as unknown as Transport);
     try {
       const messages = await client.callTool({
         name: "wa_messages_list",
@@ -192,7 +193,7 @@ describe("MCP Streamable HTTP transport", () => {
 
   it("ends the session on DELETE", async () => {
     const { transport, client } = authedClient();
-    await client.connect(transport);
+    await client.connect(transport as unknown as Transport);
     const sessionId = transport.sessionId as string;
     expect(sessionId).toBeTruthy();
     await client.close();

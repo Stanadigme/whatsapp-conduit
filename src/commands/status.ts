@@ -36,8 +36,8 @@ export interface StatusReport {
 }
 
 export interface StatusOptions {
-  configPath?: string;
-  json?: boolean;
+  configPath?: string | undefined;
+  json?: boolean | undefined;
 }
 
 export function buildStatusReport(configPath: string): StatusReport {

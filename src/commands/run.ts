@@ -44,9 +44,9 @@ import { clearAppStateSyncVersions } from "../baileys/auth.js";
 import { BAILEYS_DIRECTORY_APP_STATE_COLLECTIONS } from "../baileys/directory.js";
 
 export interface RunOptions {
-  configPath?: string;
+  configPath?: string | undefined;
   /** Abort a pre-link wait (used by tests and embedded callers). */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
 const RUNTIME_STATUS_HEARTBEAT_MS = 15_000;

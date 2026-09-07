@@ -12,10 +12,10 @@ import { runMigrations } from "../db/migrations.js";
 import { defaultConfigPath } from "../paths.js";
 
 export interface InitOptions {
-  configPath?: string;
-  dataDir?: string;
-  force?: boolean;
-  json?: boolean;
+  configPath?: string | undefined;
+  dataDir?: string | undefined;
+  force?: boolean | undefined;
+  json?: boolean | undefined;
 }
 
 export interface InitReport {

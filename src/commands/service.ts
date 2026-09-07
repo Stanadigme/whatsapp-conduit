@@ -54,10 +54,10 @@ function userUnitPath(): string {
 }
 
 export interface ServiceInstallOptions {
-  configPath?: string;
-  workingDirectory?: string;
+  configPath?: string | undefined;
+  workingDirectory?: string | undefined;
   /** Enable + start the unit immediately after install. */
-  now?: boolean;
+  now?: boolean | undefined;
 }
 
 /**

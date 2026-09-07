@@ -16,10 +16,10 @@ import {
 import { resolveConfigPath } from "../runtime.js";
 
 export interface ChatsListOptions {
-  configPath?: string;
-  json?: boolean;
-  allowedOnly?: boolean;
-  limit?: number;
+  configPath?: string | undefined;
+  json?: boolean | undefined;
+  allowedOnly?: boolean | undefined;
+  limit?: number | undefined;
 }
 
 interface ChatView {
@@ -99,8 +99,8 @@ export function runChatsList(options: ChatsListOptions = {}): void {
 }
 
 export interface ChatsShowOptions {
-  configPath?: string;
-  json?: boolean;
+  configPath?: string | undefined;
+  json?: boolean | undefined;
 }
 
 /** Returns the process exit code (0 found, 1 not found). */
@@ -143,7 +143,7 @@ export function runChatsShow(
 }
 
 export interface ChatsPolicyOptions {
-  configPath?: string;
+  configPath?: string | undefined;
 }
 
 /** Returns the process exit code (0 ok, 1 chat unknown). */

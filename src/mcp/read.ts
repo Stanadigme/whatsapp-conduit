@@ -620,7 +620,12 @@ export function health(ctx: McpContext): Record<string, unknown> {
 
 export function exportMessages(
   ctx: McpContext,
-  filters: { after?: number; before?: number; limit?: number; cursor?: string },
+  filters: {
+    after?: number | undefined;
+    before?: number | undefined;
+    limit?: number | undefined;
+    cursor?: string | undefined;
+  },
 ): Page<Record<string, unknown>> {
   const limit = assertLimit(filters.limit);
   const cursor = decodeCursor<{ rowid: number }>(filters.cursor);

@@ -235,9 +235,9 @@ export function getChat(
 }
 
 export interface ListChatsOptions {
-  accountId?: string;
-  allowedOnly?: boolean;
-  limit?: number;
+  accountId?: string | undefined;
+  allowedOnly?: boolean | undefined;
+  limit?: number | undefined;
 }
 
 /** List chats, most-recently-active first. */
@@ -1032,10 +1032,10 @@ export function getMessage(
 }
 
 export interface ListMessagesOptions {
-  accountId?: string;
-  chatJid?: string;
-  sinceTs?: number | null;
-  limit?: number;
+  accountId?: string | undefined;
+  chatJid?: string | undefined;
+  sinceTs?: number | null | undefined;
+  limit?: number | undefined;
 }
 
 /** List messages, most-recent first (for human/JSON inspection). */
@@ -1075,19 +1075,19 @@ export interface ExportRow extends MessageRow {
 }
 
 export interface ExportSelect {
-  accountId?: string;
+  accountId?: string | undefined;
   /** Inclusive lower bound on message timestamp (epoch seconds). */
-  sinceTs?: number | null;
+  sinceTs?: number | null | undefined;
   /** Inclusive upper bound on the message timestamp. */
-  beforeTs?: number | null;
+  beforeTs?: number | null | undefined;
   /** Exclusive lower bound on the rowid cursor (for --since-last). */
-  afterRowid?: number | null;
+  afterRowid?: number | null | undefined;
   /** Restrict to allowed chats (is_allowed = 1 or in `allowedChats`). */
-  allowedOnly?: boolean;
-  allowedChats?: string[];
+  allowedOnly?: boolean | undefined;
+  allowedChats?: string[] | undefined;
   /** Config-level blocked chats to exclude in addition to the DB flag. */
-  blockedChats?: string[];
-  limit?: number;
+  blockedChats?: string[] | undefined;
+  limit?: number | undefined;
 }
 
 /**
