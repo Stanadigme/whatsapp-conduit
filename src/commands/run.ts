@@ -27,6 +27,21 @@ import {
 import { RuntimeStatusWriter } from "../runtime-status.js";
 import { runLink } from "./link.js";
 import { join } from "node:path";
+import {
+  beginMaintenanceOperation,
+  completeMaintenanceOperation,
+  failMaintenanceOperation,
+  maintenanceConfirmation,
+  maintenanceIsActive,
+  maintenanceState,
+  markDirectoryRebuildResult,
+  recoverInterruptedMaintenanceOperations,
+  runMaintenanceOperation,
+  startMaintenanceOperation,
+  type MaintenanceScope,
+} from "../db/maintenance.js";
+import { clearAppStateSyncVersions } from "../baileys/auth.js";
+import { BAILEYS_DIRECTORY_APP_STATE_COLLECTIONS } from "../baileys/directory.js";
 
 export interface RunOptions {
   configPath?: string;
@@ -67,6 +82,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     id: config.account.name,
     label: config.account.description ?? null,
   });
+  recoverInterruptedMaintenanceOperations(db, config.account.name);
 
   const authState = await openAuthState(config.paths.authDir);
   const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
@@ -97,6 +113,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     let shuttingDown = false;
     let initialResyncDone = false;
     let pairingInFlight = false;
+    let directoryResyncInFlight = false;
     let pairingAbort: AbortController | undefined;
     const heartbeat = setInterval(
       () => void runtimeStatus.update(),
@@ -106,9 +123,35 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     const control = new HistoryControlServer(
       config.paths.controlSocket,
       async (request) => {
-        if (request.op === "pairing.start") {
+        if (request.op === "maintenance.reset") {
           if (pairingInFlight) {
             throw new Error("Baileys pairing is already active");
+          }
+          if (directoryResyncInFlight) {
+            throw new Error("directory resynchronization is already active");
+          }
+          if (request.confirmation !== maintenanceConfirmation(request.scope)) {
+            throw new Error("invalid maintenance confirmation");
+          }
+          const operation = startMaintenanceOperation(
+            db,
+            config.account.name,
+            request.scope,
+          );
+          void executeMaintenanceReset(request.scope, operation.id);
+          return {
+            maintenance: { operationId: operation.id, status: "queued" },
+          };
+        }
+        if (request.op === "pairing.start") {
+          if (maintenanceIsActive(db, config.account.name)) {
+            throw new Error("a maintenance operation is already active");
+          }
+          if (pairingInFlight) {
+            throw new Error("Baileys pairing is already active");
+          }
+          if (directoryResyncInFlight) {
+            throw new Error("directory resynchronization is already active");
           }
           pairingInFlight = true;
           pairingAbort = new AbortController();
@@ -119,14 +162,107 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           throw new Error("Baileys pairing is already active");
         }
         if (request.op === "directory.resync") {
-          const sock = connection.socket();
-          if (!sock) throw new Error("not connected to WhatsApp");
-          return { resynced: await resyncBaileysDirectory(sock, ingestDeps) };
+          if (maintenanceIsActive(db, config.account.name)) {
+            throw new Error("a maintenance operation is already active");
+          }
+          return { resynced: await runDirectoryResync() };
         }
         // history.start — the Baileys adapter has no HistoryCoordinator.
         throw new Error("history download requires transport: whatsmeow");
       },
     );
+
+    async function executeMaintenanceReset(
+      scope: MaintenanceScope,
+      operationId: string,
+    ): Promise<void> {
+      let cursorResetError: string | null = null;
+      if (scope === "directory" || scope === "all") {
+        try {
+          await clearAppStateSyncVersions(
+            authState,
+            BAILEYS_DIRECTORY_APP_STATE_COLLECTIONS,
+          );
+        } catch (error) {
+          cursorResetError = "unable to reset app-state cursors";
+          log.warn(
+            { err: error instanceof Error ? error.message : String(error) },
+            "could not reset app-state cursors before directory maintenance",
+          );
+        }
+      }
+      try {
+        await runMaintenanceOperation({
+          db,
+          accountId: config.account.name,
+          scope,
+          mediaDir: config.paths.mediaDir,
+          operationId,
+          deferCompletion: scope === "directory" || scope === "all",
+        });
+        if (scope !== "directory" && scope !== "all") return;
+        if (cursorResetError) {
+          markDirectoryRebuildResult(db, config.account.name, cursorResetError);
+          failMaintenanceOperation(
+            db,
+            config.account.name,
+            operationId,
+            "directory_rebuild_failed",
+          );
+          return;
+        }
+        const sock = connection.socket();
+        if (!sock) {
+          // The persisted marker triggers the next connected rebuild. It is
+          // safe to release the reset now because no socket is active.
+          completeMaintenanceOperation(db, config.account.name, operationId);
+          return;
+        }
+        try {
+          await resyncBaileysDirectory(sock, ingestDeps, { strict: true });
+          markDirectoryRebuildResult(db, config.account.name, null);
+          completeMaintenanceOperation(db, config.account.name, operationId);
+        } catch (error) {
+          markDirectoryRebuildResult(
+            db,
+            config.account.name,
+            "directory synchronization failed",
+          );
+          failMaintenanceOperation(
+            db,
+            config.account.name,
+            operationId,
+            "directory_rebuild_failed",
+          );
+          log.warn(
+            { err: error instanceof Error ? error.message : String(error) },
+            "directory maintenance rebuild failed",
+          );
+        }
+      } catch (error) {
+        log.warn(
+          { err: error instanceof Error ? error.message : String(error) },
+          "maintenance reset failed",
+        );
+      }
+    }
+
+    async function runDirectoryResync(
+      options: { strict?: boolean } = {},
+    ): Promise<Awaited<ReturnType<typeof resyncBaileysDirectory>>> {
+      if (pairingInFlight) throw new Error("Baileys pairing is already active");
+      if (directoryResyncInFlight) {
+        throw new Error("directory resynchronization is already active");
+      }
+      const sock = connection.socket();
+      if (!sock) throw new Error("not connected to WhatsApp");
+      directoryResyncInFlight = true;
+      try {
+        return await resyncBaileysDirectory(sock, ingestDeps, options);
+      } finally {
+        directoryResyncInFlight = false;
+      }
+    }
 
     const shutdown = (code: number): void => {
       if (shuttingDown) return;
@@ -216,23 +352,39 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
             authLinked: true,
           });
           log.info({ selfJid: info.selfJid }, "connected");
-          if (config.baileys.resyncDirectoryOnConnect && !initialResyncDone) {
+          const rebuildState = maintenanceState(db, config.account.name);
+          if (
+            (config.baileys.resyncDirectoryOnConnect ||
+              rebuildState.directoryRebuildRequired) &&
+            !initialResyncDone
+          ) {
             initialResyncDone = true;
-            const sock = connection.socket();
-            if (sock) {
-              void resyncBaileysDirectory(sock, ingestDeps)
-                .then((r) =>
+            if (connection.socket()) {
+              void runDirectoryResync({
+                strict: rebuildState.directoryRebuildRequired,
+              })
+                .then((r) => {
+                  if (rebuildState.directoryRebuildRequired) {
+                    markDirectoryRebuildResult(db, config.account.name, null);
+                  }
                   log.info(
                     { contacts: r.contacts, groups: r.groups },
                     "directory resynced on connect",
-                  ),
-                )
-                .catch((err: unknown) =>
+                  );
+                })
+                .catch((err: unknown) => {
+                  if (rebuildState.directoryRebuildRequired) {
+                    markDirectoryRebuildResult(
+                      db,
+                      config.account.name,
+                      "directory synchronization failed",
+                    );
+                  }
                   log.warn(
                     { err: err instanceof Error ? err.message : String(err) },
                     "directory resync on connect failed",
-                  ),
-                );
+                  );
+                });
             }
           }
         },
@@ -288,6 +440,14 @@ async function runBaileysWaitingForPairing(
   log: ReturnType<typeof appLogger>,
   signal?: AbortSignal,
 ): Promise<void> {
+  // The dashboard keeps data maintenance available even before the first
+  // linked device exists. The dashboard still speaks only to this local daemon.
+  const db = openDb(config.paths.sqlite, { migrate: true });
+  upsertAccount(db, {
+    id: config.account.name,
+    label: config.account.description ?? null,
+  });
+  recoverInterruptedMaintenanceOperations(db, config.account.name);
   const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
     transport: "baileys",
     connection: "disconnected",
@@ -316,7 +476,10 @@ async function runBaileysWaitingForPairing(
         })
         .catch(() => undefined)
         .then(() => control.close().catch(() => undefined))
-        .then(() => resolve());
+        .then(() => {
+          db.close();
+          resolve();
+        });
       return finishing;
     };
     const onSignal = (): void => void finish();
@@ -346,8 +509,39 @@ async function runBaileysWaitingForPairing(
     const control = new HistoryControlServer(
       config.paths.controlSocket,
       async (request) => {
+        if (request.op === "maintenance.reset") {
+          if (pairingInFlight) {
+            throw new Error("Baileys pairing is already active");
+          }
+          if (request.confirmation !== maintenanceConfirmation(request.scope)) {
+            throw new Error("invalid maintenance confirmation");
+          }
+          const operation = startMaintenanceOperation(
+            db,
+            config.account.name,
+            request.scope,
+          );
+          void runMaintenanceOperation({
+            db,
+            accountId: config.account.name,
+            scope: request.scope,
+            mediaDir: config.paths.mediaDir,
+            operationId: operation.id,
+          }).catch((error: unknown) =>
+            log.warn(
+              { err: error instanceof Error ? error.message : String(error) },
+              "maintenance reset failed",
+            ),
+          );
+          return {
+            maintenance: { operationId: operation.id, status: "queued" },
+          };
+        }
         if (request.op !== "pairing.start") {
           throw new Error("Baileys is awaiting an operator pairing request");
+        }
+        if (maintenanceIsActive(db, config.account.name)) {
+          throw new Error("a maintenance operation is already active");
         }
         if (pairingInFlight) {
           throw new Error("Baileys pairing is already active");
@@ -454,6 +648,7 @@ async function runWhatsmeow(
     id: config.account.name,
     label: config.account.description ?? null,
   });
+  recoverInterruptedMaintenanceOperations(db, config.account.name);
   const transport = new WhatsmeowTransport({
     store: config.paths.whatsmeowStore,
     config: config.whatsmeow,
@@ -471,17 +666,147 @@ async function runWhatsmeow(
     transport,
   });
   directory.register();
+  let transportConnected = false;
+  let pendingDirectoryRebuildOperation: string | null = null;
+  let directoryResyncInFlight = false;
+  // The transport exposes directory reads but not a connection-ready getter.
+  // Serialize reads so a group refresh cannot race a destructive reset.
+  let directorySyncQueue: Promise<void> = Promise.resolve();
+  const syncDirectory = async (selection: {
+    groups: boolean;
+    contacts: boolean;
+  }) => {
+    const task = directorySyncQueue
+      .catch(() => undefined)
+      .then(() => directory.sync(selection));
+    directorySyncQueue = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    return task;
+  };
+
+  const finishDirectoryRebuild = async (operationId: string): Promise<void> => {
+    try {
+      const report = await syncDirectory({ groups: true, contacts: true });
+      markDirectoryRebuildResult(db, config.account.name, null);
+      completeMaintenanceOperation(db, config.account.name, operationId);
+      log.info(
+        { contacts: report.contacts, groups: report.groups },
+        "directory rebuilt after maintenance",
+      );
+    } catch (error) {
+      markDirectoryRebuildResult(
+        db,
+        config.account.name,
+        "directory synchronization failed",
+      );
+      failMaintenanceOperation(
+        db,
+        config.account.name,
+        operationId,
+        "directory_rebuild_failed",
+      );
+      log.warn(
+        { err: error instanceof Error ? error.message : String(error) },
+        "directory maintenance rebuild failed",
+      );
+    } finally {
+      if (pendingDirectoryRebuildOperation === operationId) {
+        pendingDirectoryRebuildOperation = null;
+      }
+    }
+  };
+
+  const executeMaintenanceReset = async (
+    scope: MaintenanceScope,
+    operationId: string,
+  ): Promise<void> => {
+    const rebuildDirectory = scope === "directory" || scope === "all";
+    try {
+      await runMaintenanceOperation({
+        db,
+        accountId: config.account.name,
+        scope,
+        mediaDir: config.paths.mediaDir,
+        operationId,
+        deferCompletion: rebuildDirectory,
+      });
+      if (!rebuildDirectory) return;
+      if (!transportConnected) {
+        pendingDirectoryRebuildOperation = operationId;
+        return;
+      }
+      await finishDirectoryRebuild(operationId);
+    } catch (error) {
+      log.warn(
+        { err: error instanceof Error ? error.message : String(error) },
+        "maintenance reset failed",
+      );
+    }
+  };
+
+  const resumeDirectoryRebuildOnConnect = (): void => {
+    if (pendingDirectoryRebuildOperation) {
+      void finishDirectoryRebuild(pendingDirectoryRebuildOperation);
+      return;
+    }
+    const state = maintenanceState(db, config.account.name);
+    if (!state.directoryRebuildRequired || state.active) return;
+    // A prior daemon may have been interrupted after clearing the directory.
+    // Record this new, non-destructive rebuild phase so the dashboard retains
+    // the same exclusion and progress semantics until the snapshot is stored.
+    const operation = startMaintenanceOperation(
+      db,
+      config.account.name,
+      "directory",
+    );
+    beginMaintenanceOperation(db, config.account.name, operation.id);
+    void finishDirectoryRebuild(operation.id);
+  };
   const control = new HistoryControlServer(
     config.paths.controlSocket,
     async (request) => {
-      if (request.op === "directory.resync") {
-        const report = await directory.sync({ groups: true, contacts: true });
+      if (request.op === "maintenance.reset") {
+        if (directoryResyncInFlight) {
+          throw new Error("directory resynchronization is already active");
+        }
+        if (request.confirmation !== maintenanceConfirmation(request.scope)) {
+          throw new Error("invalid maintenance confirmation");
+        }
+        history.cancelForMaintenance();
+        const operation = startMaintenanceOperation(
+          db,
+          config.account.name,
+          request.scope,
+        );
+        void executeMaintenanceReset(request.scope, operation.id);
         return {
-          resynced: { contacts: report.contacts, groups: report.groups },
+          maintenance: { operationId: operation.id, status: "queued" },
         };
+      }
+      if (request.op === "directory.resync") {
+        if (maintenanceIsActive(db, config.account.name)) {
+          throw new Error("a maintenance operation is already active");
+        }
+        if (directoryResyncInFlight) {
+          throw new Error("directory resynchronization is already active");
+        }
+        directoryResyncInFlight = true;
+        try {
+          const report = await syncDirectory({ groups: true, contacts: true });
+          return {
+            resynced: { contacts: report.contacts, groups: report.groups },
+          };
+        } finally {
+          directoryResyncInFlight = false;
+        }
       }
       if (request.op !== "history.start") {
         throw new Error("Baileys pairing is not available with whatsmeow");
+      }
+      if (maintenanceIsActive(db, config.account.name)) {
+        throw new Error("a maintenance operation is already active");
       }
       const chatJid = normalizeJid(request.chat);
       const chat = getChat(db, config.account.name, chatJid);
@@ -506,11 +831,8 @@ async function runWhatsmeow(
     throw error;
   }
   history.recoverActive();
-  let directorySyncInFlight: Promise<void> | null = null;
   const refreshGroupDirectory = (): void => {
-    if (directorySyncInFlight) return;
-    directorySyncInFlight = directory
-      .sync({ groups: true, contacts: false })
+    void syncDirectory({ groups: true, contacts: false })
       .then((report) => {
         log.debug(
           { groups: report.groups, members: report.members },
@@ -519,9 +841,6 @@ async function runWhatsmeow(
       })
       .catch(() => {
         log.warn("failed to refresh group directory");
-      })
-      .finally(() => {
-        directorySyncInFlight = null;
       });
   };
   const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
@@ -592,8 +911,10 @@ async function runWhatsmeow(
     const onSignal = (): void => shutdown(0);
 
     transport.on("connected", ({ jid }) => {
+      transportConnected = true;
       const selfJid = normalizeJid(jid);
       upsertAccount(db, { id: config.account.name, selfJid });
+      resumeDirectoryRebuildOnConnect();
       refreshGroupDirectory();
       void runtimeStatus.update({
         connection: "connected",
@@ -603,6 +924,7 @@ async function runWhatsmeow(
       log.info({ selfJid, transport: "whatsmeow" }, "connected");
     });
     transport.on("disconnected", () => {
+      transportConnected = false;
       void runtimeStatus.update({
         connection: "disconnected",
         lastEventAt: Math.floor(Date.now() / 1000),

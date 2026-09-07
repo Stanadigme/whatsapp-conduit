@@ -143,6 +143,16 @@ export class HistoryCoordinator {
     void this.process(active.id);
   }
 
+  /** Stop the active import before a maintenance reset deletes its rows. */
+  cancelForMaintenance(): void {
+    const active = this.active;
+    if (!active) return;
+    this.active = null;
+    this.batchWaiter?.reject(new Error("history_cancelled_for_maintenance"));
+    this.batchWaiter = null;
+    this.fail(active.jobId, "cancelled_for_maintenance");
+  }
+
   classify(event: TransportMessageEvent): IngestionEventClassification {
     const active = this.active;
     if (

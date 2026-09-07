@@ -67,12 +67,19 @@ describe("local dashboard HTTP API", () => {
       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>';
     writeFileSync(join(dir, "pairing-qr.svg"), `${qr}\n`, { mode: 0o600 });
     let pairingRequests = 0;
+    let maintenanceRequests = 0;
     const control = new HistoryControlServer(
       config.paths.controlSocket,
       async (request) => {
         if (request.op === "pairing.start") {
           pairingRequests += 1;
           return { pairing: { status: "starting" } };
+        }
+        if (request.op === "maintenance.reset") {
+          maintenanceRequests += 1;
+          return {
+            maintenance: { operationId: "maintenance-op", status: "queued" },
+          };
         }
         throw new Error("not available");
       },
@@ -138,6 +145,34 @@ describe("local dashboard HTTP API", () => {
     expect(start.status).toBe(202);
     expect(await start.json()).toEqual({ status: "starting" });
     expect(pairingRequests).toBe(1);
+
+    const invalidReset = await fetch(`${base}/api/maintenance/resets`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ scope: "directory", confirmation: "non" }),
+    });
+    expect(invalidReset.status).toBe(400);
+
+    const reset = await fetch(`${base}/api/maintenance/resets`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        scope: "directory",
+        confirmation: "RÉINITIALISER directory",
+      }),
+    });
+    expect(reset.status).toBe(202);
+    expect(await reset.json()).toEqual({
+      operationId: "maintenance-op",
+      status: "queued",
+    });
+    expect(maintenanceRequests).toBe(1);
 
     writeFileSync(join(dir, "pairing-qr.svg"), "<script>bad</script>");
     const unavailable = await fetch(`${base}/api/pairing/baileys/qr.svg`, {

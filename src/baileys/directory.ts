@@ -6,7 +6,7 @@ import { persistChatMetadata, type IngestDeps } from "./ingest.js";
  * pairing can leave the initial sync of these parked (missing sync key), so the
  * local names never reach SQLite until the collections are re-fetched.
  */
-const APP_STATE_COLLECTIONS = [
+export const BAILEYS_DIRECTORY_APP_STATE_COLLECTIONS = [
   "critical_block",
   "critical_unblock_low",
   "regular_high",
@@ -22,6 +22,11 @@ export interface DirectoryResyncResult {
   contacts: number;
   /** Groups whose subject was refreshed. */
   groups: number;
+}
+
+export interface DirectoryResyncOptions {
+  /** A rebuild must fail visibly rather than silently retaining an empty directory. */
+  strict?: boolean;
 }
 
 type ResyncSocket = Pick<WASocket, "resyncAppState" | "groupMetadata">;
@@ -40,6 +45,7 @@ function countNamedContacts(deps: IngestDeps): number {
 async function refreshGroupSubjects(
   sock: ResyncSocket,
   deps: IngestDeps,
+  strict: boolean,
 ): Promise<number> {
   const rows = deps.db
     .prepare<
@@ -66,6 +72,7 @@ async function refreshGroupSubjects(
             { jid, err: error instanceof Error ? error.message : "unknown" },
             "group metadata refresh failed",
           );
+          if (strict) throw error;
         }
       }),
     );
@@ -82,17 +89,23 @@ async function refreshGroupSubjects(
 export async function resyncBaileysDirectory(
   sock: ResyncSocket,
   deps: IngestDeps,
+  options: DirectoryResyncOptions = {},
 ): Promise<DirectoryResyncResult> {
   const before = countNamedContacts(deps);
   try {
-    await sock.resyncAppState(APP_STATE_COLLECTIONS, true);
+    await sock.resyncAppState(BAILEYS_DIRECTORY_APP_STATE_COLLECTIONS, true);
   } catch (error) {
     deps.logger.warn(
       { err: error instanceof Error ? error.message : String(error) },
       "app-state resync failed",
     );
+    if (options.strict) throw error;
   }
-  const groups = await refreshGroupSubjects(sock, deps);
+  const groups = await refreshGroupSubjects(
+    sock,
+    deps,
+    options.strict ?? false,
+  );
   const after = countNamedContacts(deps);
   return { contacts: Math.max(0, after - before), groups };
 }

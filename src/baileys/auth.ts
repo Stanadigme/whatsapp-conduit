@@ -71,6 +71,22 @@ export async function clearPendingPairing(authState: AuthState): Promise<void> {
   await authState.saveCreds();
 }
 
+/**
+ * Keep the app-state decryption keys received during pairing but forget only
+ * their local cursors.  The next socket therefore asks WhatsApp for fresh
+ * snapshots instead of trusting a partially processed pairing session.
+ */
+export async function clearAppStateSyncVersions(
+  authState: AuthState,
+  collections: readonly string[],
+): Promise<void> {
+  await authState.state.keys.set({
+    "app-state-sync-version": Object.fromEntries(
+      collections.map((collection) => [collection, null]),
+    ),
+  });
+}
+
 interface PersistedCreds {
   me?: { id?: unknown } | null;
 }

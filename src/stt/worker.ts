@@ -14,6 +14,10 @@ import { execCapture } from "../util/exec.js";
 import { createSttAdapter } from "./index.js";
 import { sttStatusPath, writeSttStatus } from "./status.js";
 import type { SttAdapter } from "./types.js";
+import {
+  maintenanceGenerationCurrent,
+  maintenanceState,
+} from "../db/maintenance.js";
 
 const BATCH_LIMIT = 20;
 const POLL_INTERVAL_MS = 10_000;
@@ -140,6 +144,9 @@ export async function transcribeOnce(
   deps: TranscribeWorkerDeps,
 ): Promise<TranscribePassResult> {
   const result: TranscribePassResult = { done: 0, failed: 0, skipped: 0 };
+  const maintenance = maintenanceState(deps.db, deps.accountId);
+  if (maintenance.active) return { ...result, blocked: "maintenance active" };
+  const generation = maintenance.generation;
   const candidates = listTranscriptionCandidates(deps.db, {
     accountId: deps.accountId,
     maxAttempts: deps.config.stt.maxAttempts,
@@ -154,6 +161,9 @@ export async function transcribeOnce(
   }
 
   for (const row of candidates) {
+    if (!maintenanceGenerationCurrent(deps.db, deps.accountId, generation)) {
+      return { ...result, blocked: "maintenance active" };
+    }
     const skip = skipReason(deps.config, row);
     if (skip !== null) {
       upsertTranscriptionJob(deps.db, {
@@ -181,6 +191,12 @@ export async function transcribeOnce(
 
     try {
       await transcribeOne(deps, row);
+      // A reset can start while ffmpeg or the STT engine is running. Its
+      // generation fence makes this result deliberately disposable rather
+      // than resurrecting data the operator just removed.
+      if (!maintenanceGenerationCurrent(deps.db, deps.accountId, generation)) {
+        return { ...result, blocked: "maintenance active" };
+      }
       upsertTranscriptionJob(deps.db, {
         accountId: deps.accountId,
         chatJid: row.chat_jid,
@@ -190,6 +206,9 @@ export async function transcribeOnce(
       });
       result.done += 1;
     } catch (error) {
+      if (!maintenanceGenerationCurrent(deps.db, deps.accountId, generation)) {
+        return { ...result, blocked: "maintenance active" };
+      }
       upsertTranscriptionJob(deps.db, {
         accountId: deps.accountId,
         chatJid: row.chat_jid,

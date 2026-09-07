@@ -8,6 +8,10 @@ import {
   type Socket,
 } from "node:net";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  isMaintenanceScope,
+  type MaintenanceScope,
+} from "../db/maintenance.js";
 
 export interface HistoryStartRequest {
   op: "history.start";
@@ -26,11 +30,19 @@ export interface PairingStartRequest {
   requestId: string;
 }
 
+export interface MaintenanceResetRequest {
+  op: "maintenance.reset";
+  requestId: string;
+  scope: MaintenanceScope;
+  confirmation: string;
+}
+
 /** Every request the daemon control socket accepts. */
 export type ControlRequest =
   | HistoryStartRequest
   | DirectoryResyncRequest
-  | PairingStartRequest;
+  | PairingStartRequest
+  | MaintenanceResetRequest;
 
 /** @deprecated use {@link HistoryStartRequest} */
 export type HistoryControlRequest = HistoryStartRequest;
@@ -46,6 +58,8 @@ export interface ControlResponse {
   resynced?: { contacts: number; groups: number };
   /** `pairing.start` */
   pairing?: { status: "starting" };
+  /** `maintenance.reset` */
+  maintenance?: { operationId: string; status: "queued" };
   error?: string;
 }
 
@@ -55,7 +69,8 @@ export type HistoryControlResponse = ControlResponse;
 export type ControlResult =
   | { jobId: string; status: string; reused: boolean }
   | { resynced: { contacts: number; groups: number } }
-  | { pairing: { status: "starting" } };
+  | { pairing: { status: "starting" } }
+  | { maintenance: { operationId: string; status: "queued" } };
 
 export interface ControlHandler {
   (request: ControlRequest): Promise<ControlResult>;
@@ -250,6 +265,19 @@ export async function requestBaileysPairingStart(
   );
 }
 
+/** Queue a destructive reset in the daemon that owns SQLite writes. */
+export async function requestMaintenanceReset(
+  path: string,
+  input: Omit<MaintenanceResetRequest, "op" | "requestId">,
+  timeoutMs = 5_000,
+): Promise<ControlResponse> {
+  return sendControlRequest(
+    path,
+    { op: "maintenance.reset", requestId: randomUUID(), ...input },
+    timeoutMs,
+  );
+}
+
 /**
  * Longest unix socket path we are willing to bind. `sun_path` holds 104 bytes
  * on macOS and 108 on Linux, and the kernel does not reject a longer path — it
@@ -292,6 +320,13 @@ function isControlRequest(value: unknown): value is ControlRequest {
   if (typeof record.requestId !== "string") return false;
   if (record.op === "directory.resync" || record.op === "pairing.start")
     return true;
+  if (
+    record.op === "maintenance.reset" &&
+    isMaintenanceScope(record.scope) &&
+    typeof record.confirmation === "string"
+  ) {
+    return true;
+  }
   return (
     record.op === "history.start" &&
     typeof record.chat === "string" &&

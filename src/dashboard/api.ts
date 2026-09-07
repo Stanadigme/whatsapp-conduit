@@ -5,6 +5,7 @@ import {
   requestBaileysPairingStart,
   requestDirectoryResync,
   requestHistoryStart,
+  requestMaintenanceReset,
 } from "../control/ipc.js";
 import { getMessage, listMessages } from "../read/messages.js";
 import { McpRequestError } from "../mcp/types.js";
@@ -24,6 +25,14 @@ import type { ModelDownloader } from "./models.js";
 import { applySttSettings, sttHealth, sttView } from "./stt.js";
 import { readLiveBaileysLinkQr } from "./baileys-link-qr.js";
 import { readRuntimeStatus } from "../runtime-status.js";
+import {
+  getMaintenanceOperation,
+  isMaintenanceScope,
+  maintenanceConfirmation,
+  maintenanceOperationView,
+  readMaintenanceState,
+  type MaintenanceScope,
+} from "../db/maintenance.js";
 
 export interface DashboardPairing {
   status: "disabled" | "idle" | "waiting_qr" | "connected" | "error";
@@ -103,6 +112,34 @@ async function correctionBody(
     return null;
   }
   return { textCorrected: (body as { textCorrected: string }).textCorrected };
+}
+
+async function maintenanceBody(
+  request: Request,
+): Promise<{ scope: MaintenanceScope; confirmation: string } | null> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) return null;
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return null;
+  }
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    Array.isArray(body) ||
+    Object.keys(body).length !== 2 ||
+    !Object.prototype.hasOwnProperty.call(body, "scope") ||
+    !Object.prototype.hasOwnProperty.call(body, "confirmation")
+  ) {
+    return null;
+  }
+  const record = body as Record<string, unknown>;
+  return isMaintenanceScope(record.scope) &&
+    typeof record.confirmation === "string"
+    ? { scope: record.scope, confirmation: record.confirmation }
+    : null;
 }
 
 function historyView(job: HistoryJobRow): Record<string, unknown> {
@@ -352,6 +389,54 @@ export async function dashboardApi(
       );
     } catch (error) {
       return errorResponse(error, 409);
+    }
+  }
+  if (url.pathname === "/api/maintenance/state" && request.method === "GET") {
+    try {
+      return json(readMaintenanceState(context.db, context.accountId));
+    } catch {
+      return json({ error: "maintenance unavailable" }, 409);
+    }
+  }
+  if (url.pathname === "/api/maintenance/resets" && request.method === "POST") {
+    const body = await maintenanceBody(request);
+    if (!body) return json({ error: "invalid maintenance request" }, 400);
+    if (body.confirmation !== maintenanceConfirmation(body.scope)) {
+      return json({ error: "invalid maintenance confirmation" }, 400);
+    }
+    try {
+      const result = await requestMaintenanceReset(
+        context.config.paths.controlSocket,
+        body,
+      );
+      return json(
+        {
+          operationId: result.maintenance?.operationId,
+          status: result.maintenance?.status ?? "queued",
+        },
+        202,
+      );
+    } catch (error) {
+      return errorResponse(error, 409);
+    }
+  }
+  if (
+    url.pathname.startsWith("/api/maintenance/operations/") &&
+    request.method === "GET"
+  ) {
+    const id = url.pathname.slice("/api/maintenance/operations/".length);
+    if (!id || id.includes("/")) return json({ error: "not found" }, 404);
+    try {
+      const operation = getMaintenanceOperation(
+        context.db,
+        context.accountId,
+        id,
+      );
+      return operation
+        ? json(maintenanceOperationView(operation))
+        : json({ error: "not found" }, 404);
+    } catch {
+      return json({ error: "maintenance unavailable" }, 409);
     }
   }
   if (
