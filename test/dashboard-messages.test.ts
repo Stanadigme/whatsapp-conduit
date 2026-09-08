@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
+import { upsertDirectoryContact } from "../src/db/directory.js";
 import {
   insertTranscription,
   setChatAllowed,
@@ -16,6 +17,7 @@ import {
 import { createDashboardServer } from "../src/dashboard/server.js";
 import { ensureDashboardToken } from "../src/dashboard/token.js";
 import { ModelDownloader } from "../src/dashboard/models.js";
+import { listMessages } from "../src/read/messages.js";
 
 const accountId = "personal";
 const allowedChat = "33600000000@s.whatsapp.net";
@@ -31,6 +33,50 @@ afterEach(() => {
 });
 
 describe("dashboard message consultation", () => {
+  it("lists one allowed contact across its LID and phone aliases", () => {
+    const db = openDb(":memory:", { migrate: true });
+    const phoneJid = "33600000004@s.whatsapp.net";
+    const lidJid = "900000000004@lid";
+    upsertAccount(db, { id: accountId });
+    upsertChat(db, { accountId, jid: phoneJid });
+    upsertChat(db, { accountId, jid: lidJid });
+    setChatAllowed(db, accountId, lidJid, true);
+    upsertDirectoryContact(db, {
+      accountId,
+      jid: phoneJid,
+      lid: lidJid,
+    });
+    upsertMessage(db, {
+      accountId,
+      chatJid: phoneJid,
+      messageId: "PHONE",
+      timestamp: 100,
+    });
+    upsertMessage(db, {
+      accountId,
+      chatJid: lidJid,
+      messageId: "LID",
+      timestamp: 200,
+    });
+
+    expect(
+      listMessages({ db, accountId }, { chat: lidJid }).items.map(
+        (message) => message.messageId,
+      ),
+    ).toEqual(["LID", "PHONE"]);
+
+    setChatAllowed(db, accountId, lidJid, false);
+    expect(() => listMessages({ db, accountId }, { chat: lidJid })).toThrow(
+      "chat is not available",
+    );
+    setChatAllowed(db, accountId, lidJid, true);
+    setChatBlocked(db, accountId, phoneJid, true);
+    expect(() => listMessages({ db, accountId }, { chat: lidJid })).toThrow(
+      "chat is not available",
+    );
+    db.close();
+  });
+
   it("lists allowed messages with metadata, transcripts, and opaque pagination", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wac-dashboard-messages-"));
     const config = resolveConfig({}, { dataDir: dir });
@@ -366,6 +412,8 @@ describe("dashboard message consultation", () => {
     const appText = await app.text();
     expect(appText).toContain("Lire la discussion");
     expect(appText).toContain("Corriger");
+    expect(appText).toContain("Télécharger le média");
+    expect(appText).toContain("Profondeur maximale fournie par WhatsApp");
     expect(appText).toContain("transcription/correction");
     expect(await (await fetch(`${base}/styles.css`)).text()).toContain(
       "message-list",

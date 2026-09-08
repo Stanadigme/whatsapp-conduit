@@ -242,7 +242,7 @@ describe("local dashboard HTTP API", () => {
     expect(appJs).toContain("previousBaileysLinkStatus");
     expect(appJs).not.toContain("Bearer");
     expect(appJs).not.toContain('id="token"');
-    expect(appJs).toContain("aucun message de cette discussion");
+    expect(appJs).toContain("Aucun message local ne permet encore");
     const stylesResponse = await fetch(`${base}/styles.css`);
     expect(stylesResponse.status).toBe(200);
     expect(await stylesResponse.text()).toContain("color:#ffffff");

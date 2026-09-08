@@ -1,4 +1,8 @@
 import type { Database } from "better-sqlite3";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { basename, relative, resolve } from "node:path";
+import { Readable } from "node:stream";
 import type { Config } from "../config.js";
 import { maskSecrets } from "../commands/config.js";
 import {
@@ -8,6 +12,7 @@ import {
   requestMaintenanceReset,
 } from "../control/ipc.js";
 import { getMessage, listMessages } from "../read/messages.js";
+import { getChatMessageStats } from "../read/chat-stats.js";
 import { McpRequestError } from "../mcp/types.js";
 import {
   allowDashboardChat,
@@ -16,6 +21,7 @@ import {
 } from "./chats.js";
 import {
   getActiveHistoryJob,
+  getAttachment,
   getHistoryJob,
   setTranscriptionCorrection,
   type HistoryJobRow,
@@ -70,6 +76,57 @@ function svg(body: string, status = 200): Response {
       "Cache-Control": "no-store",
     },
   });
+}
+
+function safeDownloadName(value: string | null, fallback: string): string {
+  const name = basename(value ?? fallback).replace(/[\r\n"\\]/g, "_");
+  return name.length > 0 ? name : fallback;
+}
+
+async function attachmentDownload(
+  context: DashboardContext,
+  chatJid: string,
+  messageId: string,
+  attachmentIndex: number,
+): Promise<Response> {
+  try {
+    // `getMessage` checks the allow/block predicate before the attachment.
+    getMessage(
+      { db: context.db, accountId: context.accountId },
+      chatJid,
+      messageId,
+    );
+    const attachment = getAttachment(
+      context.db,
+      context.accountId,
+      chatJid,
+      messageId,
+      attachmentIndex,
+    );
+    if (!attachment?.file_path || attachment.downloaded_at === null) {
+      return json({ error: "not found" }, 404);
+    }
+    const mediaRoot = resolve(context.config.paths.mediaDir);
+    const path = resolve(attachment.file_path);
+    if (relative(mediaRoot, path).startsWith("..")) {
+      return json({ error: "not found" }, 404);
+    }
+    const details = await stat(path).catch(() => null);
+    if (!details?.isFile()) return json({ error: "not found" }, 404);
+    return new Response(
+      Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>,
+      {
+        headers: {
+          "Content-Type": attachment.mime_type ?? "application/octet-stream",
+          "Content-Length": String(details.size),
+          "Content-Disposition": `attachment; filename="${safeDownloadName(attachment.file_name, attachment.sha256 ?? "media")}"`,
+          "Cache-Control": "no-store",
+        },
+      },
+    );
+  } catch {
+    return json({ error: "not found" }, 404);
+  }
 }
 
 function errorResponse(error: unknown, status = 400): Response {
@@ -305,6 +362,41 @@ export async function dashboardApi(
             | null) ?? undefined,
       }),
     );
+  }
+  if (url.pathname.startsWith("/api/chats/") && request.method === "GET") {
+    const download =
+      /^\/api\/chats\/([^/]+)\/messages\/([^/]+)\/attachments\/(\d+)\/download$/.exec(
+        url.pathname,
+      );
+    if (download?.[1] && download[2] && download[3]) {
+      return attachmentDownload(
+        context,
+        decodeJid(download[1]),
+        decodeURIComponent(download[2]),
+        Number(download[3]),
+      );
+    }
+  }
+  if (url.pathname.startsWith("/api/chats/") && request.method === "GET") {
+    const match = /^\/api\/chats\/(.+)\/stats$/.exec(url.pathname);
+    if (match?.[1]) {
+      try {
+        return json(
+          getChatMessageStats(
+            { db: context.db, accountId: context.accountId },
+            decodeJid(match[1]),
+          ),
+        );
+      } catch (error) {
+        if (
+          error instanceof McpRequestError &&
+          error.message === "chat is not available"
+        ) {
+          return json({ error: "not found" }, 404);
+        }
+        return json({ error: "invalid stats query" }, 400);
+      }
+    }
   }
   if (url.pathname.startsWith("/api/chats/") && request.method === "GET") {
     const match = /^\/api\/chats\/(.+)\/messages$/.exec(url.pathname);

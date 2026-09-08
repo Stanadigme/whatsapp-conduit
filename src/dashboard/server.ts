@@ -4,6 +4,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { timingSafeEqual } from "node:crypto";
+import { Readable } from "node:stream";
 
 import type { Config } from "../config.js";
 import { dashboardApi, type DashboardContext } from "./api.js";
@@ -35,7 +36,8 @@ async function api(path, options = {}) { const response = await fetch(path, { ..
 function showError(error) { $('auth').textContent = error.message; $('auth').className = 'error'; }
 let historyPoll = 0;
 function historySince() { const value = $('history-since').value; if (!value) throw new Error('Choisissez une date de début.'); const timestamp = Math.floor(Date.parse(value + 'T00:00:00Z') / 1000); if (!Number.isFinite(timestamp)) throw new Error('Date de début invalide.'); return timestamp; }
-function historyLabel(job) { const progress = job.progressPercent === null ? '' : ' — ' + job.progressPercent + '%'; const reason = job.errorCode === 'no_anchor' ? ' — impossible : aucun message de cette discussion n’est enregistré localement. Un message envoyé avant la connexion, ou non reçu par ce linked device, ne suffit pas ; faites recevoir un nouveau message après la connexion de l’ingestion, puis relancez.' : ''; return 'Synchronisation ' + job.status + ' (' + job.phase + ')' + progress + ', ' + job.messagesInserted + ' message(s) ajouté(s).' + reason; }
+function historyLimitLabel(job) { if (job.errorCode === 'no_anchor' || job.completionReason === 'no_local_anchor') return ' Aucun message local ne permet encore de demander un lot antérieur.'; if (job.status === 'completed' && !job.coverageComplete) return ' Profondeur maximale fournie par WhatsApp atteinte.'; return ''; }
+function historyLabel(job) { const progress = job.progressPercent === null ? '' : ' — ' + job.progressPercent + '%'; return 'Synchronisation ' + job.status + ' (' + job.phase + ')' + progress + ', ' + job.messagesInserted + ' message(s) ajouté(s).' + historyLimitLabel(job); }
 async function pollHistory(jobId) { clearTimeout(historyPoll); try { const job = await api('/api/history/' + encodeURIComponent(jobId)); $('history-status').textContent = historyLabel(job); $('history-status').className = job.status === 'failed' ? 'error' : 'muted'; if (job.status === 'queued' || job.status === 'waiting_connection' || job.status === 'running') historyPoll = setTimeout(() => pollHistory(jobId), 2000); } catch (error) { showError(error); } }
 async function refreshHistory() { try { const active = await api('/api/history/active'); if (active.job) { $('history-status').textContent = historyLabel(active.job); pollHistory(active.job.id); } } catch (error) { showError(error); } }
 async function refresh() { if (!token) return; try { const chats = await api('/api/chats?query=' + encodeURIComponent($('search').value) + '&kind=' + encodeURIComponent($('kind').value)); $('chats').innerHTML = chats.map(chat => '<article class="chat"><div><strong>' + escapeHtml(chat.name) + '</strong><small>' + escapeHtml(chat.jid) + '</small></div><span>' + (chat.allowed ? 'Autorisé' : chat.blocked ? 'Bloqué' : 'Découvert') + '</span><div class="chat-actions"><button data-action="' + (chat.allowed ? 'block' : 'allow') + '" data-jid="' + encodeURIComponent(chat.jid) + '">' + (chat.allowed ? 'Retirer' : 'Autoriser') + '</button><button data-action="history" data-jid="' + encodeURIComponent(chat.jid) + '"' + (chat.allowed ? '' : ' disabled') + '>Synchroniser</button></div></article>').join('') || '<p class="muted">Aucune conversation découverte.</p>'; await refreshHistory(); await refreshStt(); } catch (error) { showError(error); } }
@@ -91,6 +93,8 @@ const DIRECT_INDEX_HTML = INDEX_HTML.replace(
   `<section id="conversation" class="card" hidden>
 <p><a href="/" id="conversation-back">← Retour aux discussions</a></p>
 <h2 id="conversation-title">Discussion</h2><p id="conversation-jid" class="muted"></p>
+<dl id="conversation-stats" class="conversation-stats"></dl>
+<section class="conversation-sync"><h3>Synchronisation historique</h3><p class="muted">WhatsApp peut fournir une profondeur limitée : la date demandée est un objectif, pas une garantie.</p><label>Depuis <input id="conversation-history-since" type="date"></label><button id="conversation-history-start">Synchroniser les messages</button><p id="conversation-history-status" class="muted"></p></section>
 <div id="conversation-messages" class="message-list"></div>
 <div class="conversation-actions"><button id="conversation-older" hidden>Charger les messages plus anciens</button><button id="conversation-refresh">Actualiser</button></div>
 <p id="conversation-status" class="muted"></p></section></main>`,
@@ -117,12 +121,18 @@ let conversationState = null;
 function conversationJid() { const match = /^\\/conversation\\/(.+)$/.exec(window.location.pathname); return match ? decodeURIComponent(match[1]) : null; }
 function formatTimestamp(value) { return value === null ? 'Date inconnue' : new Date(value * 1000).toLocaleString('fr-FR'); }
 function metadataRow(label, value) { return value === null || value === undefined || value === '' ? '' : '<dt>' + escapeHtml(label) + '</dt><dd>' + escapeHtml(String(value)) + '</dd>'; }
+function renderConversationStats(stats) { $('conversation-stats').innerHTML = metadataRow('Messages', stats.messageCount) + metadataRow('Avec média', stats.mediaMessageCount) + metadataRow('Plus ancien message', stats.oldestMessageTs === null ? null : formatTimestamp(stats.oldestMessageTs)) + metadataRow('Plus récent message', stats.newestMessageTs === null ? null : formatTimestamp(stats.newestMessageTs)); }
+async function loadConversationStats() { if (!conversationState) return; try { renderConversationStats(await api('/api/chats/' + encodeURIComponent(conversationState.jid) + '/stats')); } catch (error) { $('conversation-stats').textContent = error.message; } }
+function conversationHistorySince() { const value = $('conversation-history-since').value; if (!value) throw new Error('Choisissez une date de début.'); const timestamp = Math.floor(Date.parse(value + 'T00:00:00Z') / 1000); if (!Number.isFinite(timestamp)) throw new Error('Date de début invalide.'); return timestamp; }
+function conversationHistoryLabel(job) { const progress = job.progressPercent === null ? '' : ' — ' + job.progressPercent + '%'; const oldest = job.oldestSeenTs === null ? '' : ' plus ancien reçu : ' + formatTimestamp(job.oldestSeenTs) + '.'; return 'Synchronisation ' + job.status + ' (' + job.phase + ')' + progress + ', ' + job.messagesInserted + ' message(s) ajouté(s).' + oldest + historyLimitLabel(job); }
+async function pollConversationHistory(jobId) { try { const job = await api('/api/history/' + encodeURIComponent(jobId)); $('conversation-history-status').textContent = conversationHistoryLabel(job); $('conversation-history-status').className = job.status === 'failed' ? 'error' : 'muted'; if (job.status === 'queued' || job.status === 'waiting_connection' || job.status === 'running') { setTimeout(() => pollConversationHistory(jobId), 2000); } else { await loadConversationStats(); await loadConversation(true); } } catch (error) { $('conversation-history-status').textContent = error.message; $('conversation-history-status').className = 'error'; } }
+async function startConversationHistory() { if (!conversationState) return; try { const since = conversationHistorySince(); const result = await api('/api/chats/' + encodeURIComponent(conversationState.jid) + '/history?since=' + encodeURIComponent(since), { method: 'POST' }); $('conversation-history-status').textContent = 'Synchronisation demandée.'; pollConversationHistory(result.jobId); } catch (error) { $('conversation-history-status').textContent = error.message; $('conversation-history-status').className = 'error'; } }
 function correctionEditorHtml(message) { const value = message.textCorrected === null ? message.textRaw : message.textCorrected; const id = escapeHtml(message.messageId); return '<div class=\"transcript-editor\" data-message-id=\"' + id + '\"><textarea aria-label=\"Correction de la transcription\">' + escapeHtml(value ?? '') + '</textarea><div class=\"conversation-actions\"><button type=\"button\" data-transcript-action=\"save\" data-message-id=\"' + id + '\">Enregistrer</button><button type=\"button\" data-transcript-action=\"cancel\" data-message-id=\"' + id + '\">Annuler</button></div><p class=\"muted\" data-transcript-status></p></div>'; }
 function transcriptHtml(message) { if (message.messageType !== 'audio' || message.textRaw === null) return ''; const id = escapeHtml(message.messageId); const raw = '<div class=\"transcript\"><strong>Transcription brute</strong><p>' + escapeHtml(message.textRaw) + '</p>'; if (conversationState?.editingMessageId === message.messageId) return raw + correctionEditorHtml(message) + '</div>'; const hasCorrection = message.textCorrected !== null; const corrected = hasCorrection ? '<p class=\"transcript-corrected\">' + escapeHtml(message.textCorrected) + '</p>' : '<p class=\"muted\">Aucune correction enregistrée.</p>'; const action = '<button type=\"button\" data-transcript-action=\"edit\" data-message-id=\"' + id + '\">' + (hasCorrection ? 'Modifier' : 'Corriger') + '</button>'; return raw + '<strong>Correction</strong>' + corrected + action + '</div>'; }
 function renderMessageWithCorrection(message) { const text = message.text === null ? '' : '<p class=\"message-text\">' + escapeHtml(message.text) + '</p>'; const transcript = transcriptHtml(message); const metadata = '<details><summary>Détails</summary><dl>' + metadataRow('Date', formatTimestamp(message.timestamp ?? message.receivedAt)) + metadataRow('Expéditeur', message.senderName || message.senderJid || (message.fromMe ? 'Moi' : 'Inconnu')) + metadataRow('Type', message.messageType) + metadataRow('Source', message.ingestionSource) + metadataRow('Média', message.hasMedia ? (message.durationS === null ? 'présent' : 'présent, ' + message.durationS + ' s') : 'aucun') + metadataRow('Message ID', message.messageId) + metadataRow('Message cité', message.quotedMessageId) + metadataRow('Sender cité', message.quotedSenderJid) + metadataRow('Message édité', message.editedMessageId) + metadataRow('Supprimé le', message.deletedAt === null ? null : formatTimestamp(message.deletedAt)) + '</dl></details>'; return '<article class=\"message' + (message.fromMe ? ' message-from-me' : '') + (message.deletedAt !== null ? ' message-deleted' : '') + '\"><header><strong>' + escapeHtml(message.senderName || message.senderJid || (message.fromMe ? 'Moi' : 'Inconnu')) + '</strong><time>' + escapeHtml(formatTimestamp(message.timestamp ?? message.receivedAt)) + '</time></header>' + text + transcript + metadata + '</article>'; }
 function renderConversation() { if (!conversationState) return; const container = $('conversation-messages'); container.innerHTML = conversationState.items.map(renderMessageWithCorrection).join('') || '<p class=\"muted\">Aucun message enregistré pour cette discussion.</p>'; $('conversation-older').hidden = !conversationState.nextCursor; $('conversation-status').textContent = conversationState.nextCursor ? '' : 'Fin de l’historique local.'; }
 async function loadConversation(reset = false) { if (!conversationState || conversationState.loading) return; conversationState.loading = true; const container = $('conversation-messages'); const oldHeight = container.scrollHeight; const oldTop = container.scrollTop; try { const query = new URLSearchParams({ limit: '50' }); if (!reset && conversationState.nextCursor) query.set('cursor', conversationState.nextCursor); const page = await api('/api/chats/' + encodeURIComponent(conversationState.jid) + '/messages?' + query.toString()); const items = page.items.slice().reverse(); conversationState.items = reset ? items : items.concat(conversationState.items); conversationState.nextCursor = page.nextCursor; renderConversation(); if (reset) container.scrollTop = container.scrollHeight; else container.scrollTop = oldTop + (container.scrollHeight - oldHeight); } catch (error) { showError(error); $('conversation-status').textContent = error.message; $('conversation-status').className = 'error'; } finally { conversationState.loading = false; } }
-async function showConversation(jid) { document.querySelectorAll('main > section, main > p').forEach(element => { if (element.id !== 'conversation') element.hidden = true; }); $('conversation').hidden = false; conversationState = { jid, items: [], nextCursor: null, loading: false, editingMessageId: null }; $('conversation-jid').textContent = jid; try { const chats = await api('/api/chats?query=' + encodeURIComponent(jid)); const chat = chats.find(item => item.jid === jid); $('conversation-title').textContent = chat ? chat.name : 'Discussion'; } catch (error) { showError(error); } await loadConversation(true); }
+async function showConversation(jid) { document.querySelectorAll('main > section, main > p').forEach(element => { if (element.id !== 'conversation') element.hidden = true; }); $('conversation').hidden = false; conversationState = { jid, items: [], nextCursor: null, loading: false, editingMessageId: null }; $('conversation-jid').textContent = jid; try { const chats = await api('/api/chats?query=' + encodeURIComponent(jid)); const chat = chats.find(item => item.jid === jid); $('conversation-title').textContent = chat ? chat.name : 'Discussion'; } catch (error) { showError(error); } await Promise.all([loadConversationStats(), loadConversation(true)]); }
 let sttState = null;
 let sttPoll = null;
 function formatSize(bytes) { return bytes >= 1000000000 ? (bytes / 1000000000).toFixed(1) + ' Go' : Math.round(bytes / 1000000) + ' Mo'; }
@@ -135,15 +145,20 @@ async function saveStt() { const selected = document.querySelector('input[name=\
 function bootstrap() { const jid = conversationJid(); if (jid) { void showConversation(jid); return; } void refresh(); void refreshRuntimeView(); void refreshBaileysLinkQr(); void refreshMaintenanceState(); api('/api/pairing/status').then(updatePairingControls).catch(showError); }
 $('conversation-older').onclick = () => { void loadConversation(false); };
 $('conversation-refresh').onclick = () => { if (conversationState) { conversationState.nextCursor = null; void loadConversation(true); } };
+$('conversation-history-start').onclick = () => { void startConversationHistory(); };
 $('conversation-messages').onclick = async event => { const button = event.target.closest('button[data-transcript-action]'); if (!button || !conversationState) return; const messageId = button.dataset.messageId; const action = button.dataset.transcriptAction; if (!messageId || !action) return; if (action === 'edit') { conversationState.editingMessageId = messageId; renderConversation(); document.querySelector('.transcript-editor textarea')?.focus(); return; } if (action === 'cancel') { conversationState.editingMessageId = null; renderConversation(); return; } if (action !== 'save') return; const editor = button.closest('.transcript-editor'); const textarea = editor?.querySelector('textarea'); const status = editor?.querySelector('[data-transcript-status]'); if (!textarea) return; button.disabled = true; if (status) { status.textContent = 'Enregistrement…'; status.className = 'muted'; } try { const updated = await api('/api/chats/' + encodeURIComponent(conversationState.jid) + '/messages/' + encodeURIComponent(messageId) + '/transcription/correction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ textCorrected: textarea.value }) }); const index = conversationState.items.findIndex(item => item.messageId === messageId); if (index >= 0) conversationState.items[index] = updated; conversationState.editingMessageId = null; renderConversation(); $('conversation-status').textContent = 'Correction enregistrée.'; $('conversation-status').className = 'muted'; } catch (error) { if (status) { status.textContent = error.message; status.className = 'error'; } button.disabled = false; } };
 bootstrap();
 })();`,
+  )
+  .replace(
+    "+ text + transcript + metadata + '</article>'; }",
+    "+ text + transcript + (message.hasMedia ? '<p><a class=\\\"chat-link\\\" href=\\\"/api/chats/' + encodeURIComponent(message.chatJid) + '/messages/' + encodeURIComponent(message.messageId) + '/attachments/0/download\\\">Télécharger le média</a></p>' : '') + metadata + '</article>'; }",
   );
 /* eslint-enable no-useless-escape */
 
 const DIRECT_STYLES_CSS =
   STYLES_CSS +
-  "#access-card{display:none}.chat-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.chat-link{color:#155eef;font-weight:600}.message-list{display:flex;flex-direction:column;gap:12px;max-height:65vh;overflow:auto;padding:4px}.message{background:#f8fafc;border:1px solid #d9dee5;border-radius:10px;padding:12px;max-width:85%}.message-from-me{align-self:flex-end;background:#eaf2ff}.message-deleted{opacity:.7}.message header{display:flex;justify-content:space-between;gap:16px;font-size:.9em}.message time{color:#68737d}.message-text{white-space:pre-wrap;overflow-wrap:anywhere}.transcript{border-left:3px solid #84adff;padding-left:10px}.transcript-editor textarea{display:block;box-sizing:border-box;width:100%;min-height:8em;resize:vertical;font:inherit}.transcript-editor .conversation-actions{margin-top:8px}.message dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;font-size:.85em}.message dd{margin:0;overflow-wrap:anywhere}.conversation-actions{display:flex;gap:8px;margin-top:12px}@media(prefers-color-scheme:dark){.message{background:#1f2937;border-color:#374151}.message-from-me{background:#17315f}.chat-link{color:#84adff}}";
+  "#access-card{display:none}.chat-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.chat-link{color:#155eef;font-weight:600}.message-list{display:flex;flex-direction:column;gap:12px;max-height:65vh;overflow:auto;padding:4px}.message{background:#f8fafc;border:1px solid #d9dee5;border-radius:10px;padding:12px;max-width:85%}.message-from-me{align-self:flex-end;background:#eaf2ff}.message-deleted{opacity:.7}.message header{display:flex;justify-content:space-between;gap:16px;font-size:.9em}.message time{color:#68737d}.message-text{white-space:pre-wrap;overflow-wrap:anywhere}.transcript{border-left:3px solid #84adff;padding-left:10px}.transcript-editor textarea{display:block;box-sizing:border-box;width:100%;min-height:8em;resize:vertical;font:inherit}.transcript-editor .conversation-actions{margin-top:8px}.message dl,.conversation-stats{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;font-size:.85em}.message dd,.conversation-stats dd{margin:0;overflow-wrap:anywhere}.conversation-sync{border-top:1px solid #d9dee5;margin-top:16px;padding-top:12px}.conversation-sync label{display:block;margin-bottom:8px}.conversation-actions{display:flex;gap:8px;margin-top:12px}@media(prefers-color-scheme:dark){.message{background:#1f2937;border-color:#374151}.message-from-me{background:#17315f}.chat-link{color:#84adff}.conversation-sync{border-color:#374151}}";
 
 type AuthorizationMethod = "bearer" | "session";
 
@@ -365,11 +380,36 @@ export async function createDashboardServer(
           JSON.stringify({ error: "not found" }),
           "application/json; charset=utf-8",
         );
+      if (result.headers.has("Content-Disposition")) {
+        response.writeHead(result.status, {
+          "Content-Type":
+            result.headers.get("Content-Type") ?? "application/octet-stream",
+          "Content-Length": result.headers.get("Content-Length") ?? "",
+          "Content-Disposition":
+            result.headers.get("Content-Disposition") ?? "",
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+          "X-Frame-Options": "DENY",
+          "Referrer-Policy": "no-referrer",
+          "Permissions-Policy": "camera=(), geolocation=(), microphone=()",
+          "Content-Security-Policy":
+            "default-src 'self'; frame-ancestors 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'",
+        });
+        if (!result.body) return response.end();
+        Readable.fromWeb(result.body).pipe(response);
+        return;
+      }
+      const responseHeaders: Record<string, string> = {};
+      for (const name of ["Content-Disposition", "Content-Length"]) {
+        const value = result.headers.get(name);
+        if (value) responseHeaders[name] = value;
+      }
       send(
         response,
         result.status,
         await result.text(),
         result.headers.get("Content-Type") ?? "application/json; charset=utf-8",
+        responseHeaders,
       );
     } catch (error) {
       if (error instanceof DashboardBodyError) {
