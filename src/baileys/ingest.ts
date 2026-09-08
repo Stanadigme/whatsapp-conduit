@@ -584,7 +584,6 @@ function persistStore(
       timestamp: n.timestamp,
       messageType: n.messageType,
       text,
-      normalizedText: text,
       hasMedia: n.hasMedia,
       durationS: n.durationS,
       quotedMessageId: n.quotedMessageId,
@@ -647,7 +646,6 @@ function persistEdit(
       chatJid: result.chatJid,
       messageId: result.targetId,
       text,
-      normalizedText: text,
       editedMessageId: result.editId,
     });
     if (preserveRaw) {
