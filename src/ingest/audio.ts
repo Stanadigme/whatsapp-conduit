@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { IngestDeps } from "../baileys/ingest.js";
+import { chatExposureAllowed } from "../db/directory.js";
 import { getAttachment, upsertAttachment } from "../db/queries.js";
 import type { NormalizedMessage } from "../ingest/types.js";
 
@@ -102,6 +103,15 @@ export async function persistAudioIfEnabled(
     )
   )
     return;
+  // Discovery persists a chat's messages before anyone authorises it, so that
+  // it can be found and reviewed. Media is different: the file is the content,
+  // it is never exposed and never transcribed for an unauthorised chat, and
+  // nothing evicts it. Downloading it would accumulate private recordings with
+  // no use for them.
+  if (!chatExposureAllowed(deps.db, deps.accountId, normalized.chatJid)) {
+    deps.logger.debug({ reason: "chat-not-allowed" }, "skipped media download");
+    return;
+  }
   if (
     mediaType === "audio" &&
     normalized.durationS !== null &&

@@ -8,7 +8,11 @@ import {
   type IngestDeps,
 } from "../src/baileys/ingest.js";
 import { openDb } from "../src/db/index.js";
-import { getAttachment, upsertAccount } from "../src/db/queries.js";
+import {
+  getAttachment,
+  setChatAllowed,
+  upsertAccount,
+} from "../src/db/queries.js";
 import { downloadAudioIfEnabled } from "../src/whatsmeow/media.js";
 import { normalizeWhatsmeowMessage } from "../src/whatsmeow/normalize.js";
 import { createLogger } from "../src/util/logging.js";
@@ -59,6 +63,9 @@ describe("whatsmeow audio media worker", () => {
     const normalized = normalizeWhatsmeowMessage(inbound);
     if (normalized.action !== "store") throw new Error("expected audio");
     expect(ingestNormalizedResult(depsForTest, normalized, null)).toBe(true);
+    // Media is only fetched for authorised chats, and ingestion is what creates
+    // the chat row, so this has to come after it.
+    setChatAllowed(depsForTest.db, "personal", "25954537754701@lid", true);
 
     let downloads = 0;
     const transport = {

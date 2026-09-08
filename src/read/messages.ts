@@ -1,6 +1,7 @@
 import type { Database } from "better-sqlite3";
 import {
   directoryDisplayName,
+  chatPolicyForAliases,
   directoryTablesAvailable,
   getDirectoryEntityByJid,
   listEquivalentJids,
@@ -118,20 +119,8 @@ function allowedChatWithAliases(
     .get(ctx.accountId, chatJid);
   if (!row) throw new McpRequestError("chat is not available");
   const aliases = listEquivalentJids(ctx.db, ctx.accountId, chatJid);
-  const placeholders = aliases.map((_, index) => `@alias${index}`);
-  const policy = ctx.db
-    .prepare(
-      `select max(is_allowed) as allowed, max(is_blocked) as blocked
-       from chats where account_id = @accountId
-       and jid in (${placeholders.join(", ")})`,
-    )
-    .get({
-      accountId: ctx.accountId,
-      ...Object.fromEntries(
-        aliases.map((alias, index) => [`alias${index}`, alias]),
-      ),
-    }) as { allowed: number | null; blocked: number | null };
-  if (policy.allowed !== 1 || policy.blocked === 1) {
+  const policy = chatPolicyForAliases(ctx.db, ctx.accountId, aliases);
+  if (!policy.allowed || policy.blocked) {
     throw new McpRequestError("chat is not available");
   }
   return { row, aliases };

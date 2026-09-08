@@ -6,7 +6,12 @@ import type { WAMessage } from "baileys";
 import { ingestMessage, type IngestDeps } from "../src/baileys/ingest.js";
 import { resolveConfig, type Config } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
-import { getAttachment, upsertAccount } from "../src/db/queries.js";
+import {
+  getAttachment,
+  setChatAllowed,
+  setChatBlocked,
+  upsertAccount,
+} from "../src/db/queries.js";
 import type { NormalizedMessage } from "../src/ingest/types.js";
 import { persistAudioIfEnabled } from "../src/ingest/audio.js";
 import { createLogger } from "../src/util/logging.js";
@@ -47,6 +52,8 @@ function setup(
     logger: createLogger({ level: "error" }),
   };
   const stored = ingestMessage(deps, audioMessage(seconds));
+  // Media is only fetched for authorised chats, so the fixture has to be one.
+  setChatAllowed(db, "personal", CHAT, true);
   if (!stored) throw new Error("expected the audio message to be stored");
   return { deps, stored };
 }
@@ -197,6 +204,40 @@ describe("shared audio persistence", () => {
     ]);
 
     expect(fake.fetches).toBe(1);
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("never downloads media for a chat that is not allowed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
+    const { deps, stored } = setup(root, { privacy: { store_media: true } });
+    // Discovery keeps a chat's messages before anyone reviews it. Its media is
+    // another matter: it is never exposed, never transcribed, and nothing
+    // evicts it, so it must not reach the disk at all.
+    setChatAllowed(deps.db, "personal", CHAT, false);
+    const fake = source(root);
+
+    await persistAudioIfEnabled(fake.source, stored, deps);
+
+    expect(fake.fetches).toBe(0);
+    expect(
+      getAttachment(deps.db, "personal", stored.chatJid, stored.messageId),
+    ).toBeUndefined();
+    expect(await readdir(join(root, "media")).catch(() => [])).toEqual([]);
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("never downloads media for a blocked chat, even when allowed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
+    const { deps, stored } = setup(root, { privacy: { store_media: true } });
+    // Blocking wins over allowing, exactly as it does on the read path.
+    setChatBlocked(deps.db, "personal", CHAT, true);
+    const fake = source(root);
+
+    await persistAudioIfEnabled(fake.source, stored, deps);
+
+    expect(fake.fetches).toBe(0);
     deps.db.close();
     await rm(root, { recursive: true, force: true });
   });

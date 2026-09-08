@@ -168,6 +168,50 @@ export function listEquivalentJids(
   return aliases.includes(normalized) ? aliases : [normalized, ...aliases];
 }
 
+/**
+ * Exposure policy for one identity, evaluated across all of its aliases.
+ *
+ * A chat known under both a phone JID and a LID is one conversation: allowing
+ * either alias allows it, and blocking any alias blocks it. This is the single
+ * definition of that rule — reads and the media path both call it, so they
+ * cannot drift apart.
+ */
+export function chatPolicyForAliases(
+  db: Database,
+  accountId: string,
+  aliases: readonly string[],
+): { allowed: boolean; blocked: boolean } {
+  if (aliases.length === 0) return { allowed: false, blocked: false };
+  const placeholders = aliases.map((_, index) => `@alias${index}`);
+  const row = db
+    .prepare(
+      `select max(is_allowed) as allowed, max(is_blocked) as blocked
+       from chats where account_id = @accountId
+       and jid in (${placeholders.join(", ")})`,
+    )
+    .get({
+      accountId,
+      ...Object.fromEntries(
+        aliases.map((alias, index) => [`alias${index}`, alias]),
+      ),
+    }) as { allowed: number | null; blocked: number | null };
+  return { allowed: row.allowed === 1, blocked: row.blocked === 1 };
+}
+
+/** Whether a chat may be exposed, resolving aliases first. */
+export function chatExposureAllowed(
+  db: Database,
+  accountId: string,
+  chatJid: string,
+): boolean {
+  const policy = chatPolicyForAliases(
+    db,
+    accountId,
+    listEquivalentJids(db, accountId, chatJid),
+  );
+  return policy.allowed && !policy.blocked;
+}
+
 export function upsertDirectoryContact(
   db: Database,
   input: DirectoryContactInput,
