@@ -3,6 +3,7 @@ import {
   directoryDisplayName,
   directoryTablesAvailable,
   getDirectoryEntityByJid,
+  listEquivalentJids,
 } from "../db/directory.js";
 import type { ChatRow, MessageRow } from "../db/queries.js";
 import {
@@ -100,10 +101,27 @@ export function allowedChat(ctx: MessageReadContext, chatJid: string): ChatRow {
   const row = ctx.db
     .prepare<[string, string], ChatRow>(
       `select * from chats
-       where account_id = ? and jid = ? and is_allowed = 1 and is_blocked = 0`,
+       where account_id = ? and jid = ?`,
     )
     .get(ctx.accountId, chatJid);
   if (!row) throw new McpRequestError("chat is not available");
+  const aliases = listEquivalentJids(ctx.db, ctx.accountId, chatJid);
+  const placeholders = aliases.map((_, index) => `@alias${index}`);
+  const policy = ctx.db
+    .prepare(
+      `select max(is_allowed) as allowed, max(is_blocked) as blocked
+       from chats where account_id = @accountId
+       and jid in (${placeholders.join(", ")})`,
+    )
+    .get({
+      accountId: ctx.accountId,
+      ...Object.fromEntries(
+        aliases.map((alias, index) => [`alias${index}`, alias]),
+      ),
+    }) as { allowed: number | null; blocked: number | null };
+  if (policy.allowed !== 1 || policy.blocked === 1) {
+    throw new McpRequestError("chat is not available");
+  }
   return row;
 }
 
@@ -223,16 +241,18 @@ export function listMessages(
     }
   }
   const cursor = decodeCursor<{ rowid: number }>(filters.cursor);
-  const where = [
-    "m.account_id = @accountId",
-    "c.is_allowed = 1",
-    "c.is_blocked = 0",
-  ];
+  const where = ["m.account_id = @accountId"];
   const params: Record<string, unknown> = {};
   if (filters.chat) {
     allowedChat(ctx, filters.chat);
-    where.push("m.chat_jid = @chat");
-    params.chat = filters.chat;
+    const aliases = listEquivalentJids(ctx.db, ctx.accountId, filters.chat);
+    const placeholders = aliases.map((_, index) => `@chat${index}`);
+    where.push(`m.chat_jid in (${placeholders.join(", ")})`);
+    aliases.forEach((alias, index) => {
+      params[`chat${index}`] = alias;
+    });
+  } else {
+    where.push("c.is_allowed = 1", "c.is_blocked = 0");
   }
   if (filters.sender) {
     where.push("m.sender_jid = @sender");

@@ -62,6 +62,29 @@ class FakeEventSocket {
 }
 
 describe("ingestMessage persistence", () => {
+  it("persists an allowed reconnect message delivered in a recent-history batch", () => {
+    const d = deps(
+      resolveConfig(
+        { filters: { allowed_chats: ["c@s.whatsapp.net"] } },
+        { dataDir: "/data" },
+      ),
+    );
+    const socket = new FakeEventSocket();
+    registerIngestion(socket as unknown as WASocket, d);
+
+    socket.emit("messaging-history.set", {
+      chats: [],
+      contacts: [],
+      messages: [msg({ message: { conversation: "reconnect" } })],
+      syncType: proto.HistorySync.HistorySyncType.RECENT,
+    });
+
+    expect(
+      getMessage(d.db, "personal", "c@s.whatsapp.net", "M1"),
+    ).toMatchObject({ ingestion_source: "live" });
+    d.db.close();
+  });
+
   it("stores a text message with chat, sender, and metadata", () => {
     const d = deps(baseConfig);
     ingestMessage(d, msg({ message: { conversation: "hi there" } }));

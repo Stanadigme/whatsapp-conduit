@@ -3,6 +3,7 @@ import pino from "pino";
 import { describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
+import { upsertDirectoryContact } from "../src/db/directory.js";
 import {
   getHistoryJob,
   upsertAccount,
@@ -22,6 +23,7 @@ import type {
 
 const ACCOUNT = "personal";
 const CHAT = "33600000000@s.whatsapp.net";
+const CHAT_LID = "900000000000@lid";
 const GROUP_JID = "120363000000000@g.us";
 const MEMBER_JID = "33600000001@s.whatsapp.net";
 
@@ -112,6 +114,33 @@ async function waitFor(
 }
 
 describe("history coordinator", () => {
+  it("finishes without coverage when WhatsApp cannot be queried without a local anchor", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const transport = new FakeHistoryTransport();
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    const coordinator = new HistoryCoordinator({
+      db,
+      accountId: ACCOUNT,
+      transport: transport as unknown as HistoryCapableTransport,
+      logger: pino({ level: "silent" }),
+    });
+
+    const started = await coordinator.start(CHAT, 80, 100);
+    await waitFor(
+      () => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed",
+    );
+
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
+      status: "completed",
+      coverage_complete: 0,
+      completion_reason: "no_local_anchor",
+      error_code: null,
+    });
+    expect(transport.requests).toHaveLength(0);
+    db.close();
+  });
+
   it("requests a bounded batch, persists only the requested window and completes", async () => {
     const db = openDb(":memory:", { migrate: true });
     const config = resolveConfig({}, { dataDir: "/data" });
@@ -177,6 +206,66 @@ describe("history coordinator", () => {
         )
         .get(),
     ).toEqual({ ingestion_source: "history" });
+    db.close();
+  });
+
+  it("follows a direct chat across its LID and phone aliases", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const config = resolveConfig({}, { dataDir: "/data" });
+    const transport = new FakeHistoryTransport();
+    upsertAccount(db, { id: ACCOUNT, selfJid: MEMBER_JID });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT_LID });
+    upsertDirectoryContact(db, {
+      accountId: ACCOUNT,
+      jid: CHAT,
+      lid: CHAT_LID,
+    });
+    upsertMessage(db, {
+      accountId: ACCOUNT,
+      chatJid: CHAT_LID,
+      messageId: "M100",
+      senderJid: CHAT_LID,
+      timestamp: 100,
+      messageType: "text",
+    });
+
+    const coordinator = new HistoryCoordinator({
+      db,
+      accountId: ACCOUNT,
+      transport: transport as unknown as HistoryCapableTransport,
+      logger: pino({ level: "silent" }),
+    });
+    registerWhatsmeowIngestion(
+      transport as unknown as ObserveTransport,
+      {
+        db,
+        accountId: ACCOUNT,
+        config,
+        logger: pino({ level: "silent" }),
+      },
+      {
+        classify: (event) => coordinator.classify(event),
+        onStored: (event, stored, classification) =>
+          coordinator.onStored(event, stored, classification),
+      },
+    );
+    transport.emit("connected", { jid: MEMBER_JID });
+
+    const started = await coordinator.start(CHAT_LID, 80, 100);
+    await waitFor(
+      () => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed",
+    );
+
+    expect(transport.requests[0]).toMatchObject({
+      chat: CHAT,
+      timestamp: 100,
+    });
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
+      coverage_complete: 1,
+      messages_received: 2,
+      messages_inserted: 1,
+    });
     db.close();
   });
 

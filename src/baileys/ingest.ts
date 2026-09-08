@@ -10,6 +10,7 @@ import type { Config } from "../config.js";
 import type { Database } from "../db/index.js";
 import {
   directoryTablesAvailable,
+  listEquivalentJids,
   upsertDirectoryContact,
   upsertDirectoryGroup,
 } from "../db/directory.js";
@@ -66,14 +67,34 @@ function chatBlockedInDb(deps: IngestDeps, chatJid: string): boolean {
  * it listens to message events and writes to SQLite. It never sends, reads, or
  * marks anything.
  */
-export function registerIngestion(sock: WASocket, deps: IngestDeps): void {
-  sock.ev.on("messages.upsert", ({ messages, type }) => {
-    if (type !== "notify" && type !== "append") return;
+export interface BaileysIngestionOptions {
+  classify?: (message: WAMessage) => IngestionEventClassification;
+  onStored?: (
+    message: WAMessage,
+    stored: boolean,
+    classification: IngestionEventClassification,
+  ) => void;
+}
+
+export function registerIngestion(
+  sock: WASocket,
+  deps: IngestDeps,
+  options: BaileysIngestionOptions = {},
+): void {
+  const ingestMessages = (
+    messages: readonly WAMessage[],
+    useClassifier: boolean,
+  ): void => {
     for (const msg of messages) {
       try {
-        const stored = ingestMessage(deps, msg);
+        const classification =
+          (useClassifier ? options.classify?.(msg) : undefined) ??
+          ({ source: "live", store: true } as const);
+        if (!classification.store) continue;
+        const stored = ingestMessage(deps, msg, classification.source);
+        options.onStored?.(msg, stored !== null, classification);
         // Fire-and-forget: a media outage must never stall ingestion.
-        if (stored) {
+        if (stored && classification.source === "live") {
           void downloadAudioIfEnabled(msg, stored, deps).catch(
             (err: unknown) => {
               deps.logger.error(
@@ -90,6 +111,11 @@ export function registerIngestion(sock: WASocket, deps: IngestDeps): void {
         );
       }
     }
+  };
+
+  sock.ev.on("messages.upsert", ({ messages, type }) => {
+    if (type !== "notify" && type !== "append") return;
+    ingestMessages(messages, true);
   });
 
   sock.ev.on("messages.update", (updates) => {
@@ -133,7 +159,13 @@ export function registerIngestion(sock: WASocket, deps: IngestDeps): void {
 
   sock.ev.on(
     "messaging-history.set",
-    ({ contacts = [], chats = [], lidPnMappings = [] }) => {
+    ({
+      contacts = [],
+      chats = [],
+      messages = [],
+      lidPnMappings = [],
+      syncType,
+    }) => {
       for (const mapping of lidPnMappings) {
         if (mapping.pn && mapping.lid) {
           persistLidMapping(deps, mapping.pn, mapping.lid);
@@ -144,6 +176,12 @@ export function registerIngestion(sock: WASocket, deps: IngestDeps): void {
       // even when no recent message has supplied a push name yet.
       persistChatMetadataList(deps, chats);
       persistContactMetadataList(deps, contacts);
+      // Baileys v7 carries reconnect catch-up and on-demand history in this
+      // event; it does not replay those rows through `messages.upsert`.
+      ingestMessages(
+        messages,
+        syncType === proto.HistorySync.HistorySyncType.ON_DEMAND,
+      );
     },
   );
 
@@ -321,12 +359,22 @@ function chatPasses(
   ctx: ChatContext,
   messageId: string | null,
 ): boolean {
-  const decision = chatAllowedAtSync(deps.config, ctx);
+  const aliases = listEquivalentJids(deps.db, deps.accountId, ctx.jid);
+  const blockedAlias = aliases.find((jid) =>
+    deps.config.filters.blockedChats.includes(jid),
+  );
+  const allowedAlias = aliases.find((jid) =>
+    deps.config.filters.allowedChats.includes(jid),
+  );
+  const decision = chatAllowedAtSync(deps.config, {
+    ...ctx,
+    jid: blockedAlias ?? allowedAlias ?? ctx.jid,
+  });
   if (!decision.store) {
     recordIgnored(deps, ctx.jid, messageId, decision.reason);
     return false;
   }
-  if (chatBlockedInDb(deps, ctx.jid)) {
+  if (aliases.some((jid) => chatBlockedInDb(deps, jid))) {
     recordIgnored(deps, ctx.jid, messageId, "chat-blocked-db");
     return false;
   }
@@ -360,6 +408,7 @@ function senderPasses(
 export function ingestMessage(
   deps: IngestDeps,
   msg: WAMessage,
+  ingestionSource: IngestionSource = "live",
 ): NormalizedMessage | null {
   const result = normalizeMessage(msg);
   if (result.action === "skip") {
@@ -371,6 +420,7 @@ export function ingestMessage(
     deps,
     result,
     rawJsonOf(deps.config, msg),
+    ingestionSource,
   );
   return stored && result.action === "store" ? result.message : null;
 }

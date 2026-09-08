@@ -152,6 +152,22 @@ export function resolveDirectoryJid(
   return alias?.canonical_jid ?? normalizeJid(jid);
 }
 
+/** Return every known JID for one directory identity. */
+export function listEquivalentJids(
+  db: Database,
+  accountId: string,
+  jid: string,
+): string[] {
+  const normalized = normalizeJid(jid);
+  if (!directoryTablesAvailable(db)) return [normalized];
+  const entity = getDirectoryEntityByJid(db, accountId, normalized);
+  if (!entity) return [normalized];
+  const aliases = listDirectoryAliases(db, accountId, entity.id).map(
+    (row) => row.alias_jid,
+  );
+  return aliases.includes(normalized) ? aliases : [normalized, ...aliases];
+}
+
 export function upsertDirectoryContact(
   db: Database,
   input: DirectoryContactInput,

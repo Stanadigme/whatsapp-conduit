@@ -8,6 +8,10 @@ import {
 } from "../baileys/relink.js";
 import { registerIngestion, type IngestDeps } from "../baileys/ingest.js";
 import { resyncBaileysDirectory } from "../baileys/directory.js";
+import {
+  BaileysHistoryTransport,
+  baileysTimestamp,
+} from "../baileys/history.js";
 import { normalizeJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
 import { upsertAccount } from "../db/queries.js";
@@ -97,6 +101,13 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     config,
     logger: log,
   };
+  const historyTransport = new BaileysHistoryTransport();
+  const history = new HistoryCoordinator({
+    db,
+    accountId: config.account.name,
+    transport: historyTransport,
+    logger: log,
+  });
 
   log.info(
     {
@@ -167,8 +178,26 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           }
           return { resynced: await runDirectoryResync() };
         }
-        // history.start — the Baileys adapter has no HistoryCoordinator.
-        throw new Error("history download requires transport: whatsmeow");
+        if (maintenanceIsActive(db, config.account.name)) {
+          throw new Error("a maintenance operation is already active");
+        }
+        const chatJid = normalizeJid(request.chat);
+        const chat = getChat(db, config.account.name, chatJid);
+        if (!chat || chat.is_blocked === 1 || chat.is_allowed !== 1) {
+          throw new Error("chat is not available");
+        }
+        if (
+          request.since < 0 ||
+          request.since > Math.floor(Date.now() / 1000)
+        ) {
+          throw new Error("since must not be in the future");
+        }
+        const result = await history.start(chatJid, request.since);
+        return {
+          jobId: result.job.id,
+          status: result.job.status,
+          reused: result.reused,
+        };
       },
     );
 
@@ -347,6 +376,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           log.info("connecting to WhatsApp");
         },
         onOpen(info) {
+          historyTransport.connected(info.selfJid ?? config.account.name);
           void runtimeStatus.update({
             connection: "connected",
             authLinked: true,
@@ -389,6 +419,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           }
         },
         onClose(info) {
+          historyTransport.disconnected();
           void runtimeStatus.update({
             connection: "disconnected",
             authLinked: !info.loggedOut,
@@ -404,7 +435,16 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           );
         },
         registerSocket(sock) {
-          registerIngestion(sock, ingestDeps);
+          historyTransport.attach(sock);
+          registerIngestion(sock, ingestDeps, {
+            classify: (message) =>
+              history.classifyMessage(
+                message.key.remoteJid ?? "",
+                baileysTimestamp(message.messageTimestamp),
+              ),
+            onStored: (_message, stored, classification) =>
+              history.onStoredResult(stored, classification),
+          });
         },
       },
     });
@@ -418,6 +458,8 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
         "control socket unavailable; the dashboard cannot trigger a resync",
       );
     });
+
+    history.recoverActive();
 
     connection.start().catch((err: unknown) => {
       log.error(

@@ -17,7 +17,7 @@ import type {
   HistoryTransport,
   TransportMessageEvent,
 } from "../transport/types.js";
-import { normalizeJid } from "../baileys/jid.js";
+import { listEquivalentJids, resolveDirectoryJid } from "../db/directory.js";
 import { nowSec } from "../util/time.js";
 
 export interface HistoryCapableTransport extends HistoryTransport {
@@ -154,16 +154,28 @@ export class HistoryCoordinator {
   }
 
   classify(event: TransportMessageEvent): IngestionEventClassification {
+    return this.classifyMessage(event.info.chat, event.info.timestamp);
+  }
+
+  /** Transport-neutral classification for adapters that do not use MessageInfo. */
+  classifyMessage(
+    chat: string,
+    timestamp: number,
+  ): IngestionEventClassification {
     const active = this.active;
     if (
       !active ||
       !active.requestInFlight ||
-      normalizeJid(event.info.chat) !== normalizeJid(active.chatJid)
+      resolveDirectoryJid(this.options.db, this.options.accountId, chat) !==
+        resolveDirectoryJid(
+          this.options.db,
+          this.options.accountId,
+          active.chatJid,
+        )
     ) {
       return { source: "live", store: true };
     }
 
-    const timestamp = event.info.timestamp;
     if (!Number.isFinite(timestamp) || timestamp > active.anchor.timestamp) {
       return { source: "live", store: true };
     }
@@ -178,6 +190,14 @@ export class HistoryCoordinator {
 
   onStored(
     _event: TransportMessageEvent,
+    stored: boolean,
+    classification: IngestionEventClassification,
+  ): void {
+    this.onStoredResult(stored, classification);
+  }
+
+  /** Record a successful storage operation without retaining transport payloads. */
+  onStoredResult(
     stored: boolean,
     classification: IngestionEventClassification,
   ): void {
@@ -238,7 +258,7 @@ export class HistoryCoordinator {
     try {
       const initialAnchor = this.resolveAnchor(initial);
       if (!initialAnchor) {
-        this.fail(jobId, "no_anchor");
+        this.complete(jobId, "no_local_anchor", false);
         return;
       }
       if (initialAnchor.timestamp <= initial.since_ts) {
@@ -314,7 +334,7 @@ export class HistoryCoordinator {
           next.id === anchor.id ||
           next.timestamp >= anchor.timestamp
         ) {
-          this.fail(jobId, "no_progress");
+          this.complete(jobId, "source_exhausted", false);
           return;
         }
         anchor = next;
@@ -354,25 +374,46 @@ export class HistoryCoordinator {
       job.anchor_timestamp !== null
     ) {
       return {
-        chat: job.chat_jid,
-        sender: job.anchor_sender_jid,
+        chat: resolveDirectoryJid(
+          this.options.db,
+          this.options.accountId,
+          job.chat_jid,
+        ),
+        sender: resolveDirectoryJid(
+          this.options.db,
+          this.options.accountId,
+          job.anchor_sender_jid,
+        ),
         id: job.anchor_message_id,
         timestamp: job.anchor_timestamp,
       };
     }
-    const row: HistoryAnchorRow | undefined = getHistoryAnchor(
+    const row: HistoryAnchorRow | undefined = listEquivalentJids(
       this.options.db,
       this.options.accountId,
       job.chat_jid,
-    );
+    )
+      .map((jid) =>
+        getHistoryAnchor(this.options.db, this.options.accountId, jid),
+      )
+      .filter((candidate): candidate is HistoryAnchorRow => Boolean(candidate))
+      .sort((left, right) => left.timestamp - right.timestamp)[0];
     if (!row) return null;
     const sender =
       row.sender_jid ??
       getAccount(this.options.db, this.options.accountId)?.self_jid;
     if (!sender) return null;
     return {
-      chat: row.chat_jid,
-      sender,
+      chat: resolveDirectoryJid(
+        this.options.db,
+        this.options.accountId,
+        job.chat_jid,
+      ),
+      sender: resolveDirectoryJid(
+        this.options.db,
+        this.options.accountId,
+        sender,
+      ),
       id: row.message_id,
       timestamp: row.timestamp,
     };
@@ -407,12 +448,16 @@ export class HistoryCoordinator {
     }
   }
 
-  private complete(jobId: string, reason: string): void {
+  private complete(
+    jobId: string,
+    reason: string,
+    coverageComplete = true,
+  ): void {
     updateHistoryJob(this.options.db, this.options.accountId, jobId, {
       status: "completed",
       phase: "done",
-      progressPercent: 100,
-      coverageComplete: true,
+      ...(coverageComplete ? { progressPercent: 100 } : {}),
+      coverageComplete,
       completionReason: reason,
       completedAt: nowSec(),
     });

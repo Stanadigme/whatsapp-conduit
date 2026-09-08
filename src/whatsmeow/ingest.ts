@@ -49,8 +49,7 @@ export function registerWhatsmeowIngestion(
       if (
         stored &&
         result.action === "store" &&
-        (classification.source === "live" ||
-          classification.source === "history") &&
+        classification.source === "live" &&
         transport instanceof WhatsmeowTransport
       ) {
         void downloadAudioIfEnabled(
