@@ -39,8 +39,9 @@ after Codex review before the next begins.
    two-phase `offsets commit`. Tests for allowed-only exports and offset
    advancement.
 6. **feat/service-and-docs** — systemd user unit + `service` commands,
-   graceful shutdown, `docs/security.md`, `docs/operations.md`,
-   `docs/schema.md`.
+   graceful shutdown, [docs/security.md](../docs/security.md),
+   [docs/operations.md](../docs/operations.md),
+   [docs/schema.md](../docs/schema.md).
 
 ## Safety invariants (tested, not just documented)
 

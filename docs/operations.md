@@ -17,7 +17,10 @@ sont pas explicitement autorisés.
 groupe ou un contact connu et peut être combiné avec `--json`. Sans sélecteur,
 les groupes joints et les contacts connus sont traités. Les événements live
 appliquent uniquement les métadonnées reçues et n’appellent aucun
-rafraîchissement réseau.
+rafraîchissement réseau par message. Avec Baileys, une passe d'annuaire est
+aussi lancée automatiquement à chaque connexion lorsque
+`baileys.resync_directory_on_connect` reste activé ; le dashboard peut demander
+une nouvelle passe à l'unique démon d'ingestion.
 
 Day-to-day running of `whatsapp-conduit`.
 
@@ -28,7 +31,7 @@ pnpm install
 pnpm build
 
 # 1. Create config, data dirs (0700), and the migrated SQLite DB.
-whatsapp-conduit init --data-dir /srv/agents-state/nicolai/whatsapp-conduit
+whatsapp-conduit init --data-dir <DATA_DIR>
 
 # 2. Link the account as a secondary device. Pairing code is the default;
 #    use --qr only as an explicit fallback.
@@ -143,12 +146,14 @@ interrupted before authentication completes, its provisional pairing
 credentials are cleared automatically; retry `link` without deleting an
 existing authenticated auth directory.
 
-Baileys logs are kept at `warn` by default. For a complete diagnosis of a
-protocol failure, set `logging.baileys_level: trace` and
-`logging.baileys_log_message_text: true` in the mounted config, repeat the
-command, and collect the output locally. This deliberately disables payload
-redaction for the Baileys logger.
+Baileys logs are kept at `warn` by default. For a protocol diagnosis, set
+`logging.baileys_level: trace` while keeping
+`logging.baileys_log_message_text: false`, repeat the command, and collect only
+the redacted output locally. Message payloads and pairing credentials must not
+be logged.
 
-The Baileys protocol version is pinned in the generated configuration. Update
-`baileys.version` deliberately when WhatsApp protocol compatibility requires
-it, then rebuild the same Docker image before retrying a link.
+By default, the daemon resolves the current Baileys protocol version at each
+connection and falls back to the configured `baileys.version` if that lookup
+fails. Set `baileys.pin_version: true` only for a deliberate reproducible or
+air-gapped run; update the fallback tuple and rebuild when compatibility
+requires it.

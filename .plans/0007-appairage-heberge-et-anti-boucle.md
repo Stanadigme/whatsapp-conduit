@@ -44,4 +44,5 @@ mais `whatsmeow_device` reste vide). Aggravé par :
 ## Hors périmètre
 
 Plomberie `whatsmeow.proxy_url` (variable d'env du sous-processus Go) — à
-vérifier empiriquement, suivi `backlog/ingestion.md`.
+vérifier empiriquement, suivi dans
+[backlog/ingestion.md](../../../backlog/ingestion.md).

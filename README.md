@@ -1,8 +1,18 @@
 # whatsapp-conduit
 
-> **A passive, observe-only WhatsApp conduit for personal agents: whatsmeow in, SQLite out — without turning your account into a bot.**
+> **A passive, observe-only WhatsApp conduit for personal agents: Baileys in, SQLite out — without turning your account into a bot.**
 
-`whatsapp-conduit` is a small, channel-specific bridge for one job: connect to a WhatsApp account through the linked-device protocol, listen to message events through [whatsmeow](https://github.com/tulir/whatsmeow) via `whatsmeow-node`, and persist a normalized local copy into SQLite. Baileys remains available as a temporary comparison transport.
+`whatsapp-conduit` is a small, channel-specific bridge for one job: connect to
+a WhatsApp account through the linked-device protocol, listen to message events
+through [Baileys](https://github.com/WhiskeySockets/Baileys), and persist a
+normalized local copy into SQLite. `whatsmeow` remains available as an
+experimental transport whose bundled protocol version cannot be refreshed.
+
+> **Document status.** This README retains the original product exploration,
+> sketches and milestone checklist as a historical design record. Unchecked
+> items below are not the current implementation status. Use
+> [operations](docs/operations.md), [security](docs/security.md), and the
+> [database schema](docs/schema.md) as the maintained references.
 
 It is **not** an AI agent.  
 It is **not** an open-loop tracker.  
@@ -12,9 +22,10 @@ It is **not** a browser automation harness.
 
 It is the boring, auditable ingestion layer that other tools can safely build on top of.
 
-Directory metadata is synchronized only by the explicit read-only command
+Directory metadata can be synchronized by the explicit read-only command
 `whatsapp-conduit directory sync [--groups] [--contacts] [--jid <jid>]
-[--json]`. The daemon never performs an automatic directory refresh.
+[--json]`. Baileys also performs a bounded refresh when it connects by default;
+the dashboard can request the same refresh from the sole ingestion daemon.
 
 ---
 
@@ -166,9 +177,9 @@ Create a dependable, inspectable, local WhatsApp → SQLite sync bridge for a pe
 
 ### Product goals
 
-- **Observe-only by default** — receive and store messages; do not reply.
-- **No read receipts by default** — do not call `sock.readMessages()` unless explicitly configured later.
-- **No online presence by default** — use Baileys configuration such as `markOnlineOnConnect: false`.
+- **Observe-only** — receive and store messages; do not reply.
+- **No read receipts** — never call `sock.readMessages()`.
+- **No online presence** — keep `markOnlineOnConnect: false`.
 - **No browser** — use Baileys’ WebSocket-based WhatsApp Web protocol client, not Puppeteer/Selenium/Chromium.
 - **SQLite-first** — durable local persistence with a simple schema and straightforward backups.
 - **CLI-first** — everything important can be linked, run, inspected, exported, and debugged from the terminal.
@@ -252,12 +263,12 @@ The first version should store everything locally. No cloud dashboard. No teleme
 
 ## Relationship to the transports
 
-`whatsmeow` is the primary WhatsApp Web protocol client, exposed to Node.js by
-`@whatsmeow-node/whatsmeow-node`. Baileys remains a temporary fallback and
-comparison path.
+[Baileys](https://github.com/WhiskeySockets/Baileys) is the primary WhatsApp
+Web protocol client. It resolves the current protocol version at connection
+time unless `baileys.pin_version` is explicitly enabled.
 
-[Baileys](https://github.com/WhiskeySockets/Baileys) is the former primary
-WhatsApp Web protocol client.
+`whatsmeow`, exposed to Node.js by `@whatsmeow-node/whatsmeow-node`, is retained
+as an experimental comparison transport.
 
 Baileys provides:
 
@@ -265,7 +276,7 @@ Baileys provides:
 - direct WebSocket communication with WhatsApp Web, without a browser
 - event emitters for messages, receipts, chats, contacts, groups, connection updates, and more
 - media download helpers
-- send APIs, which this project avoids by default
+- send APIs, which this project never calls
 
 This project provides the pieces Baileys deliberately does not try to be:
 
@@ -296,8 +307,8 @@ Important caveat: Baileys is unofficial and is not affiliated with WhatsApp. Use
               │ Linked Devices
               ▼
 ┌──────────────────────────┐
-│ whatsmeow Go client      │
-│ - QR auth via IPC        │
+│ Baileys client           │
+│ - linked-device auth     │
 │ - message events         │
 │ - reconnect lifecycle    │
 └─────────────┬────────────┘
@@ -420,13 +431,13 @@ whatsapp-conduit service logs
 Default config path:
 
 ```text
-~/.config/whatsapp-conduit/config.yaml
+<HOME_DIR>/.config/whatsapp-conduit/config.yaml
 ```
 
 Alternative explicit path:
 
 ```bash
-whatsapp-conduit --config /srv/agents-state/nicolai/whatsapp-conduit/config.yaml run
+whatsapp-conduit --config <CONFIG_PATH> run
 ```
 
 Example config:
@@ -434,13 +445,13 @@ Example config:
 ```yaml
 account:
   name: personal
-  description: "Nicolai's personal WhatsApp linked-device sync"
+  description: "Personal WhatsApp linked-device sync"
 
 paths:
-  data_dir: /srv/agents-state/nicolai/whatsapp-conduit
-  sqlite: /srv/agents-state/nicolai/whatsapp-conduit/whatsapp-conduit.db
-  auth_dir: /srv/agents-state/nicolai/whatsapp-conduit/auth
-  media_dir: /srv/agents-state/nicolai/whatsapp-conduit/media
+  data_dir: <DATA_DIR>
+  sqlite: <DATA_DIR>/whatsapp-conduit.db
+  auth_dir: <DATA_DIR>/auth
+  media_dir: <DATA_DIR>/media
 
 baileys:
   version: [2, 3000, 1033893291]
@@ -473,8 +484,8 @@ exports:
 
 logging:
   level: info
-  # Keep Baileys at warn by default; use debug/trace temporarily for protocol
-  # diagnostics (those records may contain authentication details).
+  # Keep Baileys at warn by default. Trace diagnostics must retain payload
+  # redaction and must never be shared without local review.
   baileys_level: warn
   baileys_log_message_text: false
   log_message_text: false
@@ -700,10 +711,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/whatsapp-conduit run --config /srv/agents-state/nicolai/whatsapp-conduit/config.yaml
+ExecStart=/usr/local/bin/whatsapp-conduit run --config <CONFIG_PATH>
 Restart=always
 RestartSec=10
-WorkingDirectory=/srv/agents-state/nicolai/whatsapp-conduit
+WorkingDirectory=<PACKAGE_ROOT>
 Environment=NODE_ENV=production
 
 [Install]
@@ -750,7 +761,7 @@ Hermes can then summarize, classify, or detect open loops outside this project.
 ### Simple backup
 
 ```bash
-sqlite3 /srv/agents-state/nicolai/whatsapp-conduit/whatsapp-conduit.db '.backup /backup/whatsapp-conduit-$(date +%F).db'
+sqlite3 <DATA_DIR>/whatsapp-conduit.db '.backup <BACKUP_DIR>/whatsapp-conduit-YYYY-MM-DD.db'
 ```
 
 ### Ad hoc inspection
@@ -831,11 +842,11 @@ Specify the first supported message types and how they map to `messages.text`, `
 
 These should be tested, not just documented:
 
-- MVP code never calls `sock.sendMessage()` from ingestion paths.
-- MVP code never calls `sock.readMessages()` unless a future explicit `mark_read` feature is enabled.
+- The code never calls `sock.sendMessage()`.
+- The code never calls `sock.readMessages()`.
 - `markOnlineOnConnect` defaults to `false`.
 - `syncFullHistory` defaults to `false`.
-- logs do not contain message text unless `logging.log_message_text: true`.
+- production and shared diagnostic logs do not contain message text.
 - exports include only allowed chats when `--allowed-only` is used.
 
 ### Acceptance criteria for MVP
@@ -852,7 +863,10 @@ The first useful version is done when:
 
 ---
 
-## Development plan
+## Historical development plan
+
+The checklist below records the initial plan. It is intentionally preserved for
+design history and must not be used as the current feature matrix.
 
 ### Milestone 0 — repository scaffold
 
@@ -1089,7 +1103,7 @@ pnpm install
 pnpm build
 pnpm link --global
 
-whatsapp-conduit init --data-dir /srv/agents-state/nicolai/whatsapp-conduit
+whatsapp-conduit init --data-dir <DATA_DIR>
 whatsapp-conduit link
 whatsapp-conduit run
 ```
@@ -1137,8 +1151,10 @@ Baileys itself is MIT-licensed. If this project remains a small utility intended
 
 MVP implemented. The observe-only bridge links a WhatsApp account, ingests and
 normalizes messages into SQLite idempotently, applies chat allow/block filters,
-and exposes CLI inspection, deterministic JSONL exports, and a read-only MCP
-stdio server for local consumers. A systemd user service wraps the daemon.
+and exposes CLI inspection, deterministic JSONL exports, a dashboard, a local
+transcription worker, and read-only MCP servers over stdio or Streamable HTTP.
+Baileys also supports bounded on-demand history through the sole ingestion
+socket. A systemd user service and Docker Compose packaging are provided.
 
 Quickstart:
 
@@ -1152,9 +1168,10 @@ whatsapp-conduit run
 See [`docs/operations.md`](docs/operations.md),
 [`docs/security.md`](docs/security.md), and [`docs/schema.md`](docs/schema.md).
 
-Implemented commands: `doctor`, `init`, `link`, `run`, `directory sync`, `mcp`,
-`status`, `chats list|show|allow|block`, `messages list`, `export`,
-`offsets commit|show`, `db migrate|check`, `service install|start|stop|restart|status|logs`.
+Implemented commands: `doctor`, `init`, `link`, `run`, `transcribe`,
+`directory sync`, `mcp`, `web`, `status`, `chats list|show|allow|block`,
+`messages list`, `export`, `offsets commit|show`, `config show|set`,
+`db migrate|check`, and `service install|status|logs|restart|stop`.
 
 Current working name:
 

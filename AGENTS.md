@@ -9,7 +9,7 @@ client.
 
 ## Core Rules
 
-- Read `README.md` before making changes.
+- Read [README.md](README.md) before making changes.
 - Keep the boundary clear: this project syncs and persists; intelligence,
   classification, and replies live in downstream tools (Domovoi/Hermes).
 - Ingestion behavior must be deterministic, auditable, and idempotent.
@@ -51,8 +51,9 @@ whatsapp-conduit must not:
 - Baileys as the primary WhatsApp transport, resolving the WA Web protocol
   version live at connect (`src/baileys/version.ts`) so it never rots into a
   `405` (ADR-0020). `whatsmeow-node` is retained as an experimental transport
-  (`transport: whatsmeow`): its bundled protocol version cannot be refreshed,
-  but it provides directory sync and MCP-driven history download.
+  (`transport: whatsmeow`): its bundled protocol version cannot be refreshed.
+  Baileys and whatsmeow both support directory refresh and MCP-driven bounded
+  history download; Baileys is the maintained operational path.
 - SQLite for durable local persistence; prefer `better-sqlite3` for simple
   synchronous writes.
 - A single CLI framework (e.g. `commander`, `cac`, or `clipanion`).

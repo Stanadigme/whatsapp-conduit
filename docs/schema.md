@@ -1,8 +1,9 @@
 # Database schema
 
 Small, migration-friendly SQLite schema. **All timestamps are epoch seconds.**
-Migrations live in `migrations/` and are tracked in `schema_migrations`; apply
-them with `whatsapp-conduit db migrate` and validate with `db check`.
+Migrations live in [`migrations/`](../migrations/) and are tracked in
+`schema_migrations`; apply them with `whatsapp-conduit db migrate` and validate
+with `db check`.
 
 Persistence is idempotent on each table's primary key. Partial replays (edits,
 deletes, late normalization) refresh only the fields they carry and never
@@ -24,9 +25,10 @@ connu ; le LID reste un alias.
 Cette table conserve les membres actifs et leur rôle (`member`, `admin` ou
 `superadmin`) avec les timestamps. Les anciennes tables d'annuaire restent
 des projections compatibles pour l'ingestion et les consommateurs existants.
-Les événements live appliquent uniquement les métadonnées reçues. Les appels
-`getJoinedGroups()`, `getGroupInfo()` et `getUserInfo()` sont réservés à la
-commande explicite `directory sync`.
+Les événements live appliquent uniquement les métadonnées reçues. Les
+rafraîchissements réseau restent bornés à une passe à chaque connexion Baileys,
+à une commande explicite `directory sync` ou à une demande du dashboard
+déléguée à l'unique démon d'ingestion.
 
 ### `accounts`
 One row per linked account. `id` is the configured `account.name`.
@@ -58,8 +60,10 @@ prevents one contact from being represented by two participant rows.
 ### `participant_aliases`
 
 PK `(account_id, alias_jid)`. Each known phone JID or LID points to exactly one
-canonical `participants.jid`. Existing participant/message references are
-merged when a phone JID becomes known.
+canonical `participants.jid`. Existing message rows keep the JID under which
+they were ingested; dashboard conversation reads, statistics, allowlist checks,
+and historical anchors resolve and aggregate the identity aliases instead of
+moving those rows.
 
 ### `group_members`
 
@@ -90,7 +94,9 @@ Indexed by `(account_id, chat_jid, timestamp)` and `(account_id, timestamp)`.
 ### `attachments`
 PK `(account_id, chat_jid, message_id, attachment_index)`. Media metadata
 (type, mime, filename, path, sha256, size). Media is **not** downloaded by
-default — these are metadata-only rows.
+default. When `privacy.store_media` is enabled, supported audio is downloaded
+asynchronously and the same row receives its local path and digest; other
+media remains metadata-only.
 
 ### `events`
 Append-only audit log (`id` autoincrement). Used for `ignored` markers
@@ -100,6 +106,32 @@ Append-only audit log (`id` autoincrement). Used for `ignored` markers
 PK `consumer_name`. `last_seen_event_id` stores the export **cursor** (a
 message rowid); `last_seen_timestamp` is informational. Both are preserved
 independently on a partial advance so `--since-last` can resume.
+
+### `history_jobs`
+
+Durable, one-at-a-time bounded history requests. The row stores the requested
+time range, current anchor, batch/message counters, coverage result and terminal
+reason. For a reconciled JID/LID identity, the coordinator finds the oldest
+local anchor across aliases and sends the canonical JID to Baileys.
+
+### `transcriptions` and `transcription_jobs`
+
+`transcriptions` stores the immutable engine output separately from an
+optional manual correction. `transcription_jobs` is the resumable work queue
+with attempt counters and terminal status. The current engine is
+`whisper-local`; lexicon version `0` denotes the absence of automatic lexical
+post-correction.
+
+### `maintenance_operations` and `maintenance_state`
+
+Durable dashboard maintenance requests and generation counters used to prevent
+a worker from restoring data after a reset or re-pairing operation.
+
+### `chat_message_stats`
+
+Materialized message/media counts and oldest/newest timestamps per exact chat
+JID, maintained by triggers. Conversation reads add the rows for every resolved
+JID/LID alias, avoiding a full scan of `messages`.
 
 ## Export cursor
 
