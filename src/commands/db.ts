@@ -1,3 +1,4 @@
+import { chmodSync, statSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { checkDatabase, type DbCheckResult } from "../db/check.js";
 import { openDb } from "../db/index.js";
@@ -85,4 +86,50 @@ export function runDbCheck(options: DbCommandOptions = {}): number {
   }
   process.stderr.write(`${lines.join("\n")}\n`);
   return 1;
+}
+
+export interface DbBackupOptions extends DbCommandOptions {
+  output: string;
+}
+
+export interface BackupReport {
+  database: string;
+  output: string;
+  sizeBytes: number;
+}
+
+/**
+ * Write a consistent snapshot of the database to `output`.
+ *
+ * Uses SQLite's online backup API rather than copying the file: with WAL
+ * journaling the `.db` alone is not a complete database, and copying it while
+ * writers are active yields a snapshot that may be missing committed data or
+ * be outright corrupt. The backup API cooperates with those writers instead,
+ * so ingestion never has to stop for a backup to be taken.
+ */
+export async function runDbBackup(
+  options: DbBackupOptions,
+): Promise<BackupReport> {
+  const config = loadConfig(resolveConfigPath(options));
+  const db = openDb(config.paths.sqlite, { migrate: false, readonly: true });
+  try {
+    await db.backup(options.output);
+    // Owner-only: the snapshot holds the same private messages as the source.
+    chmodSync(options.output, 0o600);
+    const report: BackupReport = {
+      database: config.paths.sqlite,
+      output: options.output,
+      sizeBytes: statSync(options.output).size,
+    };
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    } else {
+      process.stdout.write(
+        `Backed up to ${report.output} (${String(report.sizeBytes)} bytes).\n`,
+      );
+    }
+    return report;
+  } finally {
+    db.close();
+  }
 }

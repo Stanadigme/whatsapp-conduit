@@ -11,7 +11,7 @@ import {
 import { runConfigSet, runConfigShow } from "./commands/config.js";
 import { runWeb } from "./commands/web.js";
 import { runDirectorySync } from "./commands/directory.js";
-import { runDbCheck, runDbMigrate } from "./commands/db.js";
+import { runDbBackup, runDbCheck, runDbMigrate } from "./commands/db.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runExport } from "./commands/export.js";
 import { runInit } from "./commands/init.js";
@@ -457,6 +457,19 @@ export function buildProgram(): Command {
       const globals = program.opts<GlobalOptions>();
       const code = runDbCheck({ configPath: globals.config, json: opts.json });
       process.exitCode = code;
+    });
+
+  db.command("backup")
+    .description("write a consistent snapshot of the database")
+    .requiredOption("--output <path>", "destination file")
+    .option("--json", "emit machine-readable JSON")
+    .action(async (opts: { output: string; json?: boolean }) => {
+      const globals = program.opts<GlobalOptions>();
+      await runDbBackup({
+        configPath: globals.config,
+        output: opts.output,
+        json: opts.json,
+      });
     });
 
   return program;
