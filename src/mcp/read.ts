@@ -28,7 +28,10 @@ import {
   allowedChat,
   listMessages as readMessages,
   mcpMessageView,
+  messageRows,
   messageView,
+  resolvedMessageView,
+  type ResolvedMessageRow,
   transcriptFor,
   type MessageFilters,
   type McpMessageView,
@@ -309,34 +312,29 @@ export function messageContext(
     >("select m.*, m.rowid as rowid from messages m where m.account_id = ? and m.chat_jid = ? and m.message_id = ?")
     .get(ctx.accountId, chatJid, messageId);
   if (!center) throw new McpRequestError("message not found");
-  const beforeRows = ctx.db
-    .prepare<[string, string, number, number], MessageRow & { rowid: number }>(
-      `select m.*, m.rowid as rowid from messages m
-       join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
-       where m.account_id = ? and m.chat_jid = ? and c.is_allowed = 1
-         and m.rowid < ? order by m.rowid desc limit ?`,
-    )
-    .all(ctx.accountId, chatJid, center.rowid, assertWindow(before));
-  const afterRows = ctx.db
-    .prepare<[string, string, number, number], MessageRow & { rowid: number }>(
-      `select m.*, m.rowid as rowid from messages m
-       join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
-       where m.account_id = ? and m.chat_jid = ? and c.is_allowed = 1
-         and m.rowid > ? order by m.rowid asc limit ?`,
-    )
-    .all(ctx.accountId, chatJid, center.rowid, assertWindow(after));
+  const window = {
+    chat: chatJid,
+    center: center.rowid,
+  };
+  const beforeRows = messageRows(
+    ctx,
+    `where m.account_id = @accountId and m.chat_jid = @chat
+       and c.is_allowed = 1 and m.rowid < @center`,
+    window,
+    assertWindow(before),
+  );
+  const afterRows = messageRows(
+    ctx,
+    `where m.account_id = @accountId and m.chat_jid = @chat
+       and c.is_allowed = 1 and m.rowid > @center`,
+    window,
+    assertWindow(after),
+    "asc",
+  );
   return {
     before: beforeRows
       .reverse()
-      .map((row) =>
-        mcpMessageView(
-          messageView(
-            ctx,
-            row,
-            transcriptFor(ctx, row.chat_jid, row.message_id),
-          ),
-        ),
-      ),
+      .map((row) => mcpMessageView(resolvedMessageView(row))),
     message: mcpMessageView(
       messageView(
         ctx,
@@ -344,11 +342,7 @@ export function messageContext(
         transcriptFor(ctx, center.chat_jid, center.message_id),
       ),
     ),
-    after: afterRows.map((row) =>
-      mcpMessageView(
-        messageView(ctx, row, transcriptFor(ctx, row.chat_jid, row.message_id)),
-      ),
-    ),
+    after: afterRows.map((row) => mcpMessageView(resolvedMessageView(row))),
   };
 }
 
@@ -432,28 +426,18 @@ export function searchMessages(
     where.push("m.rowid < @cursorRowid");
     params.cursorRowid = cursor.rowid;
   }
-  const joinTranscriptions = hasTranscriptions
-    ? "left join transcriptions t on t.account_id = m.account_id and t.chat_jid = m.chat_jid and t.message_id = m.message_id"
-    : "";
-  const rows = ctx.db
-    .prepare(
-      `select m.*, m.rowid as rowid,
-          ${hasTranscriptions ? "(lower(coalesce(t.text_raw, '')) like lower(@like) or lower(coalesce(t.text_corrected, '')) like lower(@like))" : "0"} as matched_transcript
-       from messages m
-       join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
-       ${joinTranscriptions}
-       where ${where.join(" and ")}
-       order by m.rowid desc limit @limit`,
-    )
-    .all({ ...params, accountId: ctx.accountId, limit: limit + 1 }) as Array<
-    MessageRow & { rowid: number; matched_transcript: number }
-  >;
+  const rows = messageRows(
+    ctx,
+    `where ${where.join(" and ")}`,
+    params,
+    limit + 1,
+    "desc",
+    `${hasTranscriptions ? "(lower(coalesce(t.text_raw, '')) like lower(@like) or lower(coalesce(t.text_corrected, '')) like lower(@like))" : "0"} as matched_transcript`,
+  ) as Array<ResolvedMessageRow & { matched_transcript: number }>;
   const last = rows[limit - 1];
   return page(
     rows.map((row) => ({
-      ...mcpMessageView(
-        messageView(ctx, row, transcriptFor(ctx, row.chat_jid, row.message_id)),
-      ),
+      ...mcpMessageView(resolvedMessageView(row)),
       matchedTranscript: row.matched_transcript === 1,
     })),
     limit,

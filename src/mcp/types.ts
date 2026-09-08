@@ -82,24 +82,48 @@ export function page<T>(
   };
 }
 
+// Tables can only appear during migrations, never mid-life of an open
+// connection, so one sqlite_master lookup per connection and name is enough.
+// Mirrors `directoryTablesCache` in db/directory.ts, including its rule: a
+// `false` is never memoized, so a connection opened before migrations ran can
+// still observe the tables appearing.
+const schemaObjectCache = new WeakMap<Database, Set<string>>();
+
+function memoizedSchemaLookup(
+  db: Database,
+  key: string,
+  lookup: () => boolean,
+): boolean {
+  const known = schemaObjectCache.get(db);
+  if (known?.has(key)) return true;
+  if (!lookup()) return false;
+  if (known) known.add(key);
+  else schemaObjectCache.set(db, new Set([key]));
+  return true;
+}
+
 export function hasTable(db: Database, name: string): boolean {
-  return Boolean(
-    db
-      .prepare<
-        [string],
-        { name: string }
-      >("select name from sqlite_master where type = 'table' and name = ?")
-      .get(name),
+  return memoizedSchemaLookup(db, `table:${name}`, () =>
+    Boolean(
+      db
+        .prepare<
+          [string],
+          { name: string }
+        >("select name from sqlite_master where type = 'table' and name = ?")
+        .get(name),
+    ),
   );
 }
 
 export function hasVirtualTable(db: Database, name: string): boolean {
-  return Boolean(
-    db
-      .prepare<
-        [string],
-        { name: string }
-      >("select name from sqlite_master where name = ?")
-      .get(name),
+  return memoizedSchemaLookup(db, `object:${name}`, () =>
+    Boolean(
+      db
+        .prepare<
+          [string],
+          { name: string }
+        >("select name from sqlite_master where name = ?")
+        .get(name),
+    ),
   );
 }

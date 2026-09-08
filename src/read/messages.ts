@@ -98,6 +98,18 @@ export interface MessageFilters {
 }
 
 export function allowedChat(ctx: MessageReadContext, chatJid: string): ChatRow {
+  return allowedChatWithAliases(ctx, chatJid).row;
+}
+
+/**
+ * Same guard as `allowedChat`, returning the alias expansion it already had to
+ * compute. Callers that filter messages by chat need those aliases too, and
+ * resolving them twice was two wasted queries per page.
+ */
+function allowedChatWithAliases(
+  ctx: MessageReadContext,
+  chatJid: string,
+): { row: ChatRow; aliases: string[] } {
   const row = ctx.db
     .prepare<[string, string], ChatRow>(
       `select * from chats
@@ -122,7 +134,7 @@ export function allowedChat(ctx: MessageReadContext, chatJid: string): ChatRow {
   if (policy.allowed !== 1 || policy.blocked === 1) {
     throw new McpRequestError("chat is not available");
   }
-  return row;
+  return { row, aliases };
 }
 
 function participantName(
@@ -161,16 +173,21 @@ function participantName(
   );
 }
 
-export function messageView(
-  ctx: MessageReadContext,
+/**
+ * The projection itself, with the sender name already resolved. Both the
+ * per-row path (`messageView`) and the joined path (`resolvedMessageView`) go
+ * through here so a page and a single message can never diverge.
+ */
+function buildMessageView(
   row: MessageRow,
-  transcript?: TranscriptRow | null,
+  senderName: string | null,
+  transcript?: Pick<TranscriptRow, "text_raw" | "text_corrected"> | null,
 ): MessageView {
   return {
     chatJid: row.chat_jid,
     messageId: row.message_id,
     senderJid: row.sender_jid,
-    senderName: participantName(ctx, row.sender_jid),
+    senderName,
     fromMe: row.from_me === 1,
     timestamp: row.timestamp,
     receivedAt: row.received_at,
@@ -186,6 +203,18 @@ export function messageView(
     editedMessageId: row.edited_message_id,
     deletedAt: row.deleted_at,
   };
+}
+
+export function messageView(
+  ctx: MessageReadContext,
+  row: MessageRow,
+  transcript?: TranscriptRow | null,
+): MessageView {
+  return buildMessageView(
+    row,
+    participantName(ctx, row.sender_jid),
+    transcript,
+  );
 }
 
 export function transcriptFor(
@@ -206,21 +235,105 @@ export function transcriptFor(
   );
 }
 
-function messageRows(
+/**
+ * Sender name and transcript resolved in SQL rather than per row.
+ *
+ * Resolving them in JavaScript cost three to five queries per message, which
+ * SQLite hid but a remote database would not. The joins reproduce
+ * `participantName` exactly: canonical directory entity first, alias second —
+ * the same canonical-over-alias precedence `listDashboardChats` uses — then the
+ * `participants` fallback, which only applies when no entity matched at all
+ * (an entity always yields at least its canonical JID via
+ * `directoryDisplayName`).
+ *
+ * Every join must stay a LEFT JOIN: an inner join would silently drop messages
+ * whose sender has no directory entry.
+ */
+function resolvedMessageJoins(db: Database): {
+  joins: string;
+  senderName: string;
+} {
+  const directory = directoryTablesAvailable(db);
+  const entityName = (alias: string): string =>
+    `nullif(trim(${alias}.display_name), ''), nullif(trim(${alias}.verified_name), ''), ` +
+    `nullif(trim(${alias}.push_name), ''), nullif(trim(${alias}.name), ''), ` +
+    `nullif(trim(${alias}.canonical_jid), '')`;
+  const directoryJoins = directory
+    ? `left join directory_entities ec
+              on ec.account_id = m.account_id and ec.canonical_jid = m.sender_jid
+             and ec.entity_type = 'contact'
+       left join directory_aliases da
+              on da.account_id = m.account_id and da.alias_jid = m.sender_jid
+       left join directory_entities ea
+              on ea.id = da.entity_id and ea.entity_type = 'contact'`
+    : "";
+  // `participants` is only consulted when neither directory entity matched,
+  // mirroring the JavaScript fallback order.
+  const participantName =
+    "coalesce(nullif(p.display_name, ''), nullif(p.verified_name, ''), " +
+    "nullif(p.push_name, ''))";
+  const senderName = directory
+    ? `coalesce(${entityName("ec")}, ${entityName("ea")}, ${participantName})`
+    : participantName;
+  return {
+    joins: `${directoryJoins}
+       left join participants p
+              on p.account_id = m.account_id and p.jid = m.sender_jid`,
+    senderName,
+  };
+}
+
+/** Columns of the transcript join, in the shape `messageView` consumes. */
+const TRANSCRIPT_COLUMNS =
+  "t.text_raw as transcript_text_raw, t.text_corrected as transcript_text_corrected";
+
+const TRANSCRIPT_JOIN = `left join transcriptions t
+              on t.account_id = m.account_id and t.chat_jid = m.chat_jid
+             and t.message_id = m.message_id`;
+
+/** A message row carrying its sender name and transcript already resolved. */
+export type ResolvedMessageRow = MessageRow & {
+  rowid: number;
+  sender_name: string | null;
+  transcript_text_raw: string | null;
+  transcript_text_corrected: string | null;
+};
+
+export function messageRows(
   ctx: MessageReadContext,
   where: string,
   params: Record<string, unknown>,
   limit: number,
-): Array<MessageRow & { rowid: number }> {
+  order: "asc" | "desc" = "desc",
+  extraSelect = "",
+): ResolvedMessageRow[] {
+  const { joins, senderName } = resolvedMessageJoins(ctx.db);
+  const transcripts = hasTable(ctx.db, "transcriptions");
   return ctx.db
     .prepare(
-      `select m.*, m.rowid as rowid from messages m
+      `select m.*, m.rowid as rowid,
+              ${senderName} as sender_name,
+              ${transcripts ? TRANSCRIPT_COLUMNS : "null as transcript_text_raw, null as transcript_text_corrected"}
+              ${extraSelect ? `, ${extraSelect}` : ""}
+       from messages m
        join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
-       ${where} order by m.rowid desc limit @limit`,
+       ${joins}
+       ${transcripts ? TRANSCRIPT_JOIN : ""}
+       ${where} order by m.rowid ${order === "asc" ? "asc" : "desc"} limit @limit`,
     )
-    .all({ ...params, accountId: ctx.accountId, limit }) as Array<
-    MessageRow & { rowid: number }
-  >;
+    .all({
+      ...params,
+      accountId: ctx.accountId,
+      limit,
+    }) as ResolvedMessageRow[];
+}
+
+/** Build a view from a row whose sender name and transcript are already joined. */
+export function resolvedMessageView(row: ResolvedMessageRow): MessageView {
+  return buildMessageView(row, row.sender_name, {
+    text_raw: row.transcript_text_raw,
+    text_corrected: row.transcript_text_corrected,
+  });
 }
 
 export function listMessages(
@@ -244,8 +357,7 @@ export function listMessages(
   const where = ["m.account_id = @accountId"];
   const params: Record<string, unknown> = {};
   if (filters.chat) {
-    allowedChat(ctx, filters.chat);
-    const aliases = listEquivalentJids(ctx.db, ctx.accountId, filters.chat);
+    const { aliases } = allowedChatWithAliases(ctx, filters.chat);
     const placeholders = aliases.map((_, index) => `@chat${index}`);
     where.push(`m.chat_jid in (${placeholders.join(", ")})`);
     aliases.forEach((alias, index) => {
@@ -294,9 +406,7 @@ export function listMessages(
   );
   const last = rows[limit - 1];
   return page(
-    rows.map((row) =>
-      messageView(ctx, row, transcriptFor(ctx, row.chat_jid, row.message_id)),
-    ),
+    rows.map(resolvedMessageView),
     limit,
     last ? encodeCursor({ rowid: last.rowid }) : null,
   );
