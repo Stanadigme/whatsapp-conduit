@@ -1,6 +1,10 @@
 import { loadConfig } from "../config.js";
 import { openDb } from "../db/index.js";
-import { listMessages, type MessageRow } from "../db/queries.js";
+import { McpRequestError } from "../mcp/types.js";
+import {
+  listMessages,
+  type MessageView as ReadMessageView,
+} from "../read/messages.js";
 import { resolveConfigPath } from "../runtime.js";
 import { parseSinceSec } from "../util/time.js";
 
@@ -24,20 +28,29 @@ interface MessageView {
   deleted: boolean;
 }
 
-function toView(row: MessageRow): MessageView {
+function toView(row: ReadMessageView): MessageView {
   return {
-    chatJid: row.chat_jid,
-    messageId: row.message_id,
-    senderJid: row.sender_jid,
-    fromMe: row.from_me === 1,
+    chatJid: row.chatJid,
+    messageId: row.messageId,
+    senderJid: row.senderJid,
+    fromMe: row.fromMe,
     timestamp: row.timestamp,
-    messageType: row.message_type,
+    messageType: row.messageType,
     text: row.text,
-    hasMedia: row.has_media === 1,
-    deleted: row.deleted_at !== null,
+    hasMedia: row.hasMedia,
+    deleted: row.deletedAt !== null,
   };
 }
 
+/**
+ * Lists stored messages, allowed conversations only.
+ *
+ * This goes through the shared read path rather than querying `messages`
+ * directly: the allowlist is a SQL predicate repeated in every read, not a
+ * middleware, so a query written straight against the table silently bypasses
+ * it. Inspecting from a terminal is no reason to print conversations the
+ * account holder deliberately excluded from the processing scope.
+ */
 export function runMessagesList(options: MessagesListOptions = {}): void {
   const config = loadConfig(resolveConfigPath(options.configPath));
   const sinceTs =
@@ -45,12 +58,24 @@ export function runMessagesList(options: MessagesListOptions = {}): void {
 
   const db = openDb(config.paths.sqlite, { migrate: false, readonly: true });
   try {
-    const rows = listMessages(db, {
-      accountId: config.account.name,
-      chatJid: options.chat,
-      sinceTs,
-      limit: options.limit ?? 50,
-    }).map(toView);
+    let rows: MessageView[];
+    try {
+      rows = listMessages(
+        { db, accountId: config.account.name },
+        {
+          ...(options.chat !== undefined ? { chat: options.chat } : {}),
+          ...(sinceTs !== null ? { after: sinceTs } : {}),
+          limit: options.limit ?? 50,
+        },
+      ).items.map(toView);
+    } catch (error) {
+      if (error instanceof McpRequestError) {
+        process.stderr.write(`${error.message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
 
     if (options.json) {
       process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
