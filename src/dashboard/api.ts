@@ -345,22 +345,32 @@ export async function dashboardApi(
     }
   }
   if (url.pathname === "/api/chats" && request.method === "GET") {
+    const chats = listDashboardChats(context.db, context.accountId, {
+      query: url.searchParams.get("query") ?? undefined,
+      kind:
+        (url.searchParams.get("kind") as
+          | "contact"
+          | "group"
+          | "status"
+          | null) ?? undefined,
+      policy:
+        (url.searchParams.get("policy") as
+          | "allowed"
+          | "blocked"
+          | "discovered"
+          | null) ?? undefined,
+    });
+    // `include_groups: false` rejects group messages before the allowlist is
+    // ever consulted, so authorising a group from here would look like it
+    // worked and then never receive anything. Say so per chat.
+    const ingestionDisabled = (kind: string): boolean =>
+      (kind === "group" && !context.config.privacy.includeGroups) ||
+      (kind === "status" && !context.config.privacy.includeStatus);
     return json(
-      listDashboardChats(context.db, context.accountId, {
-        query: url.searchParams.get("query") ?? undefined,
-        kind:
-          (url.searchParams.get("kind") as
-            | "contact"
-            | "group"
-            | "status"
-            | null) ?? undefined,
-        policy:
-          (url.searchParams.get("policy") as
-            | "allowed"
-            | "blocked"
-            | "discovered"
-            | null) ?? undefined,
-      }),
+      chats.map((chat) => ({
+        ...chat,
+        ingestionDisabled: ingestionDisabled(chat.kind),
+      })),
     );
   }
   if (url.pathname.startsWith("/api/chats/") && request.method === "GET") {

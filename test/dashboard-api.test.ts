@@ -574,3 +574,66 @@ describe("local dashboard HTTP API", () => {
     expect(res.status).toBe(409);
   });
 });
+
+describe("group ingestion warning", () => {
+  async function chatsPayload(
+    includeGroups: boolean,
+  ): Promise<Array<{ jid: string; kind: string; ingestionDisabled: boolean }>> {
+    const dir = mkdtempSync(join(tmpdir(), "wac-dashboard-groups-"));
+    const config = resolveConfig(
+      { privacy: { include_groups: includeGroups } },
+      { dataDir: dir },
+    );
+    const token = ensureDashboardToken(config.web.tokenFile);
+    const db = openDb(":memory:", { migrate: true });
+    upsertAccount(db, { id: accountId });
+    upsertChat(db, { accountId, jid: chatJid, isGroup: true });
+    upsertChat(db, { accountId, jid: "33600000000@s.whatsapp.net" });
+    const dashboard = await createDashboardServer(config, {
+      db,
+      config,
+      configPath: join(dir, "config.yaml"),
+      models: new ModelDownloader(join(dir, "models")),
+      accountId,
+      pairing: { status: "disabled", qr: null, error: null },
+      startPairing: async () => undefined,
+      stopPairing: async () => undefined,
+    });
+    await new Promise<void>((resolve) =>
+      dashboard.server.listen(0, "127.0.0.1", resolve),
+    );
+    resources.push({
+      close: () => dashboard.server.close(),
+      remove: () => rmSync(dir, { recursive: true, force: true }),
+    });
+    const address = dashboard.server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const response = await rawDashboardRequest(
+      `http://127.0.0.1:${String(port)}/api/chats`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    expect(response.status).toBe(200);
+    return JSON.parse(response.body) as Array<{
+      jid: string;
+      kind: string;
+      ingestionDisabled: boolean;
+    }>;
+  }
+
+  it("flags a group as not ingested while include_groups is off", async () => {
+    // Authorising a group is a no-op while the sync filter rejects groups, and
+    // the dashboard used to give no hint of it: the operator would allow the
+    // chat and wait forever for messages that never arrive.
+    const chats = await chatsPayload(false);
+    expect(chats.find((c) => c.jid === chatJid)?.ingestionDisabled).toBe(true);
+    expect(
+      chats.find((c) => c.jid === "33600000000@s.whatsapp.net")
+        ?.ingestionDisabled,
+    ).toBe(false);
+  });
+
+  it("stops flagging groups once include_groups is on", async () => {
+    const chats = await chatsPayload(true);
+    expect(chats.find((c) => c.jid === chatJid)?.ingestionDisabled).toBe(false);
+  });
+});
