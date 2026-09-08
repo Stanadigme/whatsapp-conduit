@@ -159,6 +159,31 @@ describe("shared audio persistence", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("persists a non-audio attachment through the same bounded path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "conduit-media-"));
+    const { deps, stored } = setup(root, { privacy: { store_media: true } });
+    const fake = source(root, "image payload");
+
+    await persistAudioIfEnabled(
+      {
+        ...fake.source,
+        mediaType: "image",
+        mimeType: "image/jpeg",
+        fileName: "photo.jpg",
+      },
+      { ...stored, messageType: "image", durationS: null },
+      deps,
+    );
+
+    expect(getAttachment(deps.db, "personal", CHAT, "AUDIO1")).toMatchObject({
+      media_type: "image",
+      mime_type: "image/jpeg",
+      file_name: "photo.jpg",
+    });
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("collapses a concurrent duplicate delivery into one download", async () => {
     const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
     const { deps, stored } = setup(root, { privacy: { store_media: true } });

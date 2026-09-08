@@ -19,14 +19,26 @@ import type { IngestDeps } from "./ingest.js";
 /** Give up on a stalled media fetch rather than hold the slot forever. */
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 
-function audioNode(msg: WAMessage): Record<string, unknown> | null {
+function mediaNode(msg: WAMessage): {
+  mediaType: "audio" | "image" | "video" | "document" | "sticker";
+  node: Record<string, unknown>;
+} | null {
   // Unwrap ephemeral / view-once envelopes the same way normalization does,
   // otherwise a disappearing voice note looks like it carries no audio node.
   const content = normalizeMessageContent(msg.message);
-  const node = content?.audioMessage;
-  return typeof node === "object" && node !== null && !Array.isArray(node)
-    ? (node as Record<string, unknown>)
-    : null;
+  const candidates = [
+    ["audio", content?.audioMessage],
+    ["image", content?.imageMessage],
+    ["video", content?.videoMessage],
+    ["document", content?.documentMessage],
+    ["sticker", content?.stickerMessage],
+  ] as const;
+  for (const [mediaType, node] of candidates) {
+    if (typeof node === "object" && node !== null && !Array.isArray(node)) {
+      return { mediaType, node: node as Record<string, unknown> };
+    }
+  }
+  return null;
 }
 
 function stringField(
@@ -61,8 +73,9 @@ export async function downloadAudioIfEnabled(
   normalized: NormalizedMessage,
   deps: IngestDeps,
 ): Promise<void> {
-  const node = audioNode(msg);
-  if (!node) return;
+  const media = mediaNode(msg);
+  if (!media) return;
+  const { node } = media;
   // View-once audio is meant to disappear. Archiving it permanently is a
   // posture change nobody decided, so leave it alone.
   if (node.viewOnce === true) {
@@ -71,6 +84,7 @@ export async function downloadAudioIfEnabled(
   }
 
   const source: AudioSource = {
+    mediaType: media.mediaType,
     mimeType: stringField(node, "mimetype"),
     fileName: stringField(node, "fileName"),
     expectedBytes: toByteCount(node.fileLength),

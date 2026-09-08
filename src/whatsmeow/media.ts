@@ -8,13 +8,23 @@ import {
 import type { TransportMessageEvent } from "../transport/types.js";
 import type { WhatsmeowTransport } from "./transport.js";
 
-function audioNode(
-  event: TransportMessageEvent,
-): Record<string, unknown> | null {
-  const node = event.message.audioMessage;
-  return typeof node === "object" && node !== null && !Array.isArray(node)
-    ? (node as Record<string, unknown>)
-    : null;
+function mediaNode(event: TransportMessageEvent): {
+  mediaType: "audio" | "image" | "video" | "document" | "sticker";
+  node: Record<string, unknown>;
+} | null {
+  const candidates = [
+    ["audio", event.message.audioMessage],
+    ["image", event.message.imageMessage],
+    ["video", event.message.videoMessage],
+    ["document", event.message.documentMessage],
+    ["sticker", event.message.stickerMessage],
+  ] as const;
+  for (const [mediaType, node] of candidates) {
+    if (typeof node === "object" && node !== null && !Array.isArray(node)) {
+      return { mediaType, node: node as Record<string, unknown> };
+    }
+  }
+  return null;
 }
 
 function stringField(
@@ -38,13 +48,14 @@ export async function downloadAudioIfEnabled(
   normalized: NormalizedMessage,
   deps: IngestDeps,
 ): Promise<void> {
-  const node = audioNode(event);
-  if (!node) return;
+  const media = mediaNode(event);
+  if (!media) return;
 
   const source: AudioSource = {
-    mimeType: stringField(node, "mimetype"),
-    fileName: stringField(node, "fileName"),
-    expectedBytes: toByteCount(node.fileLength),
+    mediaType: media.mediaType,
+    mimeType: stringField(media.node, "mimetype"),
+    fileName: stringField(media.node, "fileName"),
+    expectedBytes: toByteCount(media.node.fileLength),
     fetch: () => transport.downloadAny(event.message),
   };
 

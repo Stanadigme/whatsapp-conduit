@@ -22,6 +22,8 @@ import type { NormalizedMessage } from "../ingest/types.js";
  * streams to one.
  */
 export interface AudioSource {
+  /** WhatsApp normalized media kind; defaults to audio for existing callers. */
+  mediaType?: "audio" | "image" | "video" | "document" | "sticker";
   mimeType: string | null;
   fileName: string | null;
   /** Declared size, when the message carries one. Checked before fetching. */
@@ -51,9 +53,10 @@ function extensionFor(source: AudioSource): string {
   const extension = source.fileName
     ? extname(source.fileName).toLowerCase()
     : "";
-  return extension && /^[.][a-z0-9]{1,8}$/.test(extension)
-    ? extension
-    : ".audio";
+  if (extension && /^[.][a-z0-9]{1,8}$/.test(extension)) return extension;
+  return source.mediaType === "audio" || source.mediaType === undefined
+    ? ".audio"
+    : ".bin";
 }
 
 async function removeTemp(path: string): Promise<void> {
@@ -91,9 +94,16 @@ export async function persistAudioIfEnabled(
   normalized: NormalizedMessage,
   deps: IngestDeps,
 ): Promise<void> {
-  if (!deps.config.privacy.storeMedia || normalized.messageType !== "audio")
+  const mediaType = source.mediaType ?? "audio";
+  if (
+    !deps.config.privacy.storeMedia ||
+    !new Set(["audio", "image", "video", "document", "sticker"]).has(
+      normalized.messageType,
+    )
+  )
     return;
   if (
+    mediaType === "audio" &&
     normalized.durationS !== null &&
     normalized.durationS > deps.config.media.maxAudioDurationS
   ) {
@@ -132,7 +142,7 @@ export async function persistAudioIfEnabled(
       accountId: deps.accountId,
       chatJid: normalized.chatJid,
       messageId: normalized.messageId,
-      mediaType: "audio",
+      mediaType,
       mimeType: source.mimeType,
       fileName: source.fileName,
     });
@@ -172,7 +182,7 @@ export async function persistAudioIfEnabled(
           accountId: deps.accountId,
           chatJid: normalized.chatJid,
           messageId: normalized.messageId,
-          mediaType: "audio",
+          mediaType,
           mimeType: source.mimeType,
           fileName: source.fileName,
           filePath: destination,
