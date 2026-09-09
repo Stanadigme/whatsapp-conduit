@@ -34,6 +34,13 @@ confirmée et conserve la première erreur avec les opérations suivantes. Il ne
 fait donc aucun appel réseau à lui seul ; l'adaptateur PostgreSQL/GCS sera son
 unique transport.
 
+Le premier adaptateur PostgreSQL est disponible : il exige mTLS, refuse les
+URL portant un mot de passe et écrit le snapshot `message.upsert` dans une
+transaction. Sa migration est
+[`0001_message_snapshots.sql`](../postgres-migrations/0001_message_snapshots.sql).
+Il n'est pas instancié par le daemon : la configuration cliente chiffrée, le
+runner de migrations distant, GCS et les autres opérations restent distincts.
+
 ## Garanties du contrat
 
 - Le texte et les identifiants WhatsApp sont dans la charge chiffrée, jamais
