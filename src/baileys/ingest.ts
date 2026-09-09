@@ -16,12 +16,14 @@ import {
 } from "../db/directory.js";
 import {
   getChat,
+  getMessage,
   insertEvent,
   upsertChat,
   upsertMessage,
   upsertParticipant,
   resolveParticipantJid,
 } from "../db/queries.js";
+import { enqueueOutbox } from "../db/outbox.js";
 import { nowSec } from "../util/time.js";
 import { isGroupJid, isStatusJid, normalizeJid, phoneFromJid } from "./jid.js";
 import { downloadAudioIfEnabled } from "./media.js";
@@ -40,6 +42,8 @@ export interface IngestDeps {
   accountId: string;
   config: Config;
   logger: Logger;
+  /** Present in the daemon; absent from isolated read-side helpers. */
+  outboxKey?: Buffer;
 }
 
 export interface IngestionEventClassification {
@@ -593,6 +597,7 @@ function persistStore(
       rawJson,
       ingestionSource,
     });
+    enqueueMessageSnapshot(deps, n.chatJid, n.messageId);
   });
   tx();
 }
@@ -617,6 +622,7 @@ function persistRevoke(
       messageId: targetId,
       deletedAt: nowSec(),
     });
+    enqueueMessageSnapshot(deps, chatJid, targetId);
   });
   tx();
 }
@@ -648,6 +654,7 @@ function persistEdit(
       text,
       editedMessageId: result.editId,
     });
+    enqueueMessageSnapshot(deps, result.chatJid, result.targetId);
     if (preserveRaw) {
       insertEvent(deps.db, {
         accountId: deps.accountId,
@@ -658,6 +665,29 @@ function persistEdit(
     }
   });
   tx();
+}
+
+/**
+ * Queue the post-write state, not a transient WhatsApp event. Replays coalesce
+ * on the natural message key, so the future forwarder receives its newest
+ * SQLite snapshot, including edits and revocations.
+ */
+function enqueueMessageSnapshot(
+  deps: IngestDeps,
+  chatJid: string,
+  messageId: string,
+): void {
+  if (!deps.outboxKey) return;
+  const message = getMessage(deps.db, deps.accountId, chatJid, messageId);
+  const chat = getChat(deps.db, deps.accountId, chatJid);
+  if (!message || !chat) {
+    throw new Error("outbox message snapshot is incomplete");
+  }
+  enqueueOutbox(deps.db, deps.outboxKey, {
+    operation: "message.upsert",
+    dedupeKey: `${deps.accountId}\u0000${chatJid}\u0000${messageId}`,
+    payload: { version: 1, chat, message },
+  });
 }
 
 function recordIgnored(

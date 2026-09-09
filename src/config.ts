@@ -24,6 +24,8 @@ export interface AccountConfig {
 export interface PathsConfig {
   dataDir: string;
   sqlite: string;
+  /** Owner-only AES key that encrypts transient outbox payloads. */
+  outboxKey: string;
   authDir: string;
   mediaDir: string;
   whatsmeowStore: string;
@@ -341,6 +343,11 @@ export function resolveConfig(
       pathsRaw.sqlite,
       join(dataDir, "whatsapp-conduit.db"),
     ),
+    outboxKey: resolvePath(
+      dataDir,
+      pathsRaw.outbox_key,
+      join(dataDir, "outbox.key"),
+    ),
     authDir: resolvePath(dataDir, pathsRaw.auth_dir, join(dataDir, "auth")),
     mediaDir: resolvePath(dataDir, pathsRaw.media_dir, join(dataDir, "media")),
     whatsmeowStore: resolvePath(
@@ -525,6 +532,7 @@ account:
 paths:
   data_dir: ${dataDir}
   sqlite: ${join(dataDir, "whatsapp-conduit.db")}
+  outbox_key: ${join(dataDir, "outbox.key")}
   auth_dir: ${join(dataDir, "auth")}
   media_dir: ${join(dataDir, "media")}
   whatsmeow_store: ${join(dataDir, "whatsmeow.db")}

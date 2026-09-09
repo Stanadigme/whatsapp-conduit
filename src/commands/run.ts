@@ -14,6 +14,7 @@ import {
 } from "../baileys/history.js";
 import { normalizeJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
+import { ensureOutboxKey } from "../db/outbox.js";
 import { upsertAccount } from "../db/queries.js";
 import { getChat } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
@@ -80,6 +81,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
 
   const sessionLock = acquireBaileysSessionLock(config.paths.authDir);
 
+  const outboxKey = ensureOutboxKey(config.paths.outboxKey);
   const db = openDb(config.paths.sqlite, { migrate: true });
 
   upsertAccount(db, {
@@ -100,6 +102,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     accountId: config.account.name,
     config,
     logger: log,
+    outboxKey,
   };
   const historyTransport = new BaileysHistoryTransport();
   const history = new HistoryCoordinator({
@@ -898,6 +901,7 @@ async function runWhatsmeow(
       accountId: config.account.name,
       config,
       logger: log,
+      outboxKey: ensureOutboxKey(config.paths.outboxKey),
     },
     {
       onEvent: () =>

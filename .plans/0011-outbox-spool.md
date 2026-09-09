@@ -6,7 +6,7 @@ Préserver l'atomicité synchrone de l'ingestion avant le port PostgreSQL : le
 chemin chaud ajoutera une opération durable à `outbox` dans la transaction
 SQLite, puis un forwarder asynchrone l'écrira dans la persistance du client.
 
-## Première tranche
+## Première tranche (livrée)
 
 1. Ajouter la migration
    [`0011_outbox.sql`](../migrations/0011_outbox.sql) : opérations ordonnées, clé de
@@ -17,9 +17,22 @@ SQLite, puis un forwarder asynchrone l'écrira dans la persistance du client.
 3. Couvrir le chiffrement, la déduplication, la reprise après lease et le fait
    qu'un acknowledgement soit la seule suppression possible.
 
-Cette tranche ne contacte aucun service distant et ne branche pas encore
-l'outbox sur le daemon : tant que le forwarder PostgreSQL/GCS n'existe pas,
-l'activer ferait seulement accumuler des messages dans SQLite.
+Cette tranche ne contacte aucun service distant.
+
+## Deuxième tranche (en cours)
+
+Le daemon crée la clé locale et écrit, dans la même transaction SQLite que
+l'ingestion, un instantané chiffré `message.upsert` après chaque création,
+édition ou révocation de message. Les relectures du même message coalescent sur
+sa clé naturelle. L'outbox est donc active sans dépendre du VPS client ; aucun
+forwarder réseau ne démarre encore tant que l'adaptateur PostgreSQL/GCS et sa
+configuration validée ne sont pas livrés.
+
+Le mécanisme de forwarder est également livré sans endpoint : il obtient un
+lease ordonné, appelle l'adaptateur injecté, acknowledge uniquement une écriture
+confirmée et conserve la première erreur avec les opérations suivantes. Il ne
+fait donc aucun appel réseau à lui seul ; l'adaptateur PostgreSQL/GCS sera son
+unique transport.
 
 ## Garanties du contrat
 
@@ -37,8 +50,9 @@ Le volume de l'instance reste le premier chiffrement au repos, exigé par
 ADR-0028. Une clé de fichier locale protège en plus la table contre une copie
 isolée de SQLite, mais ne remplace ni le volume chiffré ni une future gestion
 de secrets. La politique de saturation (taille, durée de panne et arrêt de
-l'ingestion) est ouverte : elle devra être décidée avant le branchement du
-daemon, jamais choisie implicitement par cette première tranche.
+l'ingestion) reste ouverte. Elle est explicitement différée pour avancer sur
+l'adaptateur de persistance ; aucune limite n'est choisie implicitement dans le
+code.
 
 ## Hors périmètre
 
