@@ -347,9 +347,9 @@ export function buildProgram(): Command {
     )
     .option("--timestamp <ts>", "optional epoch-seconds timestamp to record")
     .action(
-      (consumer: string, opts: { through: string; timestamp?: string }) => {
+      async (consumer: string, opts: { through: string; timestamp?: string }) => {
         const globals = program.opts<GlobalOptions>();
-        runOffsetsCommit(consumer, {
+        await runOffsetsCommit(consumer, {
           configPath: globals.config,
           through: parsePositiveInt("--through", opts.through),
           timestamp: opts.timestamp
@@ -363,9 +363,9 @@ export function buildProgram(): Command {
     .command("show <consumer>")
     .description("show a consumer's stored offset")
     .option("--json", "emit machine-readable JSON")
-    .action((consumer: string, opts: { json?: boolean }) => {
+    .action(async (consumer: string, opts: { json?: boolean }) => {
       const globals = program.opts<GlobalOptions>();
-      process.exitCode = runOffsetsShow(consumer, {
+      process.exitCode = await runOffsetsShow(consumer, {
         configPath: globals.config,
         json: opts.json,
       });

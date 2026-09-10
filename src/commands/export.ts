@@ -1,11 +1,10 @@
 import { loadConfig } from "../config.js";
 import { openDb } from "../db/index.js";
-import {
-  getConsumerOffset,
-  selectExportMessages,
-  setConsumerOffset,
-  type ExportRow,
-} from "../db/queries.js";
+import type { ExportRow } from "../db/queries.js";
+import { createPostgresPool } from "../db/postgres.js";
+import { createPostgresReader } from "../db/postgres-reader.js";
+import { createSqliteReader } from "../db/sqlite-reader.js";
+import type { ClientDataReader } from "../db/reader.js";
 import { loadRedactionSalt, redactJid } from "../privacy/redact.js";
 import { resolveConfigPath } from "../runtime.js";
 import { parseSinceSec } from "../util/time.js";
@@ -147,10 +146,25 @@ export async function runExport(
   // Allowed-only is the default privacy posture; --all opts out.
   const allowedOnly = !options.all;
 
-  const db = openDb(config.paths.sqlite, {
-    migrate: false,
-    readonly: !options.commit,
-  });
+  // No SQLite opened at all once PostgreSQL is configured (ADR-0033 phase 2):
+  // export has no SQLite read fallback, and --since-last's cursor moves to
+  // Postgres's own consumer_offsets table (postgres-migrations/0003) with it.
+  let reader: ClientDataReader;
+  let close: () => Promise<void>;
+  if (config.persistence.postgres) {
+    const pool = createPostgresPool(config.persistence.postgres);
+    reader = createPostgresReader(pool, config, config.account.name);
+    close = () => pool.end();
+  } else {
+    const db = openDb(config.paths.sqlite, {
+      migrate: false,
+      readonly: !options.commit,
+    });
+    reader = createSqliteReader(db, config, config.account.name);
+    close = async () => {
+      db.close();
+    };
+  }
 
   let stdoutFailed = false;
   const onStdoutError = (): void => {
@@ -162,11 +176,11 @@ export async function runExport(
     let afterRowid: number | null = null;
     if (options.sinceLast) {
       afterRowid =
-        getConsumerOffset(db, options.sinceLast)?.last_seen_event_id ?? null;
+        (await reader.getConsumerOffset(options.sinceLast))
+          ?.last_seen_event_id ?? null;
     }
 
-    const rows = selectExportMessages(db, {
-      accountId: config.account.name,
+    const rows = await reader.exportRows({
       sinceTs,
       afterRowid,
       allowedOnly,
@@ -207,7 +221,7 @@ export async function runExport(
       lastCursor !== null &&
       !stdoutFailed
     ) {
-      setConsumerOffset(db, options.sinceLast, {
+      await reader.setConsumerOffset(options.sinceLast, {
         lastSeenEventId: lastCursor,
         lastSeenTimestamp: lastTs,
       });
@@ -233,6 +247,6 @@ export async function runExport(
     return result;
   } finally {
     process.stdout.off("error", onStdoutError);
-    db.close();
+    await close();
   }
 }
