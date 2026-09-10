@@ -154,6 +154,26 @@ describe("MCP server", () => {
     db.close();
   });
 
+  it("refuses a message context once its chat is blocked, even if is_allowed lingers", async () => {
+    const { client, server, db } = await connectedClient();
+    // setChatBlocked always clears is_allowed, so this inconsistent state can
+    // only arise from a raw write bypassing it (a migration, an admin fix).
+    // messageContext's own window query now checks is_blocked too, not just
+    // the upstream allowedChat() guard, so it can't come to rely on that
+    // invariant holding.
+    db.prepare(
+      "update chats set is_blocked = 1 where account_id = 'personal' and jid = '33600000000@s.whatsapp.net'",
+    ).run();
+    const result = await client.callTool({
+      name: "wa_message_context",
+      arguments: { chat: "33600000000@s.whatsapp.net", messageId: "M1" },
+    });
+    expect(result.isError).toBe(true);
+    await client.close();
+    await server.close();
+    db.close();
+  });
+
   it("returns directory members and roles only for allowed groups", async () => {
     const { client, server, db } = await connectedClient();
     const result = await client.callTool({

@@ -319,14 +319,14 @@ export function messageContext(
   const beforeRows = messageRows(
     ctx,
     `where m.account_id = @accountId and m.chat_jid = @chat
-       and c.is_allowed = 1 and m.rowid < @center`,
+       and c.is_allowed = 1 and c.is_blocked = 0 and m.rowid < @center`,
     window,
     assertWindow(before),
   );
   const afterRows = messageRows(
     ctx,
     `where m.account_id = @accountId and m.chat_jid = @chat
-       and c.is_allowed = 1 and m.rowid > @center`,
+       and c.is_allowed = 1 and c.is_blocked = 0 and m.rowid > @center`,
     window,
     assertWindow(after),
     "asc",

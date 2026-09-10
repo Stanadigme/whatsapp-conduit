@@ -1043,40 +1043,6 @@ export function getMessage(
     .get(accountId, chatJid, messageId);
 }
 
-export interface ListMessagesOptions {
-  accountId?: string | undefined;
-  chatJid?: string | undefined;
-  sinceTs?: number | null | undefined;
-  limit?: number | undefined;
-}
-
-/** List messages, most-recent first (for human/JSON inspection). */
-export function listMessages(
-  db: Database,
-  opts: ListMessagesOptions = {},
-): MessageRow[] {
-  const where: string[] = [];
-  const params: Record<string, unknown> = {};
-  if (opts.accountId) {
-    where.push("account_id = @accountId");
-    params.accountId = opts.accountId;
-  }
-  if (opts.chatJid) {
-    where.push("chat_jid = @chatJid");
-    params.chatJid = opts.chatJid;
-  }
-  if (opts.sinceTs != null) {
-    where.push("timestamp >= @sinceTs");
-    params.sinceTs = opts.sinceTs;
-  }
-  if (opts.limit != null) params.limit = opts.limit;
-  const sql =
-    `select * from messages ${where.length ? `where ${where.join(" and ")}` : ""} ` +
-    `order by coalesce(timestamp, 0) desc, rowid desc ` +
-    `${opts.limit != null ? "limit @limit" : ""}`;
-  return db.prepare(sql).all(params) as MessageRow[];
-}
-
 export interface ExportRow extends MessageRow {
   /** Stable per-row cursor for resumable export (the message's SQLite rowid). */
   export_rowid: number;

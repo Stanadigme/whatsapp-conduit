@@ -48,7 +48,13 @@ export function toByteCount(value: unknown): number | null {
   return null;
 }
 
-function extensionFor(source: AudioSource): string {
+/**
+ * Extension for the content-addressed local filename `${sha256}${extension}`.
+ * Exported so a read path (Postgres carries no `file_path`, see
+ * postgres-migrations/0002) can recompute the same on-disk name from
+ * attachment metadata instead of trusting a stored path.
+ */
+export function extensionFor(source: AudioSource): string {
   const mime = source.mimeType ?? "";
   if (mime.includes("ogg") || mime.includes("opus")) return ".opus";
   const extension = source.fileName
