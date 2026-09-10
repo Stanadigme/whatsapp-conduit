@@ -11,8 +11,9 @@ import {
   upsertChat,
   upsertMessage,
 } from "../src/db/queries.js";
-import { createMcpContext } from "../src/mcp/server.js";
+import { createSqliteReader } from "../src/db/sqlite-reader.js";
 import { createMcpHttpServer } from "../src/mcp/http.js";
+import type { McpContext } from "../src/mcp/types.js";
 import { createLogger } from "../src/util/logging.js";
 
 const TOKEN = "t".repeat(48);
@@ -54,7 +55,12 @@ async function fixtureContext() {
     messageType: "text",
     text: "secret hidden chat",
   });
-  const context = await createMcpContext(db, config);
+  const context: McpContext = {
+    reader: createSqliteReader(db, config, "personal"),
+    config,
+    accountId: "personal",
+    runtimeStatus: null,
+  };
   return { context, db };
 }
 

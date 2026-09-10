@@ -1,11 +1,19 @@
 import type { Database } from "better-sqlite3";
 import type { Config } from "../config.js";
+import type { ClientDataReader } from "../db/reader.js";
 import type { RuntimeStatus } from "../runtime-status.js";
 
 export const MCP_MAX_PAGE_SIZE = 200;
 
+/**
+ * Context for the running MCP surface (server.ts, http.ts, history.ts):
+ * reader-backed, so it works identically whether the process is SQLite- or
+ * PostgreSQL-backed (ADR-0033 phase 2) — see db/reader.ts. Not to be confused
+ * with mcp/read.ts's SqliteMcpContext, which is the SQLite-specific shape
+ * used only internally by db/sqlite-reader.ts to reuse that file's queries.
+ */
 export interface McpContext {
-  db: Database;
+  reader: ClientDataReader;
   config: Config;
   accountId: string;
   runtimeStatus: RuntimeStatus | null;

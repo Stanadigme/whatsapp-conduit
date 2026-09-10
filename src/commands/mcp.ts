@@ -1,8 +1,11 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "../config.js";
-import { openDb } from "../db/index.js";
 import { resolveConfigPath, appLogger } from "../runtime.js";
-import { createMcpContext, createMcpServer } from "../mcp/server.js";
+import {
+  createMcpContext,
+  createMcpServer,
+  type McpContextHandle,
+} from "../mcp/server.js";
 import { startMcpHttpServer } from "../mcp/http.js";
 import { ensureTokenFile } from "../util/token-file.js";
 
@@ -19,19 +22,13 @@ export interface McpOptions {
 /** Run the read-only MCP server over stdin/stdout, or over Streamable HTTP. */
 export async function runMcp(options: McpOptions = {}): Promise<void> {
   const config = loadConfig(resolveConfigPath(options.configPath));
-  let db: ReturnType<typeof openDb>;
+  const handle: McpContextHandle = await createMcpContext(config);
   try {
-    db = openDb(config.paths.sqlite, { migrate: false, readonly: true });
-  } catch {
-    throw new Error("MCP database unavailable");
-  }
-  try {
-    const context = await createMcpContext(db, config);
     if (options.http) {
-      await runMcpHttp(context, config, options);
+      await runMcpHttp(handle.context, config, options);
       return;
     }
-    const server = createMcpServer(context);
+    const server = createMcpServer(handle.context);
     const transport = new StdioServerTransport();
     await server.connect(transport);
     await new Promise<void>((resolve) => {
@@ -39,12 +36,12 @@ export async function runMcp(options: McpOptions = {}): Promise<void> {
     });
     await server.close();
   } finally {
-    db.close();
+    await handle.close();
   }
 }
 
 async function runMcpHttp(
-  context: Awaited<ReturnType<typeof createMcpContext>>,
+  context: McpContextHandle["context"],
   config: ReturnType<typeof loadConfig>,
   options: McpOptions,
 ): Promise<void> {

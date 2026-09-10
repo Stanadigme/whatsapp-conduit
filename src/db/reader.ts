@@ -30,6 +30,8 @@ import type {
  */
 export interface ClientDataReader {
   health(): Promise<HealthCounts>;
+  /** Cheap enough for the pre-auth, unauthenticated MCP HTTP `/health` route. */
+  getSchemaVersion(): Promise<string | null>;
 
   getChat(chatJid: string): Promise<ChatRow | undefined>;
   listChats(opts: { limit?: number; cursor?: string }): Promise<Page<ChatView>>;

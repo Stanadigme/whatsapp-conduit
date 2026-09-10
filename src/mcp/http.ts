@@ -141,16 +141,10 @@ function sendJson(
  * no secret. Always `200` regardless of connection state (invariants 6-7,
  * ADR-0002 / docs/06).
  */
-function mcpHealth(ctx: McpContext): Record<string, unknown> {
+async function mcpHealth(ctx: McpContext): Promise<Record<string, unknown>> {
   let schema: string | null = null;
   try {
-    schema =
-      ctx.db
-        .prepare<
-          [],
-          { name: string }
-        >("select name from schema_migrations order by name desc limit 1")
-        .get()?.name ?? null;
+    schema = await ctx.reader.getSchemaVersion();
   } catch {
     schema = null;
   }
@@ -215,7 +209,7 @@ export function createMcpHttpServer(
     }
 
     if (url.pathname === "/health" && method === "GET") {
-      sendJson(response, 200, mcpHealth(ctx));
+      sendJson(response, 200, await mcpHealth(ctx));
       return;
     }
 

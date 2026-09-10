@@ -13,7 +13,9 @@ import {
   upsertMessage,
   upsertParticipant,
 } from "../src/db/queries.js";
-import { createMcpContext, createMcpServer } from "../src/mcp/server.js";
+import { createSqliteReader } from "../src/db/sqlite-reader.js";
+import { createMcpServer } from "../src/mcp/server.js";
+import type { McpContext } from "../src/mcp/types.js";
 
 async function connectedClient(
   historyControl?: (
@@ -87,8 +89,13 @@ async function connectedClient(
     text: "secret hidden chat",
   });
 
-  const context = await createMcpContext(db, config);
-  if (historyControl) context.historyControl = historyControl;
+  const context: McpContext = {
+    reader: createSqliteReader(db, config, "personal"),
+    config,
+    accountId: "personal",
+    runtimeStatus: null,
+    ...(historyControl ? { historyControl } : {}),
+  };
   const server = createMcpServer(context);
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();

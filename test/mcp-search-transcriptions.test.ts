@@ -11,11 +11,11 @@ import {
 } from "../src/db/queries.js";
 import {
   getTranscript,
-  listMessages,
   messageContext,
   searchMessages,
+  type SqliteMcpContext,
 } from "../src/mcp/read.js";
-import type { McpContext } from "../src/mcp/types.js";
+import { listMessages, mcpMessageView } from "../src/read/messages.js";
 
 const ACCOUNT = "personal";
 const CHAT = "33600000000@s.whatsapp.net";
@@ -25,7 +25,7 @@ const CHAT = "33600000000@s.whatsapp.net";
  * `transcriptions` table exists, which is why it is exercised here: it puts an
  * FTS `match` in an `or`, a shape SQLite refuses in some contexts.
  */
-function context(): McpContext {
+function context(): SqliteMcpContext {
   const db: Database = openDb(":memory:", { migrate: true });
   upsertAccount(db, { id: ACCOUNT });
   upsertChat(db, { accountId: ACCOUNT, jid: CHAT, name: "Contact" });
@@ -101,11 +101,11 @@ describe("search with transcriptions present", () => {
       )
       .run("il faut relancer la facture corrigée", "A1");
 
-    const list = listMessages(ctx, { chat: CHAT, kind: "audio" });
-    expect(list.items[0]).not.toHaveProperty("textRaw");
-    expect(list.items[0]?.textCorrected).toBe(
-      "il faut relancer la facture corrigée",
+    const list = listMessages(ctx, { chat: CHAT, kind: "audio" }).items.map(
+      mcpMessageView,
     );
+    expect(list[0]).not.toHaveProperty("textRaw");
+    expect(list[0]?.textCorrected).toBe("il faut relancer la facture corrigée");
 
     const search = searchMessages(ctx, "corrigée");
     expect(search.items[0]?.textCorrected).toBe(
@@ -125,7 +125,8 @@ describe("search with transcriptions present", () => {
       )
       .run("", "A1");
     expect(
-      listMessages(ctx, { chat: CHAT, kind: "audio" }).items[0]?.textCorrected,
+      mcpMessageView(listMessages(ctx, { chat: CHAT, kind: "audio" }).items[0]!)
+        .textCorrected,
     ).toBe("");
     ctx.db.close();
   });

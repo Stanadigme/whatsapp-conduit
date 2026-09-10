@@ -1,23 +1,26 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { Database } from "better-sqlite3";
+import type { Config } from "../config.js";
+import { toExportRecord, type ExportConfig } from "../commands/export.js";
+import { openDb } from "../db/index.js";
+import { createPostgresPool } from "../db/postgres.js";
+import { createPostgresReader } from "../db/postgres-reader.js";
+import { createSqliteReader } from "../db/sqlite-reader.js";
+import { loadRedactionSalt } from "../privacy/redact.js";
+import { mcpMessageView } from "../read/messages.js";
 import { readRuntimeStatus } from "../runtime-status.js";
 import { requestHistoryStart } from "../control/ipc.js";
+import { nowSec } from "../util/time.js";
 import { historyStatus, startHistoryDownload } from "./history.js";
 import {
-  chatStats,
-  exportMessages,
-  getMedia,
-  getTranscript,
-  health,
-  listChats,
-  listGroupParticipants,
-  listMessages,
-  messageContext,
-  searchContacts,
-  searchMessages,
-} from "./read.js";
-import type { McpContext } from "./types.js";
-import { McpRequestError } from "./types.js";
+  assertLimit,
+  decodeCursor,
+  encodeCursor,
+  page,
+  type McpContext,
+  McpRequestError,
+} from "./types.js";
 
 const readOnlyAnnotations = {
   readOnlyHint: true,
@@ -114,7 +117,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       description: "Return connection and local database health.",
       annotations: readOnlyAnnotations,
     },
-    async () => safeCall(ctx, maxChars, () => health(ctx)),
+    async () => safeCall(ctx, maxChars, () => buildHealthResponse(ctx)),
   );
 
   server.registerTool(
@@ -156,7 +159,12 @@ export function createMcpServer(ctx: McpContext): McpServer {
       annotations: readOnlyAnnotations,
     },
     async (args) =>
-      safeCall(ctx, maxChars, () => listChats(ctx, args.limit, args.cursor)),
+      safeCall(ctx, maxChars, () =>
+        ctx.reader.listChats({
+          ...(args.limit !== undefined ? { limit: args.limit } : {}),
+          ...(args.cursor !== undefined ? { cursor: args.cursor } : {}),
+        }),
+      ),
   );
 
   server.registerTool(
@@ -172,7 +180,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     },
     async (args) =>
       safeCall(ctx, maxChars, () =>
-        searchContacts(ctx, args.query, args.limit),
+        ctx.reader.searchContacts(args.query, args.limit),
       ),
   );
 
@@ -189,7 +197,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     },
     async (args) =>
       safeCall(ctx, maxChars, () =>
-        listGroupParticipants(ctx, args.chat, args.limit),
+        ctx.reader.listGroupParticipants(args.chat, args.limit),
       ),
   );
 
@@ -202,7 +210,11 @@ export function createMcpServer(ctx: McpContext): McpServer {
       inputSchema: z.object(messageInput),
       annotations: readOnlyAnnotations,
     },
-    async (args) => safeCall(ctx, maxChars, () => listMessages(ctx, args)),
+    async (args) =>
+      safeCall(ctx, maxChars, async () => {
+        const result = await ctx.reader.listMessages(args);
+        return { ...result, items: result.items.map(mcpMessageView) };
+      }),
   );
 
   server.registerTool(
@@ -218,7 +230,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
     },
     async (args) => {
       const { query, ...filters } = args;
-      return safeCall(ctx, maxChars, () => searchMessages(ctx, query, filters));
+      return safeCall(ctx, maxChars, () =>
+        ctx.reader.searchMessages(query, filters),
+      );
     },
   );
 
@@ -237,7 +251,12 @@ export function createMcpServer(ctx: McpContext): McpServer {
     },
     async (args) =>
       safeCall(ctx, maxChars, () =>
-        messageContext(ctx, args.chat, args.messageId, args.before, args.after),
+        ctx.reader.messageContext(
+          args.chat,
+          args.messageId,
+          args.before,
+          args.after,
+        ),
       ),
   );
 
@@ -255,7 +274,10 @@ export function createMcpServer(ctx: McpContext): McpServer {
     },
     async (args) =>
       safeCall(ctx, maxChars, async () => {
-        const result = getTranscript(ctx, args.chat, args.messageId);
+        const result = await ctx.reader.getTranscript(
+          args.chat,
+          args.messageId,
+        );
         if (!args.raw && "text_raw" in result) {
           if ("text_corrected" in result && result.text_corrected === null) {
             result.text_corrected = result.text_raw;
@@ -278,7 +300,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
       annotations: readOnlyAnnotations,
     },
     async (args) =>
-      safeCall(ctx, maxChars, () => getMedia(ctx, args.chat, args.messageId)),
+      safeCall(ctx, maxChars, () =>
+        ctx.reader.getMediaMetadata(args.chat, args.messageId),
+      ),
   );
 
   server.registerTool(
@@ -289,7 +313,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
       inputSchema: z.object({ chat: z.string().min(1) }),
       annotations: readOnlyAnnotations,
     },
-    async (args) => safeCall(ctx, maxChars, () => chatStats(ctx, args.chat)),
+    async (args) =>
+      safeCall(ctx, maxChars, () => ctx.reader.chatStats(args.chat)),
   );
 
   server.registerTool(
@@ -305,22 +330,102 @@ export function createMcpServer(ctx: McpContext): McpServer {
       }),
       annotations: readOnlyAnnotations,
     },
-    async (args) => safeCall(ctx, maxChars, () => exportMessages(ctx, args)),
+    async (args) => safeCall(ctx, maxChars, () => exportForMcp(ctx, args)),
   );
 
   return server;
 }
 
-export async function createMcpContext(
-  db: McpContext["db"],
-  config: McpContext["config"],
-): Promise<McpContext> {
+/** Combines the reader's database counts with process-level runtime state. */
+async function buildHealthResponse(
+  ctx: McpContext,
+): Promise<Record<string, unknown>> {
+  const counts = await ctx.reader.health();
+  const lastEventAt = ctx.runtimeStatus?.lastEventAt;
   return {
-    db,
+    transport: ctx.runtimeStatus?.transport ?? ctx.config.transport,
+    connection: ctx.runtimeStatus?.connection ?? "unknown",
+    authLinked: ctx.runtimeStatus?.authLinked ?? Boolean(counts.selfJid),
+    lastEventAt: lastEventAt ?? null,
+    lastEventAge:
+      lastEventAt === null || lastEventAt === undefined
+        ? null
+        : Math.max(0, nowSec() - lastEventAt),
+    lastMessageAt: counts.lastMessageAt,
+    account: counts.selfJid,
+    chats: counts.chats,
+    allowedChats: counts.allowedChats,
+    messages: counts.messages,
+    attachments: counts.attachments,
+    schema: counts.schemaVersion,
+    transcription: counts.transcriptionAvailable ? "available" : "unavailable",
+  };
+}
+
+/**
+ * wa_export's cursor pagination + record shaping, kept separate from
+ * db/reader.ts's exportRows (which returns raw, unshaped rows so the CLI
+ * export command can apply its own --since-last cursor instead).
+ */
+async function exportForMcp(
+  ctx: McpContext,
+  filters: {
+    after?: number | undefined;
+    before?: number | undefined;
+    limit?: number | undefined;
+    cursor?: string | undefined;
+  },
+): Promise<{ items: Record<string, unknown>[]; nextCursor: string | null }> {
+  const limit = assertLimit(filters.limit);
+  const cursor = decodeCursor<{ rowid: number }>(filters.cursor);
+  const rows = await ctx.reader.exportRows({
+    sinceTs: filters.after,
+    beforeTs: filters.before,
+    afterRowid: cursor?.rowid ?? null,
+    allowedOnly: true,
+    allowedChats: ctx.config.filters.allowedChats,
+    blockedChats: ctx.config.filters.blockedChats,
+    limit: limit + 1,
+  });
+  const cfg: ExportConfig = {
+    redactPhoneNumbers: ctx.config.exports.redactPhoneNumbers,
+    includeRawJson: false,
+    salt: ctx.config.exports.redactPhoneNumbers
+      ? loadRedactionSalt(ctx.config.paths.dataDir)
+      : "",
+  };
+  const items = rows.map(
+    (row) => toExportRecord(row, cfg) as unknown as Record<string, unknown>,
+  );
+  const last = rows[limit - 1];
+  return page(
+    items,
+    limit,
+    last ? encodeCursor({ rowid: last.export_rowid }) : null,
+  );
+}
+
+export interface McpContextHandle {
+  context: McpContext;
+  /** Closes whichever backend resource was opened (SQLite handle or Postgres pool). */
+  close: () => Promise<void>;
+}
+
+/**
+ * Builds the MCP context and picks its reader backend: PostgreSQL when
+ * `persistence.postgres` is configured (ADR-0033 phase 2, no SQLite opened
+ * at all in that case), SQLite otherwise — the same switch the write path
+ * already makes in postgres-projection.ts's configurePostgresProjection.
+ */
+export async function createMcpContext(
+  config: Config,
+): Promise<McpContextHandle> {
+  const accountId = config.account.name;
+  const shared = {
     config,
-    accountId: config.account.name,
+    accountId,
     runtimeStatus: await readRuntimeStatus(config.paths.runtimeStatus),
-    historyControl: (chat, since) =>
+    historyControl: (chat: string, since: number) =>
       requestHistoryStart(config.paths.controlSocket, { chat, since }).then(
         (result) => ({
           jobId: result.jobId ?? "",
@@ -328,5 +433,26 @@ export async function createMcpContext(
           reused: result.reused ?? false,
         }),
       ),
+  };
+
+  if (config.persistence.postgres) {
+    const pool = createPostgresPool(config.persistence.postgres);
+    return {
+      context: { reader: createPostgresReader(pool, config, accountId), ...shared },
+      close: () => pool.end(),
+    };
+  }
+
+  let db: Database;
+  try {
+    db = openDb(config.paths.sqlite, { migrate: false, readonly: true });
+  } catch {
+    throw new Error("MCP database unavailable");
+  }
+  return {
+    context: { reader: createSqliteReader(db, config, accountId), ...shared },
+    close: async () => {
+      db.close();
+    },
   };
 }

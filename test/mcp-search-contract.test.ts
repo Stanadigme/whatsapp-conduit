@@ -8,8 +8,7 @@ import {
   upsertChat,
   upsertMessage,
 } from "../src/db/queries.js";
-import { searchMessages } from "../src/mcp/read.js";
-import type { McpContext } from "../src/mcp/types.js";
+import { searchMessages, type SqliteMcpContext } from "../src/mcp/read.js";
 
 const ACCOUNT = "personal";
 const CHAT = "33600000000@s.whatsapp.net";
@@ -23,7 +22,7 @@ const CHAT = "33600000000@s.whatsapp.net";
  * whose `french_stem` would additionally match word stems and silently widen
  * every search. The `resum` case below is what catches that mistake.
  */
-function context(): McpContext {
+function context(): SqliteMcpContext {
   const db: Database = openDb(":memory:", { migrate: true });
   upsertAccount(db, { id: ACCOUNT });
   upsertChat(db, { accountId: ACCOUNT, jid: CHAT, name: "Contact" });
@@ -45,7 +44,7 @@ function context(): McpContext {
   };
 }
 
-function ids(ctx: McpContext, query: string): string[] {
+function ids(ctx: SqliteMcpContext, query: string): string[] {
   return searchMessages(ctx, query).items.map((item) => item.messageId);
 }
 

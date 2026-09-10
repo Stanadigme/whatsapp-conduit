@@ -69,6 +69,14 @@ export function createPostgresReader(
     return (await p.query<T>(sql, values)).rows;
   }
 
+  async function getSchemaVersion(): Promise<string | null> {
+    const schema = await one<{ name: string }>(
+      "select name from schema_migrations order by name desc limit 1",
+      [],
+    );
+    return schema?.name ?? null;
+  }
+
   /** All known JIDs for one identity (canonical + every alias); [jid] if none. */
   async function equivalentJids(jid: string): Promise<string[]> {
     const rows = await many<{ alias_jid: string }>(
@@ -207,10 +215,7 @@ export function createPostgresReader(
            (select self_jid from accounts where id = $1) as self_jid`,
         [accountId],
       );
-      const schema = await one<{ name: string }>(
-        "select name from schema_migrations order by name desc limit 1",
-        [],
-      );
+      const schemaVersion = await getSchemaVersion();
       return {
         selfJid: counts?.self_jid ?? null,
         chats: Number(counts?.chats ?? 0),
@@ -220,12 +225,14 @@ export function createPostgresReader(
         lastMessageAt: counts?.last_message_at === null || counts?.last_message_at === undefined
           ? null
           : Number(counts.last_message_at),
-        schemaVersion: schema?.name ?? null,
+        schemaVersion,
         // The transcriptions table is unconditional in the Postgres schema
         // (postgres-migrations/0002), unlike SQLite's optional migration.
         transcriptionAvailable: true,
       };
     },
+
+    getSchemaVersion,
 
     async getChat(chatJid) {
       const row = await one<PgChatRow>(

@@ -17,8 +17,8 @@ import {
   messageContext as sqliteMessageContext,
   searchContacts as sqliteSearchContacts,
   searchMessages as sqliteSearchMessages,
+  type SqliteMcpContext,
 } from "../mcp/read.js";
-import type { McpContext } from "../mcp/types.js";
 import { getChatMessageStats } from "../read/chat-stats.js";
 import {
   getMessage as sqliteGetMessage,
@@ -53,7 +53,7 @@ export function createSqliteReader(
   config: Config,
   accountId: string,
 ): ClientDataReader {
-  const ctx: McpContext = {
+  const ctx: SqliteMcpContext = {
     db,
     config,
     accountId,
@@ -74,6 +74,17 @@ export function createSqliteReader(
         schemaVersion: full.schema as string | null,
         transcriptionAvailable: full.transcription === "available",
       };
+    },
+
+    async getSchemaVersion() {
+      return (
+        db
+          .prepare<
+            [],
+            { name: string }
+          >("select name from schema_migrations order by name desc limit 1")
+          .get()?.name ?? null
+      );
     },
 
     async getChat(chatJid) {

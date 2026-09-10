@@ -1,4 +1,4 @@
-import { getChat, getHistoryJob, type HistoryJobRow } from "../db/queries.js";
+import type { HistoryJobRow } from "../db/queries.js";
 import { McpRequestError, type McpContext } from "./types.js";
 
 export interface HistoryJobView {
@@ -38,7 +38,7 @@ export async function startHistoryDownload(
   ) {
     throw new McpRequestError("since must be a valid past Unix timestamp");
   }
-  const chatRow = getChat(ctx.db, ctx.accountId, chat);
+  const chatRow = await ctx.reader.getChat(chat);
   if (!chatRow || chatRow.is_allowed !== 1 || chatRow.is_blocked !== 0) {
     throw new McpRequestError("chat is not available");
   }
@@ -55,9 +55,12 @@ export async function startHistoryDownload(
   }
 }
 
-export function historyStatus(ctx: McpContext, jobId: string): HistoryJobView {
+export async function historyStatus(
+  ctx: McpContext,
+  jobId: string,
+): Promise<HistoryJobView> {
   if (!jobId) throw new McpRequestError("jobId is required");
-  const row = getHistoryJob(ctx.db, ctx.accountId, jobId);
+  const row = await ctx.reader.getHistoryJob(jobId);
   if (!row) throw new McpRequestError("history job not found");
   return historyJobView(row);
 }

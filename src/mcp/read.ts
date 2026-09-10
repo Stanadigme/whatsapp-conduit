@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { toExportRecord, type ExportConfig } from "../commands/export.js";
+import type { Database } from "better-sqlite3";
+import type { Config } from "../config.js";
 import type {
   AttachmentRow,
   ChatRow,
@@ -21,12 +22,10 @@ import {
   countMessages,
   getAccount,
   latestMessageTimestamp,
-  selectExportMessages,
 } from "../db/queries.js";
-import { loadRedactionSalt } from "../privacy/redact.js";
+import type { RuntimeStatus } from "../runtime-status.js";
 import {
   allowedChat,
-  listMessages as readMessages,
   mcpMessageView,
   messageRows,
   messageView,
@@ -37,14 +36,6 @@ import {
   type McpMessageView,
 } from "../read/messages.js";
 import { nowSec } from "../util/time.js";
-
-export function listMessages(
-  ctx: McpContext,
-  filters: MessageFilters,
-): Page<McpMessageView> {
-  const result = readMessages(ctx, filters);
-  return { ...result, items: result.items.map(mcpMessageView) };
-}
 import {
   assertLimit,
   assertWindow,
@@ -52,11 +43,22 @@ import {
   encodeCursor,
   hasTable,
   hasVirtualTable,
-  type McpContext,
-  type Page,
   McpRequestError,
   page,
+  type Page,
 } from "./types.js";
+
+/**
+ * Context for this file's functions only — direct SQLite access. Used
+ * exclusively by db/sqlite-reader.ts to implement ClientDataReader; the
+ * running MCP server never sees this type (see mcp/types.ts's McpContext).
+ */
+export interface SqliteMcpContext {
+  db: Database;
+  config: Config;
+  accountId: string;
+  runtimeStatus: RuntimeStatus | null;
+}
 
 export interface ChatView {
   jid: string;
@@ -87,7 +89,7 @@ function chatView(
 }
 
 export function listChats(
-  ctx: McpContext,
+  ctx: SqliteMcpContext,
   limitInput?: number,
   cursorInput?: string,
 ): Page<ChatView> {
@@ -137,7 +139,7 @@ export function listChats(
 }
 
 export function searchContacts(
-  ctx: McpContext,
+  ctx: SqliteMcpContext,
   query: string,
   limitInput?: number,
 ): ParticipantRow[] {
@@ -221,7 +223,7 @@ export function searchContacts(
 }
 
 export function listGroupParticipants(
-  ctx: McpContext,
+  ctx: SqliteMcpContext,
   chatJid: string,
   limitInput?: number,
 ): GroupMemberRow[] {
@@ -294,7 +296,7 @@ export function listGroupParticipants(
 }
 
 export function messageContext(
-  ctx: McpContext,
+  ctx: SqliteMcpContext,
   chatJid: string,
   messageId: string,
   before: number,
@@ -353,7 +355,7 @@ function ftsQuery(query: string): string {
 }
 
 export function searchMessages(
-  ctx: McpContext,
+  ctx: SqliteMcpContext,
   query: string,
   filters: MessageFilters = {},
 ): Page<McpMessageView & { matchedTranscript: boolean }> {
@@ -446,7 +448,7 @@ export function searchMessages(
 }
 
 export function getMedia(
-  ctx: McpContext,
+  ctx: SqliteMcpContext,
   chatJid: string,
   messageId: string,
 ): Record<string, unknown> {
@@ -497,7 +499,7 @@ export function getMedia(
 }
 
 export function getTranscript(
-  ctx: McpContext,
+  ctx: SqliteMcpContext,
   chatJid: string,
   messageId: string,
 ): Record<string, unknown> {
@@ -535,7 +537,7 @@ export function getTranscript(
 }
 
 export function chatStats(
-  ctx: McpContext,
+  ctx: SqliteMcpContext,
   chatJid: string,
 ): Record<string, unknown> {
   const chat = allowedChat(ctx, chatJid);
@@ -566,7 +568,7 @@ export function chatStats(
   };
 }
 
-export function health(ctx: McpContext): Record<string, unknown> {
+export function health(ctx: SqliteMcpContext): Record<string, unknown> {
   const account = getAccount(ctx.db, ctx.accountId);
   const schema =
     ctx.db
@@ -602,47 +604,3 @@ export function health(ctx: McpContext): Record<string, unknown> {
   };
 }
 
-export function exportMessages(
-  ctx: McpContext,
-  filters: {
-    after?: number | undefined;
-    before?: number | undefined;
-    limit?: number | undefined;
-    cursor?: string | undefined;
-  },
-): Page<Record<string, unknown>> {
-  const limit = assertLimit(filters.limit);
-  const cursor = decodeCursor<{ rowid: number }>(filters.cursor);
-  const rows = selectExportMessages(ctx.db, {
-    accountId: ctx.accountId,
-    sinceTs: filters.after,
-    beforeTs: filters.before,
-    afterRowid: cursor?.rowid ?? null,
-    allowedOnly: true,
-    allowedChats: ctx.config.filters.allowedChats,
-    blockedChats: ctx.config.filters.blockedChats,
-    limit: limit + 1,
-  });
-  const cfg: ExportConfig = {
-    redactPhoneNumbers: ctx.config.exports.redactPhoneNumbers,
-    includeRawJson: false,
-    salt: ctx.config.exports.redactPhoneNumbers
-      ? loadRedactionSalt(ctx.config.paths.dataDir)
-      : "",
-  };
-  const items = rows.map(
-    (row) => toExportRecord(row, cfg) as unknown as Record<string, unknown>,
-  );
-  const last = rows[limit - 1];
-  return page(
-    items,
-    limit,
-    last ? encodeCursor({ rowid: last.export_rowid }) : null,
-  );
-}
-
-export function databaseAccount(ctx: McpContext): void {
-  if (!getAccount(ctx.db, ctx.accountId)) {
-    throw new McpRequestError("account is not available");
-  }
-}
