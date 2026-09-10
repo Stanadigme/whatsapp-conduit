@@ -19,7 +19,7 @@ import { runLink } from "./commands/link.js";
 import { runMcp } from "./commands/mcp.js";
 import { runMessagesList } from "./commands/messages.js";
 import { runOffsetsCommit, runOffsetsShow } from "./commands/offsets.js";
-import { runPostgresMigrate } from "./commands/postgres.js";
+import { runPostgresImport, runPostgresMigrate } from "./commands/postgres.js";
 import { runRun } from "./commands/run.js";
 import {
   runServiceControl,
@@ -489,6 +489,17 @@ export function buildProgram(): Command {
     .action(async (opts: { json?: boolean }) => {
       const globals = program.opts<GlobalOptions>();
       await runPostgresMigrate({ configPath: globals.config, json: opts.json });
+    });
+
+  postgres
+    .command("import")
+    .description(
+      "backfill SQLite's existing data into the client database, before switching reads to it",
+    )
+    .option("--json", "emit machine-readable JSON")
+    .action(async (opts: { json?: boolean }) => {
+      const globals = program.opts<GlobalOptions>();
+      await runPostgresImport({ configPath: globals.config, json: opts.json });
     });
 
   return program;
