@@ -19,9 +19,9 @@ SQLite, puis un forwarder asynchrone l'écrira dans la persistance du client.
 
 Cette tranche ne contacte aucun service distant.
 
-## Deuxième tranche (en cours)
+## Deuxième tranche — reportée à la bêta
 
-Le daemon crée la clé locale et écrit, dans la même transaction SQLite que
+Le daemon crée déjà la clé locale et écrit, dans la même transaction SQLite que
 l'ingestion, un instantané chiffré `message.upsert` après chaque création,
 édition ou révocation de message. Les relectures du même message coalescent sur
 sa clé naturelle. L'outbox est donc active sans dépendre du VPS client ; aucun
@@ -38,8 +38,10 @@ Le premier adaptateur PostgreSQL est disponible : il exige mTLS, refuse les
 URL portant un mot de passe et écrit le snapshot `message.upsert` dans une
 transaction. Sa migration est
 [`0001_message_snapshots.sql`](../postgres-migrations/0001_message_snapshots.sql).
-Il n'est pas instancié par le daemon : la configuration cliente chiffrée, le
-runner de migrations distant, GCS et les autres opérations restent distincts.
+Il n'est pas instancié par le daemon. L'[ADR-0033](../../../decisions/ADR-0033-alpha-hybride-direct-postgresql-gcs.md)
+réserve l’activation de cet adaptateur mTLS, la configuration cliente chiffrée,
+le runner de migrations distant, GCS et les autres opérations au profil robuste
+de bêta.
 
 ## Garanties du contrat
 
