@@ -112,6 +112,8 @@ describe.skipIf(!url)("PostgreSQL contract", () => {
     ).toEqual([
       { name: "0001_message_snapshots.sql" },
       { name: "0002_alpha_projection.sql" },
+      { name: "0003_export_offsets.sql" },
+      { name: "0004_message_search.sql" },
     ]);
   });
 
@@ -238,6 +240,62 @@ describe.skipIf(!url)("PostgreSQL contract", () => {
     expect(job.rows).toEqual([
       { id: "job-1", status: "queued", coverage_complete: false },
     ]);
+  });
+
+  it("stores and advances a consumer offset", async () => {
+    await pool!.query(
+      `insert into consumer_offsets (consumer_name, last_seen_event_id, updated_at)
+       values ('export', 41, 1000)`,
+    );
+    await pool!.query(
+      `insert into consumer_offsets (consumer_name, last_seen_event_id, updated_at)
+       values ('export', 42, 1001)
+       on conflict (consumer_name) do update set
+         last_seen_event_id = excluded.last_seen_event_id,
+         updated_at = excluded.updated_at`,
+    );
+    const row = await pool!.query<{ last_seen_event_id: string }>(
+      "select last_seen_event_id from consumer_offsets where consumer_name = 'export'",
+    );
+    expect(Number(row.rows[0]?.last_seen_event_id)).toBe(42);
+  });
+
+  it("matches message and transcript search_vector across accents, case, and correction precedence", async () => {
+    ingestMessage(deps(db), message("M1", "Réunion projet demain"));
+    ingestMessage(deps(db), message("M2", "note vocale"));
+    await flushPostgresProjection();
+    upsertTranscriptionJob(db, {
+      accountId: "personal",
+      chatJid: "c@s.whatsapp.net",
+      messageId: "M2",
+      status: "done",
+      attempts: 1,
+    });
+    insertTranscription(db, {
+      accountId: "personal",
+      chatJid: "c@s.whatsapp.net",
+      messageId: "M2",
+      textRaw: "sortie brute",
+      engine: "whisper-local",
+    });
+    await flushPostgresProjection();
+    await pool!.query(
+      "update transcriptions set text_corrected = 'sortie corrigee' where message_id = 'M2'",
+    );
+
+    const messageHit = await pool!.query(
+      "select message_id from messages where search_vector @@ websearch_to_tsquery('simple', immutable_unaccent('reunion'))",
+    );
+    expect(messageHit.rows).toEqual([{ message_id: "M1" }]);
+
+    const transcriptHit = await pool!.query(
+      "select message_id from transcriptions where search_vector @@ websearch_to_tsquery('simple', immutable_unaccent('corrigee'))",
+    );
+    expect(transcriptHit.rows).toEqual([{ message_id: "M2" }]);
+    const rawMiss = await pool!.query(
+      "select message_id from transcriptions where search_vector @@ websearch_to_tsquery('simple', immutable_unaccent('brute'))",
+    );
+    expect(rawMiss.rows).toEqual([]);
   });
 
   it("enforces the message foreign key rather than inventing a chat", async () => {
