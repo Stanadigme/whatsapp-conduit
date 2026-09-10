@@ -155,7 +155,10 @@ describe("PostgreSQL pool", () => {
     const options = pool.options as unknown as {
       ssl: { ca: string; rejectUnauthorized: boolean };
       password: string;
-      connectionString: string;
+      host: string;
+      port: number;
+      user: string;
+      database: string;
       connectionTimeoutMillis: number;
     };
     expect(options.ssl).toMatchObject({
@@ -163,7 +166,11 @@ describe("PostgreSQL pool", () => {
       rejectUnauthorized: true,
     });
     expect(options.password).toBe("value");
-    expect(options.connectionString).not.toContain("value");
+    expect(options).not.toHaveProperty("connectionString");
+    expect(options.host).toBe("db.example.net");
+    expect(options.port).toBe(5432);
+    expect(options.user).toBe("conduit");
+    expect(options.database).toBe("conduit");
     expect(options.connectionTimeoutMillis).toBe(5_000);
   });
 });

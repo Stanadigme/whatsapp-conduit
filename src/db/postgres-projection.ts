@@ -437,6 +437,14 @@ export async function flushPostgresProjection(): Promise<void> {
   await active?.flush();
 }
 
+/** Drain the projection while its SQLite source is still open. */
+export async function closeDbAfterPostgresProjection(
+  db: Database,
+): Promise<void> {
+  await flushPostgresProjection();
+  db.close();
+}
+
 export async function shutdownPostgresProjection(): Promise<void> {
   const projection = active;
   if (!projection) return;

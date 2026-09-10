@@ -15,8 +15,8 @@ import {
 } from "../db/directory.js";
 import { resolveConfigPath } from "../runtime.js";
 import {
+  closeDbAfterPostgresProjection,
   configurePostgresProjection,
-  flushPostgresProjection,
 } from "../db/postgres-projection.js";
 import { appLogger } from "../runtime.js";
 
@@ -192,8 +192,6 @@ async function setPolicy(
     }
     return 0;
   } finally {
-    // Drain before closing: a queued projection re-reads SQLite when it runs.
-    await flushPostgresProjection();
-    db.close();
+    await closeDbAfterPostgresProjection(db);
   }
 }

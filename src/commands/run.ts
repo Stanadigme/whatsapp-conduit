@@ -16,6 +16,7 @@ import { normalizeJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
 import { ensureOutboxKey } from "../db/outbox.js";
 import {
+  closeDbAfterPostgresProjection,
   configurePostgresProjection,
   postgresProjectionEnabled,
 } from "../db/postgres-projection.js";
@@ -312,18 +313,20 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
       clearInterval(heartbeat);
       void runtimeStatus.update({ connection: "disconnected" });
       pairingAbort?.abort();
-      void connection.stop();
-      void control.close().catch(() => undefined);
-      sessionLock.release();
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
-      try {
-        db.close();
-      } catch {
-        // best-effort
-      }
-      if (code !== 0) process.exitCode = code;
-      resolve();
+      void (async () => {
+        await connection.stop().catch(() => undefined);
+        await control.close().catch(() => undefined);
+        try {
+          await closeDbAfterPostgresProjection(db);
+        } catch {
+          // best-effort
+        }
+        sessionLock.release();
+        if (code !== 0) process.exitCode = code;
+        resolve();
+      })();
     };
     const onSignal = (): void => shutdown(0);
 
@@ -697,6 +700,7 @@ async function runWhatsmeow(
     return;
   }
 
+  configurePostgresProjection(config, log);
   const db = openDb(config.paths.sqlite, { migrate: true });
   upsertAccount(db, {
     id: config.account.name,
@@ -952,12 +956,10 @@ async function runWhatsmeow(
       void control
         .close()
         .finally(() => transport.stop())
+        .finally(() =>
+          closeDbAfterPostgresProjection(db).catch(() => undefined),
+        )
         .finally(() => {
-          try {
-            db.close();
-          } catch {
-            // best-effort
-          }
           lock.release();
           if (code !== 0) process.exitCode = code;
           resolve();

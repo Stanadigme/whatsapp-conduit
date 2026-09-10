@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { openDb } from "../db/index.js";
-import { configurePostgresProjection } from "../db/postgres-projection.js";
+import {
+  closeDbAfterPostgresProjection,
+  configurePostgresProjection,
+} from "../db/postgres-projection.js";
 import { appLogger, resolveConfigPath } from "../runtime.js";
 import { createSttAdapter } from "../stt/index.js";
 import { runTranscribeLoop, transcribeOnce } from "../stt/worker.js";
@@ -94,6 +97,6 @@ export async function runTranscribe(
       process.off("SIGTERM", stop);
     }
   } finally {
-    db.close();
+    await closeDbAfterPostgresProjection(db);
   }
 }

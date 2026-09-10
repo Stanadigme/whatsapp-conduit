@@ -52,8 +52,21 @@ export function loadPostgresSecrets(
  */
 export function createPostgresPool(config: PostgresPersistenceConfig): Pool {
   const secrets = loadPostgresSecrets(config);
+  const endpoint = new URL(config.url);
+  const host = endpoint.hostname.startsWith("[")
+    ? endpoint.hostname.slice(1, -1)
+    : endpoint.hostname;
   return new Pool({
-    connectionString: config.url,
+    // pg lets connectionString override every sibling option, including the
+    // owner-only password read above. Decompose the already-validated URL so
+    // the password never needs to appear in it.
+    host,
+    port: endpoint.port ? Number(endpoint.port) : undefined,
+    user: endpoint.username ? decodeURIComponent(endpoint.username) : undefined,
+    database:
+      endpoint.pathname.length > 1
+        ? decodeURIComponent(endpoint.pathname.slice(1))
+        : undefined,
     password: secrets.password,
     ssl: { ca: secrets.ca, rejectUnauthorized: true },
     // One connection: projections are serial by design, and the pilot runs a

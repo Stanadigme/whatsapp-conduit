@@ -2,8 +2,8 @@ import { existsSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { openDb } from "../db/index.js";
 import {
+  closeDbAfterPostgresProjection,
   configurePostgresProjection,
-  flushPostgresProjection,
 } from "../db/postgres-projection.js";
 import { upsertAccount } from "../db/queries.js";
 import { appLogger, resolveConfigPath } from "../runtime.js";
@@ -87,9 +87,7 @@ export async function runDirectorySync(
     }
   } finally {
     await transport.stop().catch(() => undefined);
-    // Drain before closing: a queued projection re-reads SQLite when it runs.
-    await flushPostgresProjection();
-    db.close();
+    await closeDbAfterPostgresProjection(db);
   }
 }
 

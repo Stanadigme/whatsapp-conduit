@@ -14,6 +14,7 @@ import {
   upsertAttachment,
 } from "../src/db/queries.js";
 import {
+  closeDbAfterPostgresProjection,
   flushPostgresProjection,
   shutdownPostgresProjection,
   startPostgresProjection,
@@ -124,6 +125,18 @@ afterEach(async () => {
 });
 
 describe("direct PostgreSQL projection", () => {
+  it("drains the projection before closing its SQLite source", async () => {
+    const pool = new FakePool();
+    startPostgresProjection(pool, captureLogger().logger);
+    const db = seededDb();
+
+    ingestMessage(ingestDeps(db, false), message("closing"));
+    await closeDbAfterPostgresProjection(db);
+
+    expect(pool.tables()).toContain("messages");
+    expect(() => db.prepare("select 1")).toThrow();
+  });
+
   it("projects a whole message without interpolating its text into SQL", async () => {
     const pool = new FakePool();
     startPostgresProjection(pool, captureLogger().logger);

@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { openDb } from "../db/index.js";
-import { configurePostgresProjection } from "../db/postgres-projection.js";
+import {
+  closeDbAfterPostgresProjection,
+  configurePostgresProjection,
+} from "../db/postgres-projection.js";
 import { upsertAccount } from "../db/queries.js";
 import { resolveConfigPath, appLogger } from "../runtime.js";
 import { startDashboardServer } from "../dashboard/server.js";
@@ -99,10 +102,9 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
   await new Promise<void>((resolve) => {
     const stop = (): void => {
       dashboard.server.close(() => {
-        void (pairing?.stop() ?? Promise.resolve()).finally(() => {
-          db.close();
-          resolve();
-        });
+        void (pairing?.stop() ?? Promise.resolve())
+          .finally(() => closeDbAfterPostgresProjection(db))
+          .finally(resolve);
       });
     };
     process.once("SIGINT", stop);
