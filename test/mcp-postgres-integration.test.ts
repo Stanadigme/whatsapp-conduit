@@ -8,6 +8,7 @@ import { Pool } from "pg";
 import { resolveConfig } from "../src/config.js";
 import { openDb, type Database } from "../src/db/index.js";
 import {
+  insertTranscription,
   setChatAllowed,
   upsertAccount,
   upsertChat,
@@ -114,6 +115,21 @@ describe.skipIf(!url || !caFile)("MCP server over PostgreSQL (TLS)", () => {
       messageType: "text",
       text: "secret hidden chat",
     });
+    upsertMessage(db, {
+      accountId: "personal",
+      chatJid: "33600000000@s.whatsapp.net",
+      messageId: "M3",
+      timestamp: 1_700_000_002,
+      messageType: "audio",
+      hasMedia: true,
+    });
+    insertTranscription(db, {
+      accountId: "personal",
+      chatJid: "33600000000@s.whatsapp.net",
+      messageId: "M3",
+      textRaw: "voix brute",
+      engine: "whisper-local",
+    });
     await flushPostgresProjection();
 
     const secretsDir = mkdtempSync(join(tmpdir(), "wac-mcp-pg-"));
@@ -173,6 +189,48 @@ describe.skipIf(!url || !caFile)("MCP server over PostgreSQL (TLS)", () => {
         // Proves PostgresReader, not SqliteReader, actually answered: the
         // latest-migration name only exists in the Postgres history.
         expect(healthBody.schema).toBe("0005_message_surrogate_id.sql");
+
+        const search = await mcpClient.callTool({
+          name: "wa_messages_search",
+          arguments: { query: "hello" },
+        });
+        expect(JSON.stringify(search)).toContain("hello from allowed chat");
+        const searchHidden = await mcpClient.callTool({
+          name: "wa_messages_search",
+          arguments: { query: "secret" },
+        });
+        expect(JSON.stringify(searchHidden)).not.toContain(
+          "secret hidden chat",
+        );
+
+        const context = await mcpClient.callTool({
+          name: "wa_message_context",
+          arguments: {
+            chat: "33600000000@s.whatsapp.net",
+            messageId: "M1",
+            before: 0,
+            after: 2,
+          },
+        });
+        expect(JSON.stringify(context)).toContain("M3");
+        const contextDenied = await mcpClient.callTool({
+          name: "wa_message_context",
+          arguments: { chat: "33600000001@s.whatsapp.net", messageId: "M2" },
+        });
+        expect(contextDenied.isError).toBe(true);
+
+        const transcript = await mcpClient.callTool({
+          name: "wa_get_transcript",
+          arguments: { chat: "33600000000@s.whatsapp.net", messageId: "M3" },
+        });
+        expect(JSON.stringify(transcript)).toContain("voix brute");
+
+        const exported = await mcpClient.callTool({
+          name: "wa_export",
+          arguments: {},
+        });
+        expect(JSON.stringify(exported)).toContain("hello from allowed chat");
+        expect(JSON.stringify(exported)).not.toContain("secret hidden chat");
       } finally {
         await mcpClient.close();
         await server.close();
