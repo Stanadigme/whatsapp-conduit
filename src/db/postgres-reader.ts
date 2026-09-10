@@ -333,33 +333,6 @@ export function createPostgresReader(
       return rows.map(toDashboardChat);
     },
 
-    async setChatPolicy(chatJid, action) {
-      // Mirrors setChatAllowed/setChatBlocked exactly: each clears the other.
-      await p.query(
-        action === "allow"
-          ? `update chats set is_allowed = true, is_blocked = false
-             where account_id = $1 and jid = $2`
-          : `update chats set is_blocked = true, is_allowed = false
-             where account_id = $1 and jid = $2`,
-        [accountId, chatJid],
-      );
-      const row = await one<PgChatRow & { dir_name: string | null; dir_push_name: string | null }>(
-        `select c.*, ${DIRECTORY_NAME_COALESCE} as dir_name,
-           coalesce(ec.push_name, ea.push_name) as dir_push_name
-         from chats c
-         left join directory_entities ec
-                on ec.account_id = c.account_id and ec.canonical_jid = c.jid
-         left join directory_aliases da
-                on da.account_id = c.account_id and da.alias_jid = c.jid
-         left join directory_entities ea
-                on ea.account_id = da.account_id and ea.canonical_jid = da.canonical_jid
-         where c.account_id = $1 and c.jid = $2`,
-        [accountId, chatJid],
-      );
-      if (!row) throw new Error("chat policy was not persisted");
-      return toDashboardChat(row);
-    },
-
     async searchContacts(query, limitInput) {
       const limit = assertLimit(limitInput);
       if (query.trim().length < 2) throw new McpRequestError("query is too short");
@@ -777,6 +750,7 @@ export function createPostgresReader(
     },
 
     async resolveLocalMediaFile(chatJid, messageId, attachmentIndex) {
+      await requireAllowedChat(chatJid);
       const attachment = await one<{
         mime_type: string | null;
         file_name: string | null;

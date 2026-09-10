@@ -25,6 +25,15 @@ import type {
  * through this instead of opening a database handle themselves, so which
  * backend is active is decided once, at process start, in one place.
  *
+ * Almost entirely reads. Allow/block is the one exception kept out: it always
+ * writes through SQLite directly (dashboard/chats.ts), never through this
+ * interface, because the ingestion daemon is a separate process that reads
+ * chats.is_allowed/is_blocked from that same SQLite file to decide whether to
+ * download media (chatExposureAllowed) — a write that only reached
+ * PostgreSQL would leave it permanently unaware. setTranscriptionCorrection
+ * has no such cross-process reader, so it writes through whichever backend
+ * is active, same as everything else here.
+ *
  * Every method reflects the account fixed at construction time; none take an
  * `accountId` parameter.
  */
@@ -36,11 +45,6 @@ export interface ClientDataReader {
   getChat(chatJid: string): Promise<ChatRow | undefined>;
   listChats(opts: { limit?: number; cursor?: string }): Promise<Page<ChatView>>;
   listDashboardChats(filter?: DashboardChatFilter): Promise<DashboardChat[]>;
-  /** Apply an allow/block decision and return the chat's new dashboard view. */
-  setChatPolicy(
-    chatJid: string,
-    action: "allow" | "block",
-  ): Promise<DashboardChat>;
 
   searchContacts(query: string, limit?: number): Promise<ParticipantRow[]>;
   listGroupParticipants(

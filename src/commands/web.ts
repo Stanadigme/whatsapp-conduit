@@ -5,6 +5,10 @@ import {
   closeDbAfterPostgresProjection,
   configurePostgresProjection,
 } from "../db/postgres-projection.js";
+import { createPostgresPool } from "../db/postgres.js";
+import { createPostgresReader } from "../db/postgres-reader.js";
+import { createSqliteReader } from "../db/sqlite-reader.js";
+import type { ClientDataReader } from "../db/reader.js";
 import { upsertAccount } from "../db/queries.js";
 import { resolveConfigPath, appLogger } from "../runtime.js";
 import { startDashboardServer } from "../dashboard/server.js";
@@ -67,10 +71,24 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
     id: config.account.name,
     label: config.account.description ?? null,
   });
+  // Writes (allow/block, transcription correction, STT settings, maintenance)
+  // always go through SQLite, same as ever. Reads switch to the client's own
+  // PostgreSQL once configured (ADR-0033 phase 2) — a separate connection
+  // from configurePostgresProjection's, which stays the async write path.
+  let reader: ClientDataReader;
+  let closeReader: () => Promise<void> = () => Promise.resolve();
+  if (config.persistence.postgres) {
+    const pool = createPostgresPool(config.persistence.postgres);
+    reader = createPostgresReader(pool, config, config.account.name);
+    closeReader = () => pool.end();
+  } else {
+    reader = createSqliteReader(db, config, config.account.name);
+  }
   const pairing =
     options.pairing === false ? null : createPairingController(config);
   const dashboard = await startDashboardServer(config, {
     db,
+    reader,
     config,
     configPath,
     models: new ModelDownloader(modelsDir(config)),
@@ -104,6 +122,7 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
       dashboard.server.close(() => {
         void (pairing?.stop() ?? Promise.resolve())
           .finally(() => closeDbAfterPostgresProjection(db))
+          .finally(closeReader)
           .finally(resolve);
       });
     };

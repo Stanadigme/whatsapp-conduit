@@ -1,9 +1,11 @@
 import type { Database } from "better-sqlite3";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
-import { basename, relative, resolve } from "node:path";
+import { basename } from "node:path";
 import { Readable } from "node:stream";
 import type { Config } from "../config.js";
+import type { ClientDataReader } from "../db/reader.js";
+import { flushPostgresProjection } from "../db/postgres-projection.js";
 import { maskSecrets } from "../commands/config.js";
 import {
   requestBaileysPairingStart,
@@ -11,21 +13,9 @@ import {
   requestHistoryStart,
   requestMaintenanceReset,
 } from "../control/ipc.js";
-import { getMessage, listMessages } from "../read/messages.js";
-import { getChatMessageStats } from "../read/chat-stats.js";
 import { McpRequestError } from "../mcp/types.js";
-import {
-  allowDashboardChat,
-  blockDashboardChat,
-  listDashboardChats,
-} from "./chats.js";
-import {
-  getActiveHistoryJob,
-  getAttachment,
-  getHistoryJob,
-  setTranscriptionCorrection,
-  type HistoryJobRow,
-} from "../db/queries.js";
+import { type HistoryJobRow } from "../db/queries.js";
+import { allowDashboardChat, blockDashboardChat } from "./chats.js";
 import { findCatalogueModel } from "../stt/models.js";
 import type { ModelDownloader } from "./models.js";
 import { applySttSettings, sttHealth, sttView } from "./stt.js";
@@ -47,7 +37,10 @@ export interface DashboardPairing {
 }
 
 export interface DashboardContext {
+  /** Writes only (allow/block, correction, STT settings, maintenance). */
   db: Database;
+  /** Reads: PostgreSQL when configured (ADR-0033 phase 2), SQLite otherwise. */
+  reader: ClientDataReader;
   config: Config;
   /** Path of the YAML file the transcription settings are written to. */
   configPath: string;
@@ -90,36 +83,25 @@ async function attachmentDownload(
   attachmentIndex: number,
 ): Promise<Response> {
   try {
-    // `getMessage` checks the allow/block predicate before the attachment.
-    getMessage(
-      { db: context.db, accountId: context.accountId },
-      chatJid,
-      messageId,
-    );
-    const attachment = getAttachment(
-      context.db,
-      context.accountId,
+    // resolveLocalMediaFile checks the allow/block predicate itself, and
+    // resolves the on-disk path without trusting a client-supplied one.
+    const attachment = await context.reader.resolveLocalMediaFile(
       chatJid,
       messageId,
       attachmentIndex,
     );
-    if (!attachment?.file_path || attachment.downloaded_at === null) {
-      return json({ error: "not found" }, 404);
-    }
-    const mediaRoot = resolve(context.config.paths.mediaDir);
-    const path = resolve(attachment.file_path);
-    if (relative(mediaRoot, path).startsWith("..")) {
-      return json({ error: "not found" }, 404);
-    }
-    const details = await stat(path).catch(() => null);
+    if (!attachment) return json({ error: "not found" }, 404);
+    const details = await stat(attachment.path).catch(() => null);
     if (!details?.isFile()) return json({ error: "not found" }, 404);
     return new Response(
-      Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>,
+      Readable.toWeb(
+        createReadStream(attachment.path),
+      ) as ReadableStream<Uint8Array>,
       {
         headers: {
-          "Content-Type": attachment.mime_type ?? "application/octet-stream",
+          "Content-Type": attachment.mimeType ?? "application/octet-stream",
           "Content-Length": String(details.size),
-          "Content-Disposition": `attachment; filename="${safeDownloadName(attachment.file_name, attachment.sha256 ?? "media")}"`,
+          "Content-Disposition": `attachment; filename="${safeDownloadName(attachment.fileName, basename(attachment.path))}"`,
           "Cache-Control": "no-store",
         },
       },
@@ -304,29 +286,18 @@ export async function dashboardApi(
       const chatJid = decodeJid(match[1]);
       const messageId = decodeURIComponent(match[2]);
       try {
-        const current = getMessage(
-          { db: context.db, accountId: context.accountId },
-          chatJid,
-          messageId,
-        );
+        const current = await context.reader.getMessage(chatJid, messageId);
         if (current.messageType !== "audio" || current.textRaw === null) {
           return json({ error: "transcription not available" }, 409);
         }
-        const written = setTranscriptionCorrection(context.db, {
-          accountId: context.accountId,
+        const written = await context.reader.setTranscriptionCorrection({
           chatJid,
           messageId,
           textCorrected: body.textCorrected,
         });
         if (!written)
           return json({ error: "transcription not available" }, 409);
-        return json(
-          getMessage(
-            { db: context.db, accountId: context.accountId },
-            chatJid,
-            messageId,
-          ),
-        );
+        return json(await context.reader.getMessage(chatJid, messageId));
       } catch (error) {
         if (
           error instanceof McpRequestError &&
@@ -345,7 +316,7 @@ export async function dashboardApi(
     }
   }
   if (url.pathname === "/api/chats" && request.method === "GET") {
-    const chats = listDashboardChats(context.db, context.accountId, {
+    const chats = await context.reader.listDashboardChats({
       query: url.searchParams.get("query") ?? undefined,
       kind:
         (url.searchParams.get("kind") as
@@ -392,10 +363,7 @@ export async function dashboardApi(
     if (match?.[1]) {
       try {
         return json(
-          getChatMessageStats(
-            { db: context.db, accountId: context.accountId },
-            decodeJid(match[1]),
-          ),
+          await context.reader.chatMessageStats(decodeJid(match[1])),
         );
       } catch (error) {
         if (
@@ -414,10 +382,10 @@ export async function dashboardApi(
     const limitValue = url.searchParams.get("limit");
     const cursor = url.searchParams.get("cursor") ?? undefined;
     try {
-      const page = listMessages(context, {
+      const page = await context.reader.listMessages({
         chat: decodeJid(match[1]),
-        limit: limitValue === null ? undefined : Number(limitValue),
-        cursor,
+        ...(limitValue === null ? {} : { limit: Number(limitValue) }),
+        ...(cursor === undefined ? {} : { cursor }),
       });
       return json(page);
     } catch (error) {
@@ -467,11 +435,18 @@ export async function dashboardApi(
       const jid = match[1];
       const action = match[2];
       if (!jid || !action) return json({ error: "not found" }, 404);
-      return json(
+      // Always written to SQLite directly, never through context.reader: the
+      // ingestion daemon reads chats.is_allowed/is_blocked from that same
+      // file to gate media downloads (chatExposureAllowed), so a write that
+      // only reached PostgreSQL would leave it permanently unaware.
+      const updated =
         action === "allow"
           ? allowDashboardChat(context.db, context.accountId, decodeJid(jid))
-          : blockDashboardChat(context.db, context.accountId, decodeJid(jid)),
-      );
+          : blockDashboardChat(context.db, context.accountId, decodeJid(jid));
+      // A chat just blocked must not still read as allowed from PostgreSQL
+      // for however long the projection queue takes to drain.
+      await flushPostgresProjection();
+      return json(updated);
     } catch (error) {
       return errorResponse(error, 404);
     }
@@ -572,13 +547,13 @@ export async function dashboardApi(
     return qr ? svg(qr) : json({ error: "QR code is not available" }, 404);
   }
   if (url.pathname === "/api/history/active" && request.method === "GET") {
-    const job = getActiveHistoryJob(context.db, context.accountId);
+    const job = await context.reader.getActiveHistoryJob();
     return json({ job: job ? historyView(job) : null });
   }
   if (url.pathname.startsWith("/api/history/") && request.method === "GET") {
     const match = /^\/api\/history\/([^/]+)$/.exec(url.pathname);
     if (!match?.[1]) return json({ error: "not found" }, 404);
-    const job = getHistoryJob(context.db, context.accountId, match[1]);
+    const job = await context.reader.getHistoryJob(match[1]);
     return job ? json(historyView(job)) : json({ error: "not found" }, 404);
   }
   if (url.pathname === "/api/pairing/status" && request.method === "GET") {

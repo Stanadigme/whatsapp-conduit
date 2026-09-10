@@ -13,6 +13,7 @@ import {
   upsertMessage,
 } from "../src/db/queries.js";
 import { ModelDownloader } from "../src/dashboard/models.js";
+import { createSqliteReader } from "../src/db/sqlite-reader.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import { ensureDashboardToken } from "../src/dashboard/token.js";
 
@@ -45,6 +46,7 @@ describe("dashboard media download", () => {
     const token = ensureDashboardToken(config.web.tokenFile);
     const dashboard = await createDashboardServer(config, {
       db,
+      reader: createSqliteReader(db, config, accountId),
       config,
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),

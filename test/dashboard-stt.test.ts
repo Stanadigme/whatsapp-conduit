@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { defaultConfigYaml, resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import { upsertAccount } from "../src/db/queries.js";
+import { createSqliteReader } from "../src/db/sqlite-reader.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import { ModelDownloader } from "../src/dashboard/models.js";
 import { ensureDashboardToken } from "../src/dashboard/token.js";
@@ -39,6 +40,7 @@ async function harness(): Promise<Harness> {
   upsertAccount(db, { id: accountId });
   const dashboard = await createDashboardServer(config, {
     db,
+    reader: createSqliteReader(db, config, accountId),
     config,
     configPath,
     models: new ModelDownloader(modelsDir(config)),

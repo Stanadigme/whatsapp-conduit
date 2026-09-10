@@ -16,7 +16,6 @@ import {
   upsertChat,
   upsertMessage,
   upsertTranscriptionJob,
-  type ChatRow,
 } from "../src/db/queries.js";
 import {
   flushPostgresProjection,
@@ -329,6 +328,16 @@ describe.skipIf(!url)("PostgresReader parity with SqliteReader", () => {
     expect(resolved?.path).toBe(join(mediaDir, `${"c".repeat(64)}.opus`));
   });
 
+  it("refuses to resolve a media file in a blocked chat, on both backends", async () => {
+    const { sqlite, postgres } = await seed(mkdtempSync(join(tmpdir(), "wac-pgr-")));
+    await expect(
+      postgres.resolveLocalMediaFile("33600000001@s.whatsapp.net", "M3", 0),
+    ).rejects.toThrow("chat is not available");
+    await expect(
+      sqlite.resolveLocalMediaFile("33600000001@s.whatsapp.net", "M3", 0),
+    ).rejects.toThrow("chat is not available");
+  });
+
   it("agrees on the effective transcript view", async () => {
     const { sqlite, postgres } = await seed(mkdtempSync(join(tmpdir(), "wac-pgr-")));
     expect(
@@ -380,16 +389,4 @@ describe.skipIf(!url)("PostgresReader parity with SqliteReader", () => {
     expect(offset?.last_seen_event_id).toBe(7);
   });
 
-  it("applies a policy change directly to PostgreSQL and it is immediately readable", async () => {
-    const { postgres } = await seed(mkdtempSync(join(tmpdir(), "wac-pgr-")));
-    const updated = await postgres.setChatPolicy(
-      "33600000002@s.whatsapp.net",
-      "allow",
-    );
-    expect(updated.allowed).toBe(true);
-    const chat = (await postgres.getChat(
-      "33600000002@s.whatsapp.net",
-    )) as ChatRow;
-    expect(chat.is_allowed).toBe(1);
-  });
 });

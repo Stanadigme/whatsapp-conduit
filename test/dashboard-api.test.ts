@@ -12,6 +12,7 @@ import {
   upsertChat,
 } from "../src/db/queries.js";
 import { HistoryControlServer } from "../src/control/ipc.js";
+import { createSqliteReader } from "../src/db/sqlite-reader.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import { ensureDashboardToken } from "../src/dashboard/token.js";
 import { ModelDownloader } from "../src/dashboard/models.js";
@@ -87,6 +88,7 @@ describe("local dashboard HTTP API", () => {
     await control.start();
     const dashboard = await createDashboardServer(config, {
       db,
+      reader: createSqliteReader(db, config, accountId),
       config,
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
@@ -196,6 +198,7 @@ describe("local dashboard HTTP API", () => {
     const pairing = { status: "waiting_qr" as const, qr: null, error: null };
     const dashboard = await createDashboardServer(config, {
       db,
+      reader: createSqliteReader(db, config, accountId),
       config,
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
@@ -297,6 +300,7 @@ describe("local dashboard HTTP API", () => {
     });
     const dashboard = await createDashboardServer(config, {
       db,
+      reader: createSqliteReader(db, config, accountId),
       config,
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
@@ -388,6 +392,7 @@ describe("local dashboard HTTP API", () => {
     });
     const dashboard = await createDashboardServer(config, {
       db,
+      reader: createSqliteReader(db, config, accountId),
       config,
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
@@ -472,6 +477,7 @@ describe("local dashboard HTTP API", () => {
     await control.start();
     const dashboard = await createDashboardServer(config, {
       db,
+      reader: createSqliteReader(db, config, accountId),
       config,
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
@@ -546,6 +552,7 @@ describe("local dashboard HTTP API", () => {
     upsertAccount(db, { id: accountId });
     const dashboard = await createDashboardServer(config, {
       db,
+      reader: createSqliteReader(db, config, accountId),
       config,
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
@@ -591,6 +598,7 @@ describe("group ingestion warning", () => {
     upsertChat(db, { accountId, jid: "33600000000@s.whatsapp.net" });
     const dashboard = await createDashboardServer(config, {
       db,
+      reader: createSqliteReader(db, config, accountId),
       config,
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),

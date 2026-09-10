@@ -2,11 +2,8 @@ import { existsSync } from "node:fs";
 import { resolve as resolvePath, relative } from "node:path";
 import type { Database } from "better-sqlite3";
 import type { Config } from "../config.js";
-import {
-  allowDashboardChat,
-  blockDashboardChat,
-  listDashboardChats,
-} from "../dashboard/chats.js";
+import { listDashboardChats } from "../dashboard/chats.js";
+import { flushPostgresProjection } from "./postgres-projection.js";
 import {
   chatStats as sqliteChatStats,
   getMedia as sqliteGetMedia,
@@ -21,6 +18,7 @@ import {
 } from "../mcp/read.js";
 import { getChatMessageStats } from "../read/chat-stats.js";
 import {
+  allowedChat,
   getMessage as sqliteGetMessage,
   listMessages as sqliteListMessages,
   type MessageFilters,
@@ -99,12 +97,6 @@ export function createSqliteReader(
       return listDashboardChats(db, accountId, filter ?? {});
     },
 
-    async setChatPolicy(chatJid, action) {
-      return action === "allow"
-        ? allowDashboardChat(db, accountId, chatJid)
-        : blockDashboardChat(db, accountId, chatJid);
-    },
-
     async searchContacts(query, limit) {
       return sqliteSearchContacts(ctx, query, limit);
     },
@@ -144,7 +136,14 @@ export function createSqliteReader(
     },
 
     async setTranscriptionCorrection(input) {
-      return sqliteSetTranscriptionCorrection(db, { accountId, ...input });
+      const applied = sqliteSetTranscriptionCorrection(db, {
+        accountId,
+        ...input,
+      });
+      // The dashboard reads its own write back in the same request; it must
+      // not see the pre-correction text depending on projection timing.
+      if (applied) await flushPostgresProjection();
+      return applied;
     },
 
     async getMediaMetadata(chatJid, messageId) {
@@ -163,6 +162,7 @@ export function createSqliteReader(
     },
 
     async resolveLocalMediaFile(chatJid, messageId, attachmentIndex) {
+      allowedChat(readCtx, chatJid);
       const attachment = getAttachment(
         db,
         accountId,
