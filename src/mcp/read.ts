@@ -58,7 +58,7 @@ import {
   page,
 } from "./types.js";
 
-interface ChatView {
+export interface ChatView {
   jid: string;
   name: string | null;
   label: string;

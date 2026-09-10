@@ -48,13 +48,19 @@ export function toByteCount(value: unknown): number | null {
   return null;
 }
 
+/** The subset of {@link AudioSource} that determines the file extension. */
+export type AudioExtensionInput = Pick<
+  AudioSource,
+  "mediaType" | "mimeType" | "fileName"
+>;
+
 /**
  * Extension for the content-addressed local filename `${sha256}${extension}`.
  * Exported so a read path (Postgres carries no `file_path`, see
  * postgres-migrations/0002) can recompute the same on-disk name from
  * attachment metadata instead of trusting a stored path.
  */
-export function extensionFor(source: AudioSource): string {
+export function extensionFor(source: AudioExtensionInput): string {
   const mime = source.mimeType ?? "";
   if (mime.includes("ogg") || mime.includes("opus")) return ".opus";
   const extension = source.fileName
@@ -64,6 +70,21 @@ export function extensionFor(source: AudioSource): string {
   return source.mediaType === "audio" || source.mediaType === undefined
     ? ".audio"
     : ".bin";
+}
+
+/**
+ * Recompute the local path of a content-addressed attachment from its
+ * metadata, for a read path that has no stored `file_path` (Postgres) or that
+ * must not trust one verbatim. Returns null when `sha256` is missing or not a
+ * well-formed digest, since it is about to become part of a filesystem path.
+ */
+export function contentAddressedMediaPath(
+  mediaDir: string,
+  sha256: string | null,
+  meta: AudioExtensionInput,
+): string | null {
+  if (!sha256 || !/^[0-9a-f]{64}$/i.test(sha256)) return null;
+  return join(mediaDir, `${sha256}${extensionFor(meta)}`);
 }
 
 async function removeTemp(path: string): Promise<void> {

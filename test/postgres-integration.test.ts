@@ -32,6 +32,11 @@ import { createLogger } from "../src/util/logging.js";
  *
  * TLS is deliberately not exercised here — it is a connection concern, covered
  * by test/postgres-config.test.ts.
+ *
+ * Run this file and postgres-reader.test.ts separately, not in the same
+ * vitest invocation: both reset the target database's whole `public` schema
+ * in beforeEach, and vitest runs different test files in parallel by
+ * default, so two files resetting the same live schema race each other.
  */
 const url = process.env.WA_TEST_POSTGRES_URL;
 
@@ -114,6 +119,7 @@ describe.skipIf(!url)("PostgreSQL contract", () => {
       { name: "0002_alpha_projection.sql" },
       { name: "0003_export_offsets.sql" },
       { name: "0004_message_search.sql" },
+      { name: "0005_message_surrogate_id.sql" },
     ]);
   });
 
