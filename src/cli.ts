@@ -19,6 +19,7 @@ import { runLink } from "./commands/link.js";
 import { runMcp } from "./commands/mcp.js";
 import { runMessagesList } from "./commands/messages.js";
 import { runOffsetsCommit, runOffsetsShow } from "./commands/offsets.js";
+import { runPostgresMigrate } from "./commands/postgres.js";
 import { runRun } from "./commands/run.js";
 import {
   runServiceControl,
@@ -28,6 +29,7 @@ import {
 import { runStatus } from "./commands/status.js";
 import { runTranscribe } from "./commands/transcribe.js";
 import { getVersion } from "./version.js";
+import { shutdownPostgresProjection } from "./db/postgres-projection.js";
 
 function parsePositiveInt(name: string, value: string): number {
   const n = Number(value);
@@ -237,17 +239,21 @@ export function buildProgram(): Command {
   chats
     .command("allow <jid>")
     .description("mark a chat as allowed for exports")
-    .action((jid: string) => {
+    .action(async (jid: string) => {
       const globals = program.opts<GlobalOptions>();
-      process.exitCode = runChatsAllow(jid, { configPath: globals.config });
+      process.exitCode = await runChatsAllow(jid, {
+        configPath: globals.config,
+      });
     });
 
   chats
     .command("block <jid>")
     .description("mark a chat as blocked (excluded from sync and exports)")
-    .action((jid: string) => {
+    .action(async (jid: string) => {
       const globals = program.opts<GlobalOptions>();
-      process.exitCode = runChatsBlock(jid, { configPath: globals.config });
+      process.exitCode = await runChatsBlock(jid, {
+        configPath: globals.config,
+      });
     });
 
   const messages = program
@@ -472,12 +478,31 @@ export function buildProgram(): Command {
       });
     });
 
+  const postgres = program
+    .command("postgres")
+    .description("client PostgreSQL destination (alpha, ADR-0033)");
+
+  postgres
+    .command("migrate")
+    .description("apply the client database schema")
+    .option("--json", "emit machine-readable JSON")
+    .action(async (opts: { json?: boolean }) => {
+      const globals = program.opts<GlobalOptions>();
+      await runPostgresMigrate({ configPath: globals.config, json: opts.json });
+    });
+
   return program;
 }
 
 export async function main(argv: string[] = process.argv): Promise<void> {
   const program = buildProgram();
-  await program.parseAsync(argv);
+  try {
+    await program.parseAsync(argv);
+  } finally {
+    // One-shot commands would otherwise exit with projections still queued.
+    // Long-running ones only reach this after their own shutdown.
+    await shutdownPostgresProjection();
+  }
 }
 
 /**

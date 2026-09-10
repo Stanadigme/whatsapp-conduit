@@ -2,6 +2,11 @@ import type { Database } from "better-sqlite3";
 import { normalizeJid, phoneFromJid } from "../baileys/jid.js";
 import { nowSec } from "../util/time.js";
 import {
+  projectChat,
+  projectHistoryJob,
+  projectMessage,
+} from "./postgres-projection.js";
+import {
   directoryTablesAvailable,
   markDirectoryMissingMembersInactive,
   resolveDirectoryJid,
@@ -187,6 +192,7 @@ export function upsertChat(db: Database, input: ChatInput): void {
     rawJson: input.rawJson ?? null,
     now,
   });
+  projectChat(db, input.accountId, input.jid);
 }
 
 /** Set a chat's allow flag (policy). Clears the block flag when allowing. */
@@ -203,6 +209,7 @@ export function setChatAllowed(
            updated_at = @now
      where account_id = @accountId and jid = @jid`,
   ).run({ accountId, jid, allowed: allowed ? 1 : 0, now: nowSec() });
+  projectChat(db, accountId, jid);
 }
 
 /** Set a chat's block flag (policy). Clears the allow flag when blocking. */
@@ -219,6 +226,7 @@ export function setChatBlocked(
            updated_at = @now
      where account_id = @accountId and jid = @jid`,
   ).run({ accountId, jid, blocked: blocked ? 1 : 0, now: nowSec() });
+  projectChat(db, accountId, jid);
 }
 
 export function getChat(
@@ -753,6 +761,7 @@ export function createHistoryJob(db: Database, input: HistoryJobInput): void {
     completionReason: input.completionReason ?? null,
     now,
   });
+  projectHistoryJob(db, input.accountId, input.id);
 }
 
 export function getHistoryJob(
@@ -842,6 +851,7 @@ export function updateHistoryJob(
   db.prepare(
     `update history_jobs set ${sets.join(", ")} where account_id = @accountId and id = @id`,
   ).run(params);
+  projectHistoryJob(db, accountId, id);
 }
 
 export function getHistoryAnchor(
@@ -936,6 +946,7 @@ export function upsertMessage(db: Database, input: MessageInput): void {
     deletedAt: input.deletedAt ?? null,
     rawJson: input.rawJson ?? null,
   });
+  projectMessage(db, input.accountId, input.chatJid, input.messageId);
 }
 
 export interface AttachmentInput {
@@ -985,6 +996,7 @@ export function upsertAttachment(db: Database, input: AttachmentInput): void {
     downloadedAt: input.downloadedAt ?? null,
     rawJson: input.rawJson ?? null,
   });
+  projectMessage(db, input.accountId, input.chatJid, input.messageId);
 }
 
 export interface AttachmentRow {
@@ -1363,6 +1375,7 @@ export function upsertTranscriptionJob(
     attempts: input.attempts,
     now,
   });
+  projectMessage(db, input.accountId, input.chatJid, input.messageId);
 }
 
 export interface TranscriptionJobRow {
@@ -1435,6 +1448,9 @@ export function setTranscriptionCorrection(
          and text_raw is not null`,
     )
     .run(input);
+  if (result.changes > 0) {
+    projectMessage(db, input.accountId, input.chatJid, input.messageId);
+  }
   return result.changes > 0;
 }
 
@@ -1475,6 +1491,9 @@ export function insertTranscription(
       now: nowSec(),
       rawJson: input.rawJson ?? null,
     });
+  if (result.changes > 0) {
+    projectMessage(db, input.accountId, input.chatJid, input.messageId);
+  }
   return result.changes > 0;
 }
 

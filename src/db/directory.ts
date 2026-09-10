@@ -1,6 +1,11 @@
 import type { Database } from "better-sqlite3";
 import { normalizeJid, phoneFromJid } from "../baileys/jid.js";
 import { nowSec } from "../util/time.js";
+import {
+  projectDirectoryEntity,
+  projectDirectoryMember,
+  projectDirectoryMembers,
+} from "./postgres-projection.js";
 
 export type DirectoryEntityType = "contact" | "group";
 export type DirectoryNameSource =
@@ -313,7 +318,9 @@ export function upsertDirectoryContact(
     if (!result) throw new Error("directory contact entity was not persisted");
     return result;
   });
-  return write();
+  const entity = write();
+  projectDirectoryEntity(db, input.accountId, entity.canonical_jid);
+  return entity;
 }
 
 export function upsertDirectoryGroup(
@@ -351,7 +358,9 @@ export function upsertDirectoryGroup(
     if (!result) throw new Error("directory group entity was not persisted");
     return result;
   });
-  return write();
+  const group = write();
+  projectDirectoryEntity(db, input.accountId, group.canonical_jid);
+  return group;
 }
 
 export function upsertDirectoryGroupMember(
@@ -393,8 +402,12 @@ export function upsertDirectoryGroupMember(
       now,
     });
     projectGroupMember(db, input.accountId, groupId, member.id, now);
+    return { groupJid: getEntityById(db, groupId)?.canonical_jid, member };
   });
-  write();
+  const { groupJid, member } = write();
+  if (groupJid) {
+    projectDirectoryMember(db, input.accountId, groupJid, member.canonical_jid);
+  }
 }
 
 export function markDirectoryMissingMembersInactive(
@@ -440,6 +453,7 @@ export function markDirectoryMissingMembersInactive(
       activeCanonicalJids.map((jid, i) => [`jid${i}`, jid]),
     ),
   });
+  projectDirectoryMembers(db, accountId, group.canonical_jid);
 }
 
 export function listDirectoryKnownContactJids(

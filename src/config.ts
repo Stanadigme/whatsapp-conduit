@@ -147,10 +147,33 @@ export interface LoggingConfig {
   logMessageText: boolean;
 }
 
+export interface PostgresPersistenceConfig {
+  /**
+   * Client PostgreSQL endpoint. The password never appears here: it is read
+   * from {@link PostgresPersistenceConfig.passwordFile} so it stays out of the
+   * config file, the process arguments and every log line.
+   */
+  url: string;
+  /** Owner-only file holding the PostgreSQL password. */
+  passwordFile: string;
+  /** Owner-only PEM of the authority that issued the server certificate. */
+  caFile: string;
+}
+
+export interface PersistenceConfig {
+  /**
+   * `null` keeps the pre-alpha SQLite/outbox behavior. When set, ingestion
+   * projects directly to the client database (ADR-0033) and stops queueing
+   * outbox snapshots.
+   */
+  postgres: PostgresPersistenceConfig | null;
+}
+
 export interface Config {
   transport: TransportName;
   account: AccountConfig;
   paths: PathsConfig;
+  persistence: PersistenceConfig;
   whatsmeow: WhatsmeowConfig;
   baileys: BaileysConfig;
   privacy: PrivacyConfig;
@@ -303,6 +326,60 @@ function resolvePath(base: string, value: unknown, fallback: string): string {
 }
 
 /**
+ * Resolve the operator-provided PostgreSQL destination.
+ *
+ * Alpha profile (ADR-0033): TLS with server-certificate verification, a
+ * password held in a local owner-only file, and no dashboard or environment
+ * override. Refusing a password-bearing or `sslmode`-bearing URL here keeps
+ * the transport decision in one place instead of in the connection string.
+ */
+function asPostgresPersistence(
+  raw: Record<string, unknown>,
+  dataDir: string,
+): PostgresPersistenceConfig | null {
+  const url = raw.url;
+  if (url === undefined || url === null || url === "") return null;
+  if (typeof url !== "string") {
+    throw new Error("Invalid persistence.postgres.url: expected a string.");
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(url);
+  } catch {
+    throw new Error("Invalid persistence.postgres.url: expected a URL.");
+  }
+  if (
+    (endpoint.protocol !== "postgres:" &&
+      endpoint.protocol !== "postgresql:") ||
+    !endpoint.hostname
+  ) {
+    throw new Error(
+      "Invalid persistence.postgres.url: expected postgresql://host/database.",
+    );
+  }
+  if (endpoint.password) {
+    throw new Error(
+      "Invalid persistence.postgres.url: put the password in persistence.postgres.password_file, not in the URL.",
+    );
+  }
+  if (endpoint.searchParams.has("sslmode")) {
+    throw new Error(
+      "Invalid persistence.postgres.url: sslmode is fixed by persistence.postgres.ca_file.",
+    );
+  }
+  for (const key of ["password_file", "ca_file"] as const) {
+    if (typeof raw[key] !== "string" || raw[key] === "") {
+      throw new Error(`Invalid persistence.postgres.${key}: expected a path.`);
+    }
+  }
+  return {
+    url,
+    passwordFile: resolvePath(dataDir, raw.password_file, ""),
+    caFile: resolvePath(dataDir, raw.ca_file, ""),
+  };
+}
+
+/**
  * Resolve a parsed YAML config object into a fully-populated {@link Config}
  * with absolute paths and observe-only-safe defaults applied.
  *
@@ -329,6 +406,7 @@ export function resolveConfig(
   const filtersRaw = section(raw, "filters");
   const exportsRaw = section(raw, "exports");
   const loggingRaw = section(raw, "logging");
+  const persistenceRaw = section(section(raw, "persistence"), "postgres");
 
   // Resolve to an absolute path so paths derived from it are stable regardless
   // of the cwd a later command (e.g. a systemd service) runs from.
@@ -440,6 +518,9 @@ export function resolveConfig(
     transport: asTransport(transportRaw.name),
     account,
     paths,
+    persistence: {
+      postgres: asPostgresPersistence(persistenceRaw, dataDir),
+    },
     whatsmeow,
     baileys: {
       version: asBaileysVersion(baileysRaw.version, DEFAULT_BAILEYS_VERSION),
@@ -592,6 +673,17 @@ stt:
   whisper:
     binary_path: whisper-cli
     model_path: ${join(dataDir, "models", "ggml-large-v3-turbo.bin")}
+
+persistence:
+  # Alpha only (ADR-0033). Left empty, the runtime keeps writing to SQLite
+  # alone. Set by the operator, never by the dashboard or an environment
+  # variable. Both files must be owner-only (chmod 0600); the password stays
+  # out of the URL. Apply the schema once with:
+  #   whatsapp-conduit postgres migrate
+  postgres:
+    url: ""
+    # password_file: ${join(dataDir, "secrets", "postgres.password")}
+    # ca_file: ${join(dataDir, "secrets", "postgres-ca.pem")}
 
 web:
   # The dashboard is local-only by default. Set public_origin only behind an

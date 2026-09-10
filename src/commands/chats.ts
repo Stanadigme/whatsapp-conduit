@@ -14,6 +14,11 @@ import {
   listDirectoryAliases,
 } from "../db/directory.js";
 import { resolveConfigPath } from "../runtime.js";
+import {
+  configurePostgresProjection,
+  flushPostgresProjection,
+} from "../db/postgres-projection.js";
+import { appLogger } from "../runtime.js";
 
 export interface ChatsListOptions {
   configPath?: string | undefined;
@@ -147,26 +152,27 @@ export interface ChatsPolicyOptions {
 }
 
 /** Returns the process exit code (0 ok, 1 chat unknown). */
-export function runChatsAllow(
+export async function runChatsAllow(
   jid: string,
   options: ChatsPolicyOptions = {},
-): number {
+): Promise<number> {
   return setPolicy(jid, options, true);
 }
 
-export function runChatsBlock(
+export async function runChatsBlock(
   jid: string,
   options: ChatsPolicyOptions = {},
-): number {
+): Promise<number> {
   return setPolicy(jid, options, false);
 }
 
-function setPolicy(
+async function setPolicy(
   jid: string,
   options: ChatsPolicyOptions,
   allow: boolean,
-): number {
+): Promise<number> {
   const config = loadConfig(resolveConfigPath(options.configPath));
+  configurePostgresProjection(config, appLogger(config));
   const db = openDb(config.paths.sqlite, { migrate: false });
   try {
     if (!getChat(db, config.account.name, jid)) {
@@ -186,6 +192,8 @@ function setPolicy(
     }
     return 0;
   } finally {
+    // Drain before closing: a queued projection re-reads SQLite when it runs.
+    await flushPostgresProjection();
     db.close();
   }
 }

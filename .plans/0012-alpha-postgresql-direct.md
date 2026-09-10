@@ -8,6 +8,38 @@ l’ingestion écrit directement dans le PostgreSQL du client, tandis que SQLite
 reste seulement un cache de travail provisoire. Cette tranche ne branche ni le
 spool, ni GCS, ni les lectures MCP/dashboard distantes.
 
+## État livré
+
+Cette tranche est livrée. Ce qui existe désormais :
+
+- `persistence.postgres` dans le YAML opérateur — URL sans mot de passe,
+  `password_file` et `ca_file` locaux `0600`, TLS vérifiant le certificat
+  serveur. Une URL portant un mot de passe ou un `sslmode` est refusée ; le
+  dashboard et l’environnement ne peuvent pas la modifier.
+- `whatsapp-conduit postgres migrate` applique
+  [0001_message_snapshots.sql](../postgres-migrations/0001_message_snapshots.sql)
+  et [0002_alpha_projection.sql](../postgres-migrations/0002_alpha_projection.sql).
+  Le daemon ne migre jamais la base cliente.
+- [src/db/postgres-projection.ts](../src/db/postgres-projection.ts) : file
+  mémoire sérielle déclenchée après chaque écriture SQLite pertinente. Les jobs
+  ne transportent que des clés naturelles et relisent SQLite au moment de
+  s’exécuter, donc une transaction annulée projette l’état réellement conservé
+  et les répétitions coalescent. Chaque job s’exécute dans une transaction
+  PostgreSQL, avec une échéance de 5 secondes après acquisition de la connexion ;
+  l’acquisition elle-même est bornée par `connectionTimeoutMillis`.
+- Sous ce profil, `run` n’injecte plus de clé outbox dans l’ingestion.
+- Un échec distant produit une seule ligne de journal — famille d’opération et
+  code SQLSTATE — sans texte, JID, secret, URL ni payload, sans retry et sans
+  statut public.
+
+Validation exécutée : `pnpm lint`, `pnpm format:check`, `pnpm typecheck`,
+`pnpm build`, `pnpm test`, plus
+[test/postgres-integration.test.ts](../test/postgres-integration.test.ts) contre
+un PostgreSQL éphémère (`WA_TEST_POSTGRES_URL`, voir l’en-tête du fichier).
+
+Reste ouvert : la vérification sur le PostgreSQL réel du pilote, et la question
+d’une borne de taille pour la file mémoire.
+
 ## État de départ
 
 - L’outbox SQLite chiffrée et son forwarder existent, mais l’ADR-0033 les

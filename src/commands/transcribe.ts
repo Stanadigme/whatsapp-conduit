@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { openDb } from "../db/index.js";
+import { configurePostgresProjection } from "../db/postgres-projection.js";
 import { appLogger, resolveConfigPath } from "../runtime.js";
 import { createSttAdapter } from "../stt/index.js";
 import { runTranscribeLoop, transcribeOnce } from "../stt/worker.js";
@@ -46,6 +47,7 @@ export async function runTranscribe(
   }
 
   const log = appLogger(config);
+  configurePostgresProjection(config, log);
   const db = openDb(config.paths.sqlite, { migrate: true });
 
   try {

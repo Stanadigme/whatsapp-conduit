@@ -1,6 +1,10 @@
 import { existsSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { openDb } from "../db/index.js";
+import {
+  configurePostgresProjection,
+  flushPostgresProjection,
+} from "../db/postgres-projection.js";
 import { upsertAccount } from "../db/queries.js";
 import { appLogger, resolveConfigPath } from "../runtime.js";
 import { DirectorySync } from "../whatsmeow/directory.js";
@@ -28,8 +32,9 @@ export async function runDirectorySync(
     );
   }
 
-  const db = openDb(config.paths.sqlite, { migrate: true });
   const log = appLogger(config);
+  configurePostgresProjection(config, log);
+  const db = openDb(config.paths.sqlite, { migrate: true });
   const transport = new WhatsmeowTransport({
     store: config.paths.whatsmeowStore,
     config: config.whatsmeow,
@@ -82,6 +87,8 @@ export async function runDirectorySync(
     }
   } finally {
     await transport.stop().catch(() => undefined);
+    // Drain before closing: a queued projection re-reads SQLite when it runs.
+    await flushPostgresProjection();
     db.close();
   }
 }

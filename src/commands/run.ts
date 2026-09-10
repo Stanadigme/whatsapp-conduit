@@ -15,6 +15,10 @@ import {
 import { normalizeJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
 import { ensureOutboxKey } from "../db/outbox.js";
+import {
+  configurePostgresProjection,
+  postgresProjectionEnabled,
+} from "../db/postgres-projection.js";
 import { upsertAccount } from "../db/queries.js";
 import { getChat } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
@@ -81,7 +85,12 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
 
   const sessionLock = acquireBaileysSessionLock(config.paths.authDir);
 
-  const outboxKey = ensureOutboxKey(config.paths.outboxKey);
+  // Alpha profile (ADR-0033): the client database is written directly, so no
+  // outbox snapshot is queued. Without it, the SQLite/outbox path is unchanged.
+  configurePostgresProjection(config, log);
+  const outboxKey = postgresProjectionEnabled()
+    ? undefined
+    : ensureOutboxKey(config.paths.outboxKey);
   const db = openDb(config.paths.sqlite, { migrate: true });
 
   upsertAccount(db, {
@@ -102,7 +111,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     accountId: config.account.name,
     config,
     logger: log,
-    outboxKey,
+    ...(outboxKey ? { outboxKey } : {}),
   };
   const historyTransport = new BaileysHistoryTransport();
   const history = new HistoryCoordinator({
@@ -901,7 +910,9 @@ async function runWhatsmeow(
       accountId: config.account.name,
       config,
       logger: log,
-      outboxKey: ensureOutboxKey(config.paths.outboxKey),
+      ...(postgresProjectionEnabled()
+        ? {}
+        : { outboxKey: ensureOutboxKey(config.paths.outboxKey) }),
     },
     {
       onEvent: () =>

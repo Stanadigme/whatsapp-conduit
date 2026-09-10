@@ -151,7 +151,8 @@ describe("config set — transcription keys", () => {
 
   it("creates the stt section in a config written before it existed", () => {
     const legacy = defaultConfigYaml(join(dir, "data")).replace(
-      /\nstt:\n(?: {2}.*\n|\n)*?(?=web:)/,
+      // Stop at whatever top-level section follows stt, not at a named one.
+      /\nstt:\n(?: {2}.*\n|\n)*?(?=\w+:)/,
       "\n",
     );
     expect(legacy).not.toContain("stt:");
