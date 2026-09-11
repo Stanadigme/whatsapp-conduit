@@ -68,7 +68,9 @@ export function createPostgresPool(config: PostgresPersistenceConfig): Pool {
         ? decodeURIComponent(endpoint.pathname.slice(1))
         : undefined,
     password: secrets.password,
-    ssl: { ca: secrets.ca, rejectUnauthorized: true },
+    // Set SNI/hostname explicitly: Node otherwise verifies some IP endpoints
+    // as `localhost`, rejecting a correctly issued certificate.
+    ssl: { ca: secrets.ca, rejectUnauthorized: true, servername: host },
     // One connection: projections are serial by design, and the pilot runs a
     // single account.
     max: 1,
