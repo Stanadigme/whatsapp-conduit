@@ -160,6 +160,13 @@ export interface PostgresPersistenceConfig {
   caFile: string;
 }
 
+export interface GcsPersistenceConfig {
+  /** Client-owned bucket; media objects are keyed by content hash, never by JID. */
+  bucket: string;
+  /** Owner-only GCS service-account JSON key file, dedicated to this pilot. */
+  credentialsFile: string;
+}
+
 export interface PersistenceConfig {
   /**
    * `null` keeps the pre-alpha SQLite/outbox behavior. When set, ingestion
@@ -167,6 +174,12 @@ export interface PersistenceConfig {
    * outbox snapshots.
    */
   postgres: PostgresPersistenceConfig | null;
+  /**
+   * `null` keeps media on local disk only. When set (ADR-0033 phase 3),
+   * ingestion also uploads downloaded media to the client's bucket, and reads
+   * (MCP/dashboard) stream attachment bytes from there instead of local disk.
+   */
+  gcs: GcsPersistenceConfig | null;
 }
 
 export interface Config {
@@ -380,6 +393,36 @@ function asPostgresPersistence(
 }
 
 /**
+ * Resolve the operator-provided GCS destination (ADR-0033 phase 3). Bucket
+ * name is validated against GCS's own naming rules so a typo fails at config
+ * load rather than as an opaque API error during ingestion.
+ */
+function asGcsPersistence(
+  raw: Record<string, unknown>,
+  dataDir: string,
+): GcsPersistenceConfig | null {
+  const bucket = raw.bucket;
+  if (bucket === undefined || bucket === null || bucket === "") return null;
+  if (
+    typeof bucket !== "string" ||
+    !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucket)
+  ) {
+    throw new Error(
+      "Invalid persistence.gcs.bucket: expected a valid GCS bucket name.",
+    );
+  }
+  if (typeof raw.credentials_file !== "string" || raw.credentials_file === "") {
+    throw new Error(
+      "Invalid persistence.gcs.credentials_file: expected a path.",
+    );
+  }
+  return {
+    bucket,
+    credentialsFile: resolvePath(dataDir, raw.credentials_file, ""),
+  };
+}
+
+/**
  * Resolve a parsed YAML config object into a fully-populated {@link Config}
  * with absolute paths and observe-only-safe defaults applied.
  *
@@ -406,7 +449,9 @@ export function resolveConfig(
   const filtersRaw = section(raw, "filters");
   const exportsRaw = section(raw, "exports");
   const loggingRaw = section(raw, "logging");
-  const persistenceRaw = section(section(raw, "persistence"), "postgres");
+  const persistenceSectionRaw = section(raw, "persistence");
+  const persistenceRaw = section(persistenceSectionRaw, "postgres");
+  const gcsRaw = section(persistenceSectionRaw, "gcs");
 
   // Resolve to an absolute path so paths derived from it are stable regardless
   // of the cwd a later command (e.g. a systemd service) runs from.
@@ -520,6 +565,7 @@ export function resolveConfig(
     paths,
     persistence: {
       postgres: asPostgresPersistence(persistenceRaw, dataDir),
+      gcs: asGcsPersistence(gcsRaw, dataDir),
     },
     whatsmeow,
     baileys: {
@@ -684,6 +730,12 @@ persistence:
     url: ""
     # password_file: ${join(dataDir, "secrets", "postgres.password")}
     # ca_file: ${join(dataDir, "secrets", "postgres-ca.pem")}
+  # Alpha only (ADR-0033). Left empty, media stays on local disk only. The
+  # credentials file must be owner-only (chmod 0600): a dedicated service
+  # account key, scoped to this bucket alone.
+  gcs:
+    bucket: ""
+    # credentials_file: ${join(dataDir, "secrets", "gcs-credentials.json")}
 
 web:
   # The dashboard is local-only by default. Set public_origin only behind an

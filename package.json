@@ -32,6 +32,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@google-cloud/storage": "8.1.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@whatsmeow-node/whatsmeow-node": "0.7.0",
     "baileys": "7.0.0-rc13",

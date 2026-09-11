@@ -120,6 +120,7 @@ describe.skipIf(!url)("PostgreSQL contract", () => {
       { name: "0003_export_offsets.sql" },
       { name: "0004_message_search.sql" },
       { name: "0005_message_surrogate_id.sql" },
+      { name: "0006_gcs_media.sql" },
     ]);
   });
 
