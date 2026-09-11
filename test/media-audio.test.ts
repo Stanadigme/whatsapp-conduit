@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { WAMessage } from "baileys";
 import { ingestMessage, type IngestDeps } from "../src/baileys/ingest.js";
 import { resolveConfig, type Config } from "../src/config.js";
@@ -15,6 +15,15 @@ import {
 import type { NormalizedMessage } from "../src/ingest/types.js";
 import { persistAudioIfEnabled } from "../src/ingest/audio.js";
 import { createLogger } from "../src/util/logging.js";
+
+const gcsMock = vi.hoisted(() => ({
+  createGcsBucket: vi.fn(() => ({ marker: "fake-bucket" })),
+  uploadMediaToGcs: vi.fn(async () => undefined),
+  gcsObjectKey: vi.fn(
+    (accountId: string, sha256: string) => `${accountId}/${sha256}`,
+  ),
+}));
+vi.mock("../src/db/gcs.js", () => gcsMock);
 
 const CHAT = "c@s.whatsapp.net";
 
@@ -238,6 +247,64 @@ describe("shared audio persistence", () => {
     await persistAudioIfEnabled(fake.source, stored, deps);
 
     expect(fake.fetches).toBe(0);
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+});
+
+describe("GCS upload (phase 3, ADR-0033)", () => {
+  it("uploads and records gcs_uploaded_at once persistence.gcs is configured", async () => {
+    gcsMock.uploadMediaToGcs.mockClear();
+    const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
+    const { deps, stored } = setup(root, {
+      privacy: { store_media: true },
+      persistence: {
+        gcs: { bucket: "test-bucket", credentials_file: join(root, "creds.json") },
+      },
+    });
+    const fake = source(root);
+
+    await persistAudioIfEnabled(fake.source, stored, deps);
+
+    expect(gcsMock.uploadMediaToGcs).toHaveBeenCalledTimes(1);
+    const attachment = getAttachment(deps.db, "personal", CHAT, "AUDIO1");
+    expect(attachment?.gcs_uploaded_at).toEqual(expect.any(Number));
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("does not attempt an upload without persistence.gcs configured", async () => {
+    gcsMock.uploadMediaToGcs.mockClear();
+    const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
+    const { deps, stored } = setup(root, { privacy: { store_media: true } });
+    const fake = source(root);
+
+    await persistAudioIfEnabled(fake.source, stored, deps);
+
+    expect(gcsMock.uploadMediaToGcs).not.toHaveBeenCalled();
+    const attachment = getAttachment(deps.db, "personal", CHAT, "AUDIO1");
+    expect(attachment?.gcs_uploaded_at).toBeNull();
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("keeps the local file and does not throw when the upload fails", async () => {
+    gcsMock.uploadMediaToGcs.mockRejectedValueOnce(new Error("bucket unreachable"));
+    const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
+    const { deps, stored } = setup(root, {
+      privacy: { store_media: true },
+      persistence: {
+        gcs: { bucket: "test-bucket", credentials_file: join(root, "creds.json") },
+      },
+    });
+    const fake = source(root);
+
+    await persistAudioIfEnabled(fake.source, stored, deps);
+
+    const attachment = getAttachment(deps.db, "personal", CHAT, "AUDIO1");
+    expect(attachment?.gcs_uploaded_at).toBeNull();
+    // The local, already-downloaded copy is unaffected by a failed upload.
+    expect(attachment?.downloaded_at).toEqual(expect.any(Number));
     deps.db.close();
     await rm(root, { recursive: true, force: true });
   });

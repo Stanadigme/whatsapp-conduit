@@ -78,8 +78,11 @@ const MESSAGE_SQL = `select account_id, chat_jid, message_id, sender_jid, from_m
   from messages where account_id = ? and chat_jid = ? and message_id = ?`;
 
 // No file_path: the bytes belong in the client bucket, not on our disk.
+// gcs_uploaded_at, unlike downloaded_at, is genuinely about that bucket: it is
+// how a read path knows the client's own copy exists, once phase 3 is active.
 const ATTACHMENTS_SQL = `select account_id, chat_jid, message_id, attachment_index,
-    media_type, mime_type, file_name, sha256, size_bytes, downloaded_at, raw_json
+    media_type, mime_type, file_name, sha256, size_bytes, downloaded_at,
+    gcs_uploaded_at, raw_json
   from attachments where account_id = ? and chat_jid = ? and message_id = ?`;
 
 const TRANSCRIPTION_SQL = `select account_id, chat_jid, message_id, audio_sha256,

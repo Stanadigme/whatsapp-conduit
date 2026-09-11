@@ -9,8 +9,11 @@ import {
   unlink,
 } from "node:fs/promises";
 import { extname, join } from "node:path";
+import type { Bucket } from "@google-cloud/storage";
 import type { IngestDeps } from "../baileys/ingest.js";
+import type { GcsPersistenceConfig } from "../config.js";
 import { chatExposureAllowed } from "../db/directory.js";
+import { createGcsBucket, gcsObjectKey, uploadMediaToGcs } from "../db/gcs.js";
 import { getAttachment, upsertAttachment } from "../db/queries.js";
 import type { NormalizedMessage } from "../ingest/types.js";
 
@@ -89,6 +92,57 @@ export function contentAddressedMediaPath(
 
 async function removeTemp(path: string): Promise<void> {
   await unlink(path).catch(() => undefined);
+}
+
+// One bucket handle per process, like postgres-projection.ts's `active`
+// singleton: constructing @google-cloud/storage's client re-reads and
+// re-authenticates the credentials file, which a per-upload instance would
+// otherwise pay for on every voice note.
+let cachedBucket: Bucket | null = null;
+let cachedBucketConfig: GcsPersistenceConfig | null = null;
+
+function bucketFor(config: GcsPersistenceConfig): Bucket {
+  if (cachedBucket && cachedBucketConfig === config) return cachedBucket;
+  cachedBucket = createGcsBucket(config);
+  cachedBucketConfig = config;
+  return cachedBucket;
+}
+
+/**
+ * Best-effort, one attempt, no retry — the same posture as the PostgreSQL
+ * projection queue (db/postgres-projection.ts): a slow or unreachable bucket
+ * must never block ingestion. Runs synchronously in the caller rather than
+ * through a separate async queue: unlike every SQL write, this only fires for
+ * audio/media messages, a small fraction of ingestion traffic, so the extra
+ * machinery of a queue is not worth it at pilot scale (ADR-0033).
+ */
+async function uploadToGcsIfConfigured(
+  deps: IngestDeps,
+  normalized: NormalizedMessage,
+  sha256: string,
+  meta: AudioExtensionInput,
+  localPath: string,
+): Promise<void> {
+  const gcs = deps.config.persistence.gcs;
+  if (!gcs) return;
+  try {
+    const objectKey = gcsObjectKey(deps.accountId, sha256, meta);
+    await uploadMediaToGcs(bucketFor(gcs), objectKey, localPath, meta.mimeType);
+    upsertAttachment(deps.db, {
+      accountId: deps.accountId,
+      chatJid: normalized.chatJid,
+      messageId: normalized.messageId,
+      sha256,
+      gcsUploadedAt: Math.floor(Date.now() / 1000),
+    });
+  } catch (error) {
+    // No path, no bucket name, no object key: a bucket name is not a secret,
+    // but naming it here would still be one more thing to keep out of logs.
+    deps.logger.warn(
+      { err: error instanceof Error ? error.message : String(error) },
+      "gcs media upload failed",
+    );
+  }
 }
 
 async function sha256File(path: string): Promise<string> {
@@ -228,6 +282,13 @@ export async function persistAudioIfEnabled(
           downloadedAt: Math.floor(Date.now() / 1000),
         });
         await removeTemp(temporaryPath);
+        await uploadToGcsIfConfigured(
+          deps,
+          normalized,
+          hash,
+          { mimeType: source.mimeType, fileName: source.fileName },
+          destination,
+        );
         return;
       } catch (error) {
         lastError = error;

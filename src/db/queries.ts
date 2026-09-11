@@ -961,6 +961,8 @@ export interface AttachmentInput {
   sha256?: string | null;
   sizeBytes?: number | null;
   downloadedAt?: number | null;
+  /** Set once the bytes are confirmed uploaded to the client's GCS bucket. */
+  gcsUploadedAt?: number | null;
   rawJson?: string | null;
 }
 
@@ -968,10 +970,12 @@ export function upsertAttachment(db: Database, input: AttachmentInput): void {
   db.prepare(
     `insert into attachments (
        account_id, chat_jid, message_id, attachment_index, media_type,
-       mime_type, file_name, file_path, sha256, size_bytes, downloaded_at, raw_json
+       mime_type, file_name, file_path, sha256, size_bytes, downloaded_at,
+       gcs_uploaded_at, raw_json
      ) values (
        @accountId, @chatJid, @messageId, @attachmentIndex, @mediaType,
-       @mimeType, @fileName, @filePath, @sha256, @sizeBytes, @downloadedAt, @rawJson
+       @mimeType, @fileName, @filePath, @sha256, @sizeBytes, @downloadedAt,
+       @gcsUploadedAt, @rawJson
      )
      on conflict (account_id, chat_jid, message_id, attachment_index) do update set
        media_type = coalesce(excluded.media_type, attachments.media_type),
@@ -981,6 +985,7 @@ export function upsertAttachment(db: Database, input: AttachmentInput): void {
        sha256 = coalesce(excluded.sha256, attachments.sha256),
        size_bytes = coalesce(excluded.size_bytes, attachments.size_bytes),
        downloaded_at = coalesce(excluded.downloaded_at, attachments.downloaded_at),
+       gcs_uploaded_at = coalesce(excluded.gcs_uploaded_at, attachments.gcs_uploaded_at),
        raw_json = coalesce(excluded.raw_json, attachments.raw_json)`,
   ).run({
     accountId: input.accountId,
@@ -994,6 +999,7 @@ export function upsertAttachment(db: Database, input: AttachmentInput): void {
     sha256: input.sha256 ?? null,
     sizeBytes: input.sizeBytes ?? null,
     downloadedAt: input.downloadedAt ?? null,
+    gcsUploadedAt: input.gcsUploadedAt ?? null,
     rawJson: input.rawJson ?? null,
   });
   projectMessage(db, input.accountId, input.chatJid, input.messageId);
@@ -1011,6 +1017,7 @@ export interface AttachmentRow {
   sha256: string | null;
   size_bytes: number | null;
   downloaded_at: number | null;
+  gcs_uploaded_at: number | null;
   raw_json: string | null;
 }
 
