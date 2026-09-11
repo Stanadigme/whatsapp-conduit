@@ -14,6 +14,7 @@ import { runDirectorySync } from "./commands/directory.js";
 import { runDbBackup, runDbCheck, runDbMigrate } from "./commands/db.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runExport } from "./commands/export.js";
+import { runGcsImport } from "./commands/gcs.js";
 import { runInit } from "./commands/init.js";
 import { runLink } from "./commands/link.js";
 import { runMcp } from "./commands/mcp.js";
@@ -500,6 +501,21 @@ export function buildProgram(): Command {
     .action(async (opts: { json?: boolean }) => {
       const globals = program.opts<GlobalOptions>();
       await runPostgresImport({ configPath: globals.config, json: opts.json });
+    });
+
+  const gcs = program
+    .command("gcs")
+    .description("client GCS media destination (alpha, ADR-0033)");
+
+  gcs
+    .command("import")
+    .description(
+      "upload media already in the local cache to the client bucket, before relying on GCS for reads",
+    )
+    .option("--json", "emit machine-readable JSON")
+    .action(async (opts: { json?: boolean }) => {
+      const globals = program.opts<GlobalOptions>();
+      await runGcsImport({ configPath: globals.config, json: opts.json });
     });
 
   return program;
