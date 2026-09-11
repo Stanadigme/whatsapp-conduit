@@ -317,24 +317,27 @@ describe.skipIf(!url)("PostgresReader parity with SqliteReader", () => {
     expect(JSON.stringify(pg)).not.toMatch(/\/tmp|wac-pgr/);
   });
 
-  it("resolves the same local media file by recomputing its path from sha256", async () => {
+  it("streams the same local media file by recomputing its path from sha256", async () => {
     const mediaDir = mkdtempSync(join(tmpdir(), "wac-pgr-"));
     const { postgres } = await seed(mediaDir);
-    const resolved = await postgres.resolveLocalMediaFile(
+    const resolved = await postgres.openMediaStream(
       "33600000000@s.whatsapp.net",
       "M2",
       0,
     );
-    expect(resolved?.path).toBe(join(mediaDir, `${"c".repeat(64)}.opus`));
+    expect(resolved?.sha256).toBe("c".repeat(64));
+    const chunks: Buffer[] = [];
+    for await (const chunk of resolved!.stream) chunks.push(chunk as Buffer);
+    expect(Buffer.concat(chunks).toString("utf8")).toBe("fake-audio");
   });
 
-  it("refuses to resolve a media file in a blocked chat, on both backends", async () => {
+  it("refuses to stream a media file in a blocked chat, on both backends", async () => {
     const { sqlite, postgres } = await seed(mkdtempSync(join(tmpdir(), "wac-pgr-")));
     await expect(
-      postgres.resolveLocalMediaFile("33600000001@s.whatsapp.net", "M3", 0),
+      postgres.openMediaStream("33600000001@s.whatsapp.net", "M3", 0),
     ).rejects.toThrow("chat is not available");
     await expect(
-      sqlite.resolveLocalMediaFile("33600000001@s.whatsapp.net", "M3", 0),
+      sqlite.openMediaStream("33600000001@s.whatsapp.net", "M3", 0),
     ).rejects.toThrow("chat is not available");
   });
 

@@ -172,10 +172,11 @@ describe("SqliteReader", () => {
     expect(media.status).toBe("available");
   });
 
-  it("resolves a local media file only inside the media root", async () => {
+  it("streams a local media file only inside the media root", async () => {
     const mediaDir = mkdtempSync(join(tmpdir(), "wac-reader-"));
     const { db, reader } = seeded(mediaDir);
-    const path = join(mediaDir, `${"b".repeat(64)}.opus`);
+    const sha256 = "b".repeat(64);
+    const path = join(mediaDir, `${sha256}.opus`);
     writeFileSync(path, "fake-audio");
     upsertAttachment(db, {
       accountId: "personal",
@@ -183,15 +184,19 @@ describe("SqliteReader", () => {
       messageId: "M1",
       filePath: path,
       mimeType: "audio/ogg",
+      sha256,
     });
-    const resolved = await reader.resolveLocalMediaFile(
+    const resolved = await reader.openMediaStream(
       "33600000000@s.whatsapp.net",
       "M1",
       0,
     );
-    expect(resolved?.path).toBe(path);
+    expect(resolved?.sha256).toBe(sha256);
+    const chunks: Buffer[] = [];
+    for await (const chunk of resolved!.stream) chunks.push(chunk as Buffer);
+    expect(Buffer.concat(chunks).toString("utf8")).toBe("fake-audio");
 
-    const missing = await reader.resolveLocalMediaFile(
+    const missing = await reader.openMediaStream(
       "33600000000@s.whatsapp.net",
       "does-not-exist",
       0,
@@ -199,10 +204,11 @@ describe("SqliteReader", () => {
     expect(missing).toBeNull();
   });
 
-  it("refuses to resolve a media file in a chat that is not allowed", async () => {
+  it("refuses to stream a media file in a chat that is not allowed", async () => {
     const mediaDir = mkdtempSync(join(tmpdir(), "wac-reader-"));
     const { db, reader } = seeded(mediaDir);
-    const path = join(mediaDir, `${"d".repeat(64)}.opus`);
+    const sha256 = "d".repeat(64);
+    const path = join(mediaDir, `${sha256}.opus`);
     writeFileSync(path, "fake-audio");
     upsertAttachment(db, {
       accountId: "personal",
@@ -210,9 +216,10 @@ describe("SqliteReader", () => {
       messageId: "M2",
       filePath: path,
       mimeType: "audio/ogg",
+      sha256,
     });
     await expect(
-      reader.resolveLocalMediaFile("33600000001@s.whatsapp.net", "M2", 0),
+      reader.openMediaStream("33600000001@s.whatsapp.net", "M2", 0),
     ).rejects.toThrow("chat is not available");
   });
 

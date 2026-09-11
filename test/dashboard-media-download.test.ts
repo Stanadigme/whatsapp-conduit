@@ -30,7 +30,11 @@ describe("dashboard media download", () => {
     setChatAllowed(db, accountId, chatJid, true);
     upsertMessage(db, { accountId, chatJid, messageId, hasMedia: true });
     mkdirSync(config.paths.mediaDir, { recursive: true });
-    const path = join(config.paths.mediaDir, "photo.jpg");
+    // Content-addressed, matching how ingestion actually names a stored file
+    // (src/ingest/audio.ts): the read path recomputes this from sha256 rather
+    // than trusting a stored path.
+    const sha256 = "e".repeat(64);
+    const path = join(config.paths.mediaDir, `${sha256}.jpg`);
     writeFileSync(path, "private bytes");
     upsertAttachment(db, {
       accountId,
@@ -40,6 +44,7 @@ describe("dashboard media download", () => {
       mimeType: "image/jpeg",
       fileName: "photo.jpg",
       filePath: path,
+      sha256,
       sizeBytes: 13,
       downloadedAt: 1_700_000_000,
     });

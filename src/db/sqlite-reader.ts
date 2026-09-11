@@ -1,8 +1,7 @@
-import { existsSync } from "node:fs";
-import { resolve as resolvePath, relative } from "node:path";
 import type { Database } from "better-sqlite3";
 import type { Config } from "../config.js";
 import { listDashboardChats } from "../dashboard/chats.js";
+import { fromAttachmentRow, openAttachmentStream } from "./media-serving.js";
 import { flushPostgresProjection } from "./postgres-projection.js";
 import {
   chatStats as sqliteChatStats,
@@ -33,12 +32,7 @@ import {
   setConsumerOffset as sqliteSetConsumerOffset,
   setTranscriptionCorrection as sqliteSetTranscriptionCorrection,
 } from "./queries.js";
-import type {
-  ClientDataReader,
-  ExportSelection,
-  LocalMediaFile,
-  McpChatStatsView,
-} from "./reader.js";
+import type { ClientDataReader, ExportSelection, McpChatStatsView } from "./reader.js";
 
 /**
  * The SQLite backend: a thin async wrapper around the existing, tested,
@@ -147,21 +141,10 @@ export function createSqliteReader(
     },
 
     async getMediaMetadata(chatJid, messageId) {
-      // Never forward the raw local path a client has no use for (it revealed
-      // server filesystem layout for no functional benefit); `available`
-      // already conveys everything a caller needs.
-      const full = sqliteGetMedia(ctx, chatJid, messageId);
-      const attachments = full.attachments as
-        | Array<Record<string, unknown>>
-        | undefined;
-      if (!attachments) return full;
-      return {
-        ...full,
-        attachments: attachments.map(({ filePath: _filePath, ...rest }) => rest),
-      };
+      return sqliteGetMedia(ctx, chatJid, messageId);
     },
 
-    async resolveLocalMediaFile(chatJid, messageId, attachmentIndex) {
+    async openMediaStream(chatJid, messageId, attachmentIndex) {
       allowedChat(readCtx, chatJid);
       const attachment = getAttachment(
         db,
@@ -170,12 +153,8 @@ export function createSqliteReader(
         messageId,
         attachmentIndex,
       );
-      return resolveWithinMediaRoot(
-        config.paths.mediaDir,
-        attachment?.file_path ?? null,
-        attachment?.mime_type ?? null,
-        attachment?.file_name ?? null,
-      );
+      if (!attachment) return null;
+      return openAttachmentStream(config, accountId, fromAttachmentRow(attachment));
     },
 
     async getHistoryJob(jobId) {
@@ -198,19 +177,4 @@ export function createSqliteReader(
       sqliteSetConsumerOffset(db, consumerName, offset);
     },
   };
-}
-
-/** Reject a path that would escape the configured media root (defense in depth). */
-function resolveWithinMediaRoot(
-  mediaDir: string,
-  filePath: string | null,
-  mimeType: string | null,
-  fileName: string | null,
-): LocalMediaFile | null {
-  if (!filePath) return null;
-  const mediaRoot = resolvePath(mediaDir);
-  const path = resolvePath(filePath);
-  if (relative(mediaRoot, path).startsWith("..")) return null;
-  if (!existsSync(path)) return null;
-  return { path, mimeType, fileName };
 }

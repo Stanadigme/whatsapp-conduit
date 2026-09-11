@@ -9,11 +9,13 @@ import {
   unlink,
 } from "node:fs/promises";
 import { extname, join } from "node:path";
-import type { Bucket } from "@google-cloud/storage";
 import type { IngestDeps } from "../baileys/ingest.js";
-import type { GcsPersistenceConfig } from "../config.js";
 import { chatExposureAllowed } from "../db/directory.js";
-import { createGcsBucket, gcsObjectKey, uploadMediaToGcs } from "../db/gcs.js";
+import {
+  getOrCreateGcsBucket,
+  gcsObjectKey,
+  uploadMediaToGcs,
+} from "../db/gcs.js";
 import { getAttachment, upsertAttachment } from "../db/queries.js";
 import type { NormalizedMessage } from "../ingest/types.js";
 
@@ -94,20 +96,6 @@ async function removeTemp(path: string): Promise<void> {
   await unlink(path).catch(() => undefined);
 }
 
-// One bucket handle per process, like postgres-projection.ts's `active`
-// singleton: constructing @google-cloud/storage's client re-reads and
-// re-authenticates the credentials file, which a per-upload instance would
-// otherwise pay for on every voice note.
-let cachedBucket: Bucket | null = null;
-let cachedBucketConfig: GcsPersistenceConfig | null = null;
-
-function bucketFor(config: GcsPersistenceConfig): Bucket {
-  if (cachedBucket && cachedBucketConfig === config) return cachedBucket;
-  cachedBucket = createGcsBucket(config);
-  cachedBucketConfig = config;
-  return cachedBucket;
-}
-
 /**
  * Best-effort, one attempt, no retry — the same posture as the PostgreSQL
  * projection queue (db/postgres-projection.ts): a slow or unreachable bucket
@@ -127,7 +115,12 @@ async function uploadToGcsIfConfigured(
   if (!gcs) return;
   try {
     const objectKey = gcsObjectKey(deps.accountId, sha256, meta);
-    await uploadMediaToGcs(bucketFor(gcs), objectKey, localPath, meta.mimeType);
+    await uploadMediaToGcs(
+      getOrCreateGcsBucket(gcs),
+      objectKey,
+      localPath,
+      meta.mimeType,
+    );
     upsertAttachment(deps.db, {
       accountId: deps.accountId,
       chatJid: normalized.chatJid,

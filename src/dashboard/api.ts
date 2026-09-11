@@ -1,6 +1,4 @@
 import type { Database } from "better-sqlite3";
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { Readable } from "node:stream";
 import type { Config } from "../config.js";
@@ -83,25 +81,23 @@ async function attachmentDownload(
   attachmentIndex: number,
 ): Promise<Response> {
   try {
-    // resolveLocalMediaFile checks the allow/block predicate itself, and
-    // resolves the on-disk path without trusting a client-supplied one.
-    const attachment = await context.reader.resolveLocalMediaFile(
+    // openMediaStream checks the allow/block predicate itself, and reads
+    // from GCS or local disk without ever exposing a path, key, or URL.
+    const media = await context.reader.openMediaStream(
       chatJid,
       messageId,
       attachmentIndex,
     );
-    if (!attachment) return json({ error: "not found" }, 404);
-    const details = await stat(attachment.path).catch(() => null);
-    if (!details?.isFile()) return json({ error: "not found" }, 404);
+    if (!media) return json({ error: "not found" }, 404);
     return new Response(
-      Readable.toWeb(
-        createReadStream(attachment.path),
-      ) as ReadableStream<Uint8Array>,
+      Readable.toWeb(media.stream) as ReadableStream<Uint8Array>,
       {
         headers: {
-          "Content-Type": attachment.mimeType ?? "application/octet-stream",
-          "Content-Length": String(details.size),
-          "Content-Disposition": `attachment; filename="${safeDownloadName(attachment.fileName, basename(attachment.path))}"`,
+          "Content-Type": media.mimeType ?? "application/octet-stream",
+          ...(media.sizeBytes !== null
+            ? { "Content-Length": String(media.sizeBytes) }
+            : {}),
+          "Content-Disposition": `attachment; filename="${safeDownloadName(media.fileName, media.sha256 ?? "media")}"`,
           "Cache-Control": "no-store",
         },
       },

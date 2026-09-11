@@ -1,6 +1,6 @@
-import { existsSync } from "node:fs";
 import type { Database } from "better-sqlite3";
 import type { Config } from "../config.js";
+import { attachmentAvailable, fromAttachmentRow } from "../db/media-serving.js";
 import type {
   AttachmentRow,
   ChatRow,
@@ -476,24 +476,24 @@ export function getMedia(
       downloadTriggered: false,
     };
   }
+  const availability = row.map((item) =>
+    attachmentAvailable(ctx.config, fromAttachmentRow(item)),
+  );
   return {
     chatJid,
     messageId,
-    status: row.some((item) => item.file_path && existsSync(item.file_path))
-      ? "available"
-      : "metadata-only",
+    status: availability.some(Boolean) ? "available" : "metadata-only",
     downloadTriggered: false,
-    attachments: row.map((item) => ({
+    // Never a raw path or GCS object key: `available` is everything a
+    // caller needs, and the runtime always proxies the bytes itself.
+    attachments: row.map((item, index) => ({
       mediaType: item.media_type,
       mimeType: item.mime_type,
       fileName: item.file_name,
       sha256: item.sha256,
       sizeBytes: item.size_bytes,
       downloadedAt: item.downloaded_at,
-      available: Boolean(item.file_path && existsSync(item.file_path)),
-      ...(item.file_path && existsSync(item.file_path)
-        ? { filePath: item.file_path }
-        : {}),
+      available: availability[index],
     })),
   };
 }

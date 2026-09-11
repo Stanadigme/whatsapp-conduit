@@ -7,6 +7,7 @@ import type {
   MessageFilters,
   MessageView,
 } from "../read/messages.js";
+import type { MediaStream } from "./media-serving.js";
 import type {
   ChatRow,
   ConsumerOffsetRow,
@@ -88,17 +89,21 @@ export interface ClientDataReader {
     input: Omit<TranscriptionCorrectionInput, "accountId">,
   ): Promise<boolean>;
 
-  /** Metadata only, `available` reflects the local cache — never a raw path. */
+  /**
+   * Metadata only, never a raw path or GCS object key/URL. `available`
+   * reflects GCS upload confirmation once `persistence.gcs` is configured
+   * (ADR-0033 phase 3), the local cache otherwise.
+   */
   getMediaMetadata(
     chatJid: string,
     messageId: string,
   ): Promise<Record<string, unknown>>;
-  /** Resolve one attachment to a local file to stream, or null if absent. */
-  resolveLocalMediaFile(
+  /** Open a stream for one attachment's bytes — from GCS or local disk, never a URL. */
+  openMediaStream(
     chatJid: string,
     messageId: string,
     attachmentIndex: number,
-  ): Promise<LocalMediaFile | null>;
+  ): Promise<MediaStream | null>;
 
   getHistoryJob(jobId: string): Promise<HistoryJobRow | undefined>;
   getActiveHistoryJob(): Promise<HistoryJobRow | undefined>;
@@ -131,12 +136,6 @@ export interface McpChatStatsView {
   media: number;
   firstMessageTs: number | null;
   lastMessageTs: number | null;
-}
-
-export interface LocalMediaFile {
-  path: string;
-  mimeType: string | null;
-  fileName: string | null;
 }
 
 /** Mirrors db/queries.ts's ExportSelect, minus the SQLite-only `accountId`. */

@@ -1,13 +1,8 @@
-import { relative, resolve as resolvePath } from "node:path";
-import { existsSync } from "node:fs";
 import type { Pool } from "pg";
 import { phoneFromJid } from "../baileys/jid.js";
 import type { Config } from "../config.js";
 import type { DashboardChat, DashboardChatFilter } from "../dashboard/chats.js";
-import {
-  contentAddressedMediaPath,
-  type AudioExtensionInput,
-} from "../ingest/audio.js";
+import type { AudioExtensionInput } from "../ingest/audio.js";
 import type { ChatView } from "../mcp/read.js";
 import {
   McpRequestError,
@@ -18,6 +13,11 @@ import {
   page,
 } from "../mcp/types.js";
 import { mcpMessageView, type MessageFilters, type MessageView } from "../read/messages.js";
+import {
+  attachmentAvailable,
+  openAttachmentStream,
+  type AttachmentMediaColumns,
+} from "./media-serving.js";
 import type {
   ChatRow,
   ConsumerOffsetRow,
@@ -702,15 +702,9 @@ export function createPostgresReader(
 
     async getMediaMetadata(chatJid, messageId) {
       await requireAllowedChat(chatJid);
-      const attachments = await many<{
-        media_type: string | null;
-        mime_type: string | null;
-        file_name: string | null;
-        sha256: string | null;
-        size_bytes: string | null;
-        downloaded_at: string | null;
-      }>(
-        `select media_type, mime_type, file_name, sha256, size_bytes, downloaded_at
+      const attachments = await many<PgAttachmentMediaRow>(
+        `select media_type, mime_type, file_name, sha256, size_bytes,
+                downloaded_at, gcs_uploaded_at
          from attachments where account_id = $1 and chat_jid = $2 and message_id = $3
          order by attachment_index`,
         [accountId, chatJid, messageId],
@@ -738,7 +732,7 @@ export function createPostgresReader(
         sha256: item.sha256,
         sizeBytes: item.size_bytes === null ? null : Number(item.size_bytes),
         downloadedAt: item.downloaded_at === null ? null : Number(item.downloaded_at),
-        available: localAttachmentAvailable(config, item),
+        available: attachmentAvailable(config, fromPgAttachmentRow(item)),
       }));
       return {
         chatJid,
@@ -749,28 +743,17 @@ export function createPostgresReader(
       };
     },
 
-    async resolveLocalMediaFile(chatJid, messageId, attachmentIndex) {
+    async openMediaStream(chatJid, messageId, attachmentIndex) {
       await requireAllowedChat(chatJid);
-      const attachment = await one<{
-        mime_type: string | null;
-        file_name: string | null;
-        media_type: string | null;
-        sha256: string | null;
-      }>(
-        `select mime_type, file_name, media_type, sha256 from attachments
+      const attachment = await one<PgAttachmentMediaRow>(
+        `select mime_type, file_name, media_type, sha256, size_bytes,
+                downloaded_at, gcs_uploaded_at
+         from attachments
          where account_id = $1 and chat_jid = $2 and message_id = $3 and attachment_index = $4`,
         [accountId, chatJid, messageId, attachmentIndex],
       );
       if (!attachment) return null;
-      const path = contentAddressedMediaPath(
-        config.paths.mediaDir,
-        attachment.sha256,
-        extensionInput(attachment),
-      );
-      if (!path || !withinMediaRoot(config.paths.mediaDir, path) || !existsSync(path)) {
-        return null;
-      }
-      return { path, mimeType: attachment.mime_type, fileName: attachment.file_name };
+      return openAttachmentStream(config, accountId, fromPgAttachmentRow(attachment));
     },
 
     async getHistoryJob(jobId) {
@@ -896,11 +879,14 @@ export function createPostgresReader(
   };
 }
 
-interface AttachmentMediaColumns {
+interface PgAttachmentMediaRow {
   sha256: string | null;
   mime_type: string | null;
   file_name: string | null;
   media_type: string | null;
+  gcs_uploaded_at: string | null;
+  size_bytes?: string | null;
+  downloaded_at?: string | null;
 }
 
 const AUDIO_MEDIA_TYPES = [
@@ -911,34 +897,24 @@ const AUDIO_MEDIA_TYPES = [
   "sticker",
 ] satisfies Array<NonNullable<AudioExtensionInput["mediaType"]>>;
 
-function extensionInput(item: AttachmentMediaColumns): AudioExtensionInput {
-  const mediaType = (
-    AUDIO_MEDIA_TYPES as readonly string[]
-  ).includes(item.media_type ?? "")
-    ? (item.media_type as NonNullable<AudioExtensionInput["mediaType"]>)
+/** Adapts this file's snake_case row shape to media-serving.ts's. */
+function fromPgAttachmentRow(row: PgAttachmentMediaRow): AttachmentMediaColumns {
+  const mediaType = (AUDIO_MEDIA_TYPES as readonly string[]).includes(
+    row.media_type ?? "",
+  )
+    ? (row.media_type as NonNullable<AudioExtensionInput["mediaType"]>)
     : undefined;
   return {
-    mimeType: item.mime_type,
-    fileName: item.file_name,
+    sha256: row.sha256,
+    mimeType: row.mime_type,
+    fileName: row.file_name,
+    gcsUploadedAt: row.gcs_uploaded_at === null ? null : Number(row.gcs_uploaded_at),
+    sizeBytes:
+      row.size_bytes === null || row.size_bytes === undefined
+        ? null
+        : Number(row.size_bytes),
     ...(mediaType ? { mediaType } : {}),
   };
-}
-
-function localAttachmentAvailable(
-  config: Config,
-  item: AttachmentMediaColumns,
-): boolean {
-  const path = contentAddressedMediaPath(
-    config.paths.mediaDir,
-    item.sha256,
-    extensionInput(item),
-  );
-  return path !== null && withinMediaRoot(config.paths.mediaDir, path) && existsSync(path);
-}
-
-function withinMediaRoot(mediaDir: string, path: string): boolean {
-  const mediaRoot = resolvePath(mediaDir);
-  return !relative(mediaRoot, resolvePath(path)).startsWith("..");
 }
 
 function toHistoryJobRow(row: PgHistoryJobRow): HistoryJobRow {

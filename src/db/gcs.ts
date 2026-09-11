@@ -1,4 +1,5 @@
 import { lstatSync } from "node:fs";
+import type { Readable } from "node:stream";
 import { Storage, type Bucket } from "@google-cloud/storage";
 import type { GcsPersistenceConfig } from "../config.js";
 import type { AudioExtensionInput } from "../ingest/audio.js";
@@ -34,6 +35,22 @@ export function createGcsBucket(config: GcsPersistenceConfig): Bucket {
   return storage.bucket(config.bucket);
 }
 
+// One bucket handle per process: constructing the client re-reads and
+// re-authenticates the credentials file, which a per-call instance would pay
+// for on every upload and every read. Both the ingestion daemon and a reader
+// process (MCP, dashboard, export) each keep their own cache, since each is a
+// separate process — same shape as postgres-projection.ts's `active` pool.
+let cachedBucket: Bucket | null = null;
+let cachedBucketConfig: GcsPersistenceConfig | null = null;
+
+/** Reference equality on `config` is enough: it is loaded once per process. */
+export function getOrCreateGcsBucket(config: GcsPersistenceConfig): Bucket {
+  if (cachedBucket && cachedBucketConfig === config) return cachedBucket;
+  cachedBucket = createGcsBucket(config);
+  cachedBucketConfig = config;
+  return cachedBucket;
+}
+
 /**
  * Object key for one attachment's bytes: content-addressed, exactly like the
  * local cache filename (src/ingest/audio.ts), so it is derived rather than
@@ -67,9 +84,6 @@ export async function uploadMediaToGcs(
 }
 
 /** Stream one object's bytes, for the runtime to proxy — never a signed URL. */
-export function openGcsMediaStream(
-  bucket: Bucket,
-  objectKey: string,
-): NodeJS.ReadableStream {
+export function openGcsMediaStream(bucket: Bucket, objectKey: string): Readable {
   return bucket.file(objectKey).createReadStream();
 }

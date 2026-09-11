@@ -188,7 +188,7 @@ describe.skipIf(!url || !caFile)("MCP server over PostgreSQL (TLS)", () => {
         expect(healthBody.allowedChats).toBe(1);
         // Proves PostgresReader, not SqliteReader, actually answered: the
         // latest-migration name only exists in the Postgres history.
-        expect(healthBody.schema).toBe("0005_message_surrogate_id.sql");
+        expect(healthBody.schema).toBe("0006_gcs_media.sql");
 
         const search = await mcpClient.callTool({
           name: "wa_messages_search",

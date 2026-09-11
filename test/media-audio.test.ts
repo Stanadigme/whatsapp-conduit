@@ -17,7 +17,7 @@ import { persistAudioIfEnabled } from "../src/ingest/audio.js";
 import { createLogger } from "../src/util/logging.js";
 
 const gcsMock = vi.hoisted(() => ({
-  createGcsBucket: vi.fn(() => ({ marker: "fake-bucket" })),
+  getOrCreateGcsBucket: vi.fn(() => ({ marker: "fake-bucket" })),
   uploadMediaToGcs: vi.fn(async () => undefined),
   gcsObjectKey: vi.fn(
     (accountId: string, sha256: string) => `${accountId}/${sha256}`,
