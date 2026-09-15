@@ -227,6 +227,7 @@ describe("local dashboard HTTP API", () => {
     const staticHtml = await staticResponse.text();
     expect(staticHtml).toContain("Contacts et groupes");
     expect(staticHtml).toContain("data-requires-connection hidden");
+    expect(staticHtml).toContain("Appairage WhatsApp");
     expect(staticHtml).not.toContain('id="token"');
     const setCookie = staticResponse.headers.get("set-cookie");
     expect(setCookie).toMatch(
@@ -242,6 +243,8 @@ describe("local dashboard HTTP API", () => {
     expect(appJs).toContain("same-origin");
     expect(appJs).toContain("refreshRuntimeView");
     expect(appJs).toContain("previousRuntimeConnection");
+    expect(appJs).toContain("baileysAuthLinked");
+    expect(appJs).toContain("Démarrer l’appairage");
     expect(appJs).toContain("previousBaileysLinkStatus");
     expect(appJs).not.toContain("Bearer");
     expect(appJs).not.toContain('id="token"');

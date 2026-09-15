@@ -2,10 +2,10 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * QR codes are rotated by WhatsApp roughly every 20 seconds. A stale file
- * must therefore never be served as if it were an active pairing credential.
+ * The first QR renewal can take roughly a minute. Keep a bounded margin so
+ * the dashboard does not hide a still-live code between Baileys events.
  */
-export const BAILEYS_LINK_QR_MAX_AGE_MS = 45_000;
+export const BAILEYS_LINK_QR_MAX_AGE_MS = 75_000;
 
 const BAILEYS_LINK_QR_FILE = "pairing-qr.svg";
 const MAX_QR_SVG_BYTES = 256 * 1024;
