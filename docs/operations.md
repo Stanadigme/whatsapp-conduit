@@ -146,6 +146,18 @@ interrupted before authentication completes, its provisional pairing
 credentials are cleared automatically; retry `link` without deleting an
 existing authenticated auth directory.
 
+QR pairing needs two scans since 2026: after the first one WhatsApp sends
+`<notification type="companion_reg_refresh">` to retire the adv secret encoded
+in the QR, then asks the phone to scan again. Baileys ≤ 7.0.0-rc14 ignores it
+(WhiskeySockets/Baileys#2737), so the second scan fails with "check your
+connection" while the logs show `failed to ack notification` followed by a 408.
+`ConduitConnection` (`src/baileys/connect.ts`) handles the notification itself:
+new secret, same QR ref re-rendered, later rotations rewritten. Keep that
+handler until a Baileys release listens to
+`CB:notification,type:companion_reg_refresh` (upstream PR #2765). The
+`failed to ack notification` line is upstream noise (PR #2749) and does not
+block pairing.
+
 Baileys logs are kept at `warn` by default. For a protocol diagnosis, set
 `logging.baileys_level: trace` while keeping
 `logging.baileys_log_message_text: false`, repeat the command, and collect only
