@@ -1,6 +1,9 @@
+import { randomBytes } from "node:crypto";
 import {
   DisconnectReason,
+  getBinaryNodeChild,
   jidNormalizedUser,
+  type BinaryNode,
   type ConnectionState,
   type AuthenticationCreds,
 } from "baileys";
@@ -109,6 +112,8 @@ export class ConduitConnection {
 
   private sock?: WASocket;
   private version?: WAVersion;
+  /** Last QR emitted by Baileys on the current socket, as received. */
+  private lastQr?: string | undefined;
   private started = false;
   private stopped = false;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
@@ -159,6 +164,7 @@ export class ConduitConnection {
     });
     const sock = this.socketFactory(socketConfig);
     this.sock = sock;
+    this.lastQr = undefined;
 
     sock.ev.on("creds.update", (update) => {
       void this.authState
@@ -173,12 +179,58 @@ export class ConduitConnection {
     sock.ev.on("connection.update", (update) => {
       this.handleUpdate(update);
     });
+    sock.ws.on(
+      "CB:notification,type:companion_reg_refresh",
+      (node: BinaryNode) => {
+        this.handleCompanionRegRefresh(node);
+      },
+    );
+  }
+
+  /**
+   * After the first QR scan WhatsApp retires the adv secret advertised in the
+   * QR (`<notification type="companion_reg_refresh">`) and asks the phone to
+   * scan again. Baileys 7.0.0-rc13 ignores it, so the second scan fails with
+   * "check your connection" (WhiskeySockets/Baileys#2737). Mirror WA Web and
+   * upstream PR #2765: mint a new secret and re-render the ref on screen.
+   * Remove once Baileys ships that fix.
+   */
+  private handleCompanionRegRefresh(node: BinaryNode): void {
+    const creds = this.authState.state.creds;
+    const accepted = ["companion_reg_refresh", "pair-device-rotate-qr"].some(
+      (tag) => getBinaryNodeChild(node, tag),
+    );
+    // A registered session's secret is what pairing is verified against.
+    if (!accepted || creds.me) return;
+    creds.advSecretKey = randomBytes(32).toString("base64");
+    void this.authState.saveCreds().catch(() => {
+      this.logger.warn("failed to persist Baileys credentials");
+    });
+    this.logger.info(
+      "WhatsApp retired the pairing secret; re-rendering the QR",
+    );
+    if (this.lastQr)
+      this.handlers.onQr?.(this.withCurrentAdvSecret(this.lastQr));
+  }
+
+  /**
+   * Baileys captures the adv secret once per `pair-device`; substitute the
+   * live one so every QR (including its own 20 s rotations) stays valid.
+   */
+  private withCurrentAdvSecret(qr: string): string {
+    const parts = qr.split(",");
+    if (parts.length < 4) return qr;
+    parts[3] = this.authState.state.creds.advSecretKey;
+    return parts.join(",");
   }
 
   private handleUpdate(update: Partial<ConnectionState>): void {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) this.handlers.onQr?.(qr);
+    if (qr) {
+      this.lastQr = qr;
+      this.handlers.onQr?.(this.withCurrentAdvSecret(qr));
+    }
     if (connection === "connecting") this.handlers.onConnecting?.();
     if (connection === "open") {
       this.handlers.onOpen?.({ selfJid: this.selfJid() });

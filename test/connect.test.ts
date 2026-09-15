@@ -25,12 +25,23 @@ class FakeSocket {
     },
   };
 
+  /** Raw stanza listeners (`CB:*`), kept apart from `ev` under a prefix. */
+  readonly ws = {
+    on: (event: string, listener: (arg: unknown) => void): void => {
+      this.ev.on(`ws:${event}`, listener);
+    },
+  };
+
   end(): void {
     this.ended = true;
   }
 
   emit(event: string, arg?: unknown): void {
     for (const l of this.listeners.get(event) ?? []) l(arg);
+  }
+
+  emitWs(event: string, node: unknown): void {
+    this.emit(`ws:${event}`, node);
   }
 }
 
@@ -263,5 +274,70 @@ describe("ConduitConnection", () => {
     await tick();
     expect(sockets).toHaveLength(1);
     expect(sockets[0]!.ended).toBe(true);
+  });
+  it("rotates the adv secret and re-renders the QR on companion_reg_refresh", async () => {
+    const creds: { advSecretKey: string; me?: { id: string } } = {
+      advSecretKey: "old",
+    };
+    let saves = 0;
+    const qrs: string[] = [];
+    const socket = new FakeSocket();
+    const connection = new ConduitConnection({
+      config,
+      authState: {
+        state: {
+          creds,
+          keys: { get: async () => ({}), set: async () => undefined },
+        },
+        saveCreds: async () => {
+          saves += 1;
+        },
+      } as unknown as AuthState,
+      logger,
+      mode: "link",
+      socketFactory: () => socket as unknown as WASocket,
+      handlers: {
+        onQr(qr) {
+          qrs.push(qr);
+        },
+      },
+    });
+    await connection.start();
+
+    socket.emit("connection.update", { qr: "ref1,noise,ident,old,1" });
+    expect(qrs).toEqual(["ref1,noise,ident,old,1"]);
+
+    const refresh = {
+      tag: "notification",
+      attrs: { type: "companion_reg_refresh" },
+      content: [{ tag: "companion_reg_refresh", attrs: {} }],
+    };
+    socket.emitWs("CB:notification,type:companion_reg_refresh", refresh);
+    await tick();
+    expect(creds.advSecretKey).not.toBe("old");
+    expect(Buffer.from(creds.advSecretKey, "base64")).toHaveLength(32);
+    expect(saves).toBe(1);
+    // Same ref as on screen, new secret only.
+    expect(qrs[1]).toBe(`ref1,noise,ident,${creds.advSecretKey},1`);
+
+    // Baileys keeps advertising the secret it captured at pair-device time.
+    socket.emit("connection.update", { qr: "ref2,noise,ident,old,1" });
+    expect(qrs[2]).toBe(`ref2,noise,ident,${creds.advSecretKey},1`);
+
+    // Neither expected child: ignored.
+    const rotated = creds.advSecretKey;
+    socket.emitWs("CB:notification,type:companion_reg_refresh", {
+      tag: "notification",
+      attrs: { type: "companion_reg_refresh" },
+      content: [{ tag: "other", attrs: {} }],
+    });
+    // Registered session: ignored.
+    creds.me = { id: "1@s.whatsapp.net" };
+    socket.emitWs("CB:notification,type:companion_reg_refresh", refresh);
+    await tick();
+    expect(creds.advSecretKey).toBe(rotated);
+    expect(saves).toBe(1);
+    expect(qrs).toHaveLength(3);
+    connection.stop();
   });
 });
