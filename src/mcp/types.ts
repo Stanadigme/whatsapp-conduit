@@ -20,6 +20,7 @@ export interface McpContext {
   historyControl?: (
     chat: string,
     since: number,
+    fetchMedia?: boolean,
   ) => Promise<{ jobId: string; status: string; reused: boolean }>;
 }
 

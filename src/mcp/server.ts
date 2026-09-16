@@ -129,12 +129,18 @@ export function createMcpServer(ctx: McpContext): McpServer {
       inputSchema: z.object({
         chat: z.string().min(1),
         since: z.number().int().nonnegative(),
+        fetchMedia: z
+          .boolean()
+          .optional()
+          .describe(
+            "Also download media for this job's history-sourced messages. Off by default.",
+          ),
       }),
       annotations: historyControlAnnotations,
     },
     async (args) =>
       safeCall(ctx, maxChars, () =>
-        startHistoryDownload(ctx, args.chat, args.since),
+        startHistoryDownload(ctx, args.chat, args.since, args.fetchMedia),
       ),
   );
 
@@ -425,13 +431,16 @@ export async function createMcpContext(
     config,
     accountId,
     runtimeStatus: await readRuntimeStatus(config.paths.runtimeStatus),
-    historyControl: (chat: string, since: number) =>
-      requestHistoryStart(config.paths.controlSocket, { chat, since }).then(
-        (result) => ({
-          jobId: result.jobId ?? "",
-          status: result.status ?? "queued",
-          reused: result.reused ?? false,
-        }),
+    historyControl: (chat: string, since: number, fetchMedia?: boolean) =>
+      requestHistoryStart(config.paths.controlSocket, {
+        chat,
+        since,
+        ...(fetchMedia ? { fetchMedia: true } : {}),
+      }).then((result) => ({
+        jobId: result.jobId ?? "",
+        status: result.status ?? "queued",
+        reused: result.reused ?? false,
+      }),
       ),
   };
 

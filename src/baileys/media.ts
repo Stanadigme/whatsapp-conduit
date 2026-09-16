@@ -19,7 +19,7 @@ import type { IngestDeps } from "./ingest.js";
 /** Give up on a stalled media fetch rather than hold the slot forever. */
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 
-function mediaNode(msg: WAMessage): {
+export function mediaNode(msg: WAMessage): {
   mediaType: "audio" | "image" | "video" | "document" | "sticker";
   node: Record<string, unknown>;
 } | null {
@@ -41,7 +41,7 @@ function mediaNode(msg: WAMessage): {
   return null;
 }
 
-function stringField(
+export function stringField(
   node: Record<string, unknown>,
   key: string,
 ): string | null {

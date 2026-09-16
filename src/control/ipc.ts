@@ -18,11 +18,20 @@ export interface HistoryStartRequest {
   requestId: string;
   chat: string;
   since: number;
+  /** Opt-in only (ADR-0035): also fetch media for this job's history rows. */
+  fetchMedia?: boolean;
 }
 
 export interface DirectoryResyncRequest {
   op: "directory.resync";
   requestId: string;
+}
+
+export interface MediaBackfillStartRequest {
+  op: "media-backfill.start";
+  requestId: string;
+  /** Omitted (or null) starts a bulk job across every allowed chat. */
+  chat?: string;
 }
 
 export interface PairingStartRequest {
@@ -41,6 +50,7 @@ export interface MaintenanceResetRequest {
 export type ControlRequest =
   | HistoryStartRequest
   | DirectoryResyncRequest
+  | MediaBackfillStartRequest
   | PairingStartRequest
   | MaintenanceResetRequest;
 
@@ -241,6 +251,18 @@ export async function requestHistoryStart(
   );
 }
 
+export async function requestMediaBackfillStart(
+  path: string,
+  input: Omit<MediaBackfillStartRequest, "op" | "requestId">,
+  timeoutMs = 5_000,
+): Promise<ControlResponse> {
+  return sendControlRequest(
+    path,
+    { op: "media-backfill.start", requestId: randomUUID(), ...input },
+    timeoutMs,
+  );
+}
+
 /** Ask the running daemon to re-fetch contact and group names from WhatsApp. */
 export async function requestDirectoryResync(
   path: string,
@@ -320,6 +342,9 @@ function isControlRequest(value: unknown): value is ControlRequest {
   if (typeof record.requestId !== "string") return false;
   if (record.op === "directory.resync" || record.op === "pairing.start")
     return true;
+  if (record.op === "media-backfill.start") {
+    return record.chat === undefined || typeof record.chat === "string";
+  }
   if (
     record.op === "maintenance.reset" &&
     isMaintenanceScope(record.scope) &&
@@ -331,7 +356,8 @@ function isControlRequest(value: unknown): value is ControlRequest {
     record.op === "history.start" &&
     typeof record.chat === "string" &&
     typeof record.since === "number" &&
-    Number.isInteger(record.since)
+    Number.isInteger(record.since) &&
+    (record.fetchMedia === undefined || typeof record.fetchMedia === "boolean")
   );
 }
 

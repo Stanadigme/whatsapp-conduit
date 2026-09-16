@@ -27,6 +27,7 @@ export async function startHistoryDownload(
   ctx: McpContext,
   chat: string,
   since: number,
+  fetchMedia?: boolean,
 ): Promise<{ jobId: string; status: string; reused: boolean }> {
   if (!ctx.historyControl) {
     throw new McpRequestError("history control unavailable");
@@ -49,7 +50,7 @@ export async function startHistoryDownload(
     throw new McpRequestError("chat is not available");
   }
   try {
-    return await ctx.historyControl(chat, since);
+    return await ctx.historyControl(chat, since, fetchMedia);
   } catch {
     throw new McpRequestError("history download could not be started");
   }

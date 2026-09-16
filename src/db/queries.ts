@@ -712,6 +712,7 @@ export interface HistoryJobRow {
   started_at: number | null;
   updated_at: number;
   completed_at: number | null;
+  fetch_media: number;
 }
 
 export interface HistoryAnchorRow {
@@ -733,6 +734,9 @@ export interface HistoryJobInput {
   anchorMessageId?: string | null;
   anchorTimestamp?: number | null;
   completionReason?: string | null;
+  /** Opt-in only, never the default (ADR-0035): also fetch media for this
+   * job's history-sourced messages. */
+  fetchMedia?: boolean;
 }
 
 export function createHistoryJob(db: Database, input: HistoryJobInput): void {
@@ -741,11 +745,11 @@ export function createHistoryJob(db: Database, input: HistoryJobInput): void {
     `insert into history_jobs (
        id, account_id, chat_jid, since_ts, until_ts, status, phase,
        anchor_sender_jid, anchor_message_id, anchor_timestamp,
-       completion_reason, created_at, updated_at
+       completion_reason, created_at, updated_at, fetch_media
      ) values (
        @id, @accountId, @chatJid, @sinceTs, @untilTs, @status, @phase,
        @anchorSenderJid, @anchorMessageId, @anchorTimestamp,
-       @completionReason, @now, @now
+       @completionReason, @now, @now, @fetchMedia
      )`,
   ).run({
     id: input.id,
@@ -760,6 +764,7 @@ export function createHistoryJob(db: Database, input: HistoryJobInput): void {
     anchorTimestamp: input.anchorTimestamp ?? null,
     completionReason: input.completionReason ?? null,
     now,
+    fetchMedia: input.fetchMedia ? 1 : 0,
   });
   projectHistoryJob(db, input.accountId, input.id);
 }
@@ -869,6 +874,126 @@ export function getHistoryAnchor(
     .get(accountId, chatJid);
 }
 
+export type MediaBackfillJobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed";
+
+export interface MediaBackfillJobRow {
+  id: string;
+  account_id: string;
+  chat_jid: string | null;
+  status: MediaBackfillJobStatus;
+  current_chat_jid: string | null;
+  attachments_found: number;
+  attachments_downloaded: number;
+  attachments_failed: number;
+  created_at: number;
+  started_at: number | null;
+  updated_at: number;
+  completed_at: number | null;
+}
+
+export interface MediaBackfillJobInput {
+  id: string;
+  accountId: string;
+  /** null starts a bulk job across every allowed chat. */
+  chatJid: string | null;
+  status?: MediaBackfillJobStatus;
+}
+
+/** Not projected to the client's PostgreSQL: internal retry/progress
+ * bookkeeping for an operator-triggered action, same posture as
+ * transcription_jobs. */
+export function createMediaBackfillJob(
+  db: Database,
+  input: MediaBackfillJobInput,
+): void {
+  const now = nowSec();
+  db.prepare(
+    `insert into media_backfill_jobs (
+       id, account_id, chat_jid, status, created_at, updated_at
+     ) values (@id, @accountId, @chatJid, @status, @now, @now)`,
+  ).run({
+    id: input.id,
+    accountId: input.accountId,
+    chatJid: input.chatJid,
+    status: input.status ?? "queued",
+    now,
+  });
+}
+
+export function getMediaBackfillJob(
+  db: Database,
+  accountId: string,
+  id: string,
+): MediaBackfillJobRow | undefined {
+  return db
+    .prepare<
+      [string, string],
+      MediaBackfillJobRow
+    >("select * from media_backfill_jobs where account_id = ? and id = ?")
+    .get(accountId, id);
+}
+
+export function getActiveMediaBackfillJob(
+  db: Database,
+  accountId: string,
+): MediaBackfillJobRow | undefined {
+  return db
+    .prepare<[string], MediaBackfillJobRow>(
+      `select * from media_backfill_jobs
+       where account_id = ? and status in ('queued', 'running')
+       order by created_at asc limit 1`,
+    )
+    .get(accountId);
+}
+
+export interface MediaBackfillJobPatch {
+  status?: MediaBackfillJobStatus;
+  currentChatJid?: string | null;
+  attachmentsFound?: number;
+  attachmentsDownloaded?: number;
+  attachmentsFailed?: number;
+  startedAt?: number | null;
+  completedAt?: number | null;
+}
+
+export function updateMediaBackfillJob(
+  db: Database,
+  accountId: string,
+  id: string,
+  patch: MediaBackfillJobPatch,
+): void {
+  const sets: string[] = [];
+  const params: Record<string, unknown> = {
+    accountId,
+    id,
+    updatedAt: nowSec(),
+  };
+  const fields: Array<[keyof MediaBackfillJobPatch, string]> = [
+    ["status", "status"],
+    ["currentChatJid", "current_chat_jid"],
+    ["attachmentsFound", "attachments_found"],
+    ["attachmentsDownloaded", "attachments_downloaded"],
+    ["attachmentsFailed", "attachments_failed"],
+    ["startedAt", "started_at"],
+    ["completedAt", "completed_at"],
+  ];
+  for (const [inputName, column] of fields) {
+    const value = patch[inputName];
+    if (value === undefined) continue;
+    sets.push(`${column} = @${String(inputName)}`);
+    params[String(inputName)] = value;
+  }
+  if (sets.length === 0) return;
+  sets.push("updated_at = @updatedAt");
+  db.prepare(
+    `update media_backfill_jobs set ${sets.join(", ")} where account_id = @accountId and id = @id`,
+  ).run(params);
+}
+
 export interface MessageRow {
   account_id: string;
   chat_jid: string;
@@ -964,6 +1089,12 @@ export interface AttachmentInput {
   /** Set once the bytes are confirmed uploaded to the client's GCS bucket. */
   gcsUploadedAt?: number | null;
   rawJson?: string | null;
+  /** Attempt tracking, written on failure only (src/ingest/audio.ts). A
+   * later success sets downloaded_at without clearing these — readers that
+   * list failures already filter on `downloaded_at is null`. */
+  downloadAttempts?: number | null;
+  downloadLastError?: string | null;
+  downloadAttemptedAt?: number | null;
 }
 
 export function upsertAttachment(db: Database, input: AttachmentInput): void {
@@ -971,11 +1102,13 @@ export function upsertAttachment(db: Database, input: AttachmentInput): void {
     `insert into attachments (
        account_id, chat_jid, message_id, attachment_index, media_type,
        mime_type, file_name, file_path, sha256, size_bytes, downloaded_at,
-       gcs_uploaded_at, raw_json
+       gcs_uploaded_at, raw_json, download_attempts, download_last_error,
+       download_attempted_at
      ) values (
        @accountId, @chatJid, @messageId, @attachmentIndex, @mediaType,
        @mimeType, @fileName, @filePath, @sha256, @sizeBytes, @downloadedAt,
-       @gcsUploadedAt, @rawJson
+       @gcsUploadedAt, @rawJson, @downloadAttempts, @downloadLastError,
+       @downloadAttemptedAt
      )
      on conflict (account_id, chat_jid, message_id, attachment_index) do update set
        media_type = coalesce(excluded.media_type, attachments.media_type),
@@ -986,7 +1119,10 @@ export function upsertAttachment(db: Database, input: AttachmentInput): void {
        size_bytes = coalesce(excluded.size_bytes, attachments.size_bytes),
        downloaded_at = coalesce(excluded.downloaded_at, attachments.downloaded_at),
        gcs_uploaded_at = coalesce(excluded.gcs_uploaded_at, attachments.gcs_uploaded_at),
-       raw_json = coalesce(excluded.raw_json, attachments.raw_json)`,
+       raw_json = coalesce(excluded.raw_json, attachments.raw_json),
+       download_attempts = coalesce(excluded.download_attempts, attachments.download_attempts),
+       download_last_error = coalesce(excluded.download_last_error, attachments.download_last_error),
+       download_attempted_at = coalesce(excluded.download_attempted_at, attachments.download_attempted_at)`,
   ).run({
     accountId: input.accountId,
     chatJid: input.chatJid,
@@ -1001,6 +1137,9 @@ export function upsertAttachment(db: Database, input: AttachmentInput): void {
     downloadedAt: input.downloadedAt ?? null,
     gcsUploadedAt: input.gcsUploadedAt ?? null,
     rawJson: input.rawJson ?? null,
+    downloadAttempts: input.downloadAttempts ?? null,
+    downloadLastError: input.downloadLastError ?? null,
+    downloadAttemptedAt: input.downloadAttemptedAt ?? null,
   });
   projectMessage(db, input.accountId, input.chatJid, input.messageId);
 }
@@ -1019,6 +1158,9 @@ export interface AttachmentRow {
   downloaded_at: number | null;
   gcs_uploaded_at: number | null;
   raw_json: string | null;
+  download_attempts: number | null;
+  download_last_error: string | null;
+  download_attempted_at: number | null;
 }
 
 export function getAttachment(
@@ -1048,6 +1190,56 @@ export function getMessage(
       MessageRow
     >("select * from messages where account_id = ? and chat_jid = ? and message_id = ?")
     .get(accountId, chatJid, messageId);
+}
+
+/**
+ * Messages with a media node that have never been downloaded: either no
+ * `attachments` row exists yet (store_media was false at ingestion) or one
+ * exists but `downloaded_at` is still null (a past attempt gave up). Covers
+ * both `live` and `history` sourced messages alike (ADR-0035).
+ */
+export function listMediaBackfillCandidates(
+  db: Database,
+  accountId: string,
+  chatJid: string,
+  limit: number,
+): MessageRow[] {
+  return db
+    .prepare<
+      [string, string, number],
+      MessageRow
+    >(`select m.* from messages m
+       left join attachments a
+         on a.account_id = m.account_id and a.chat_jid = m.chat_jid
+            and a.message_id = m.message_id
+       where m.account_id = ? and m.chat_jid = ? and m.has_media = 1
+         and m.message_type in ('audio', 'image', 'video', 'document', 'sticker')
+         and (a.message_id is null or a.downloaded_at is null)
+       order by m.timestamp asc
+       limit ?`)
+    .all(accountId, chatJid, limit);
+}
+
+/** Recent, still-unresolved media download failures for the dashboard's
+ * "Avancé" section — mirrors listTranscriptionFailures. A later success
+ * clears a row from this list by setting downloaded_at, without needing to
+ * blank out the stale download_last_error text (src/db/queries.ts,
+ * upsertAttachment). */
+export function listMediaDownloadFailures(
+  db: Database,
+  accountId: string,
+  limit: number,
+): AttachmentRow[] {
+  return db
+    .prepare<
+      [string, number],
+      AttachmentRow
+    >(`select * from attachments
+       where account_id = ? and download_last_error is not null
+         and downloaded_at is null
+       order by download_attempted_at desc
+       limit ?`)
+    .all(accountId, limit);
 }
 
 export interface ExportRow extends MessageRow {

@@ -56,6 +56,7 @@ interface ActiveRequest {
   anchor: HistoryAnchor;
   boundarySeen: boolean;
   requestInFlight: boolean;
+  fetchMedia: boolean;
 }
 
 interface BatchWaiter {
@@ -101,6 +102,7 @@ export class HistoryCoordinator {
     chatJid: string,
     sinceTs: number,
     untilTs = nowSec(),
+    fetchMedia = false,
   ): Promise<HistoryStartResult> {
     if (!Number.isInteger(sinceTs) || sinceTs < 0 || sinceTs > untilTs) {
       throw new Error("invalid history window");
@@ -116,6 +118,7 @@ export class HistoryCoordinator {
         chatJid,
         sinceTs,
         untilTs,
+        fetchMedia,
       });
     } catch (error) {
       const raced = getActiveHistoryJob(
@@ -185,6 +188,7 @@ export class HistoryCoordinator {
     return {
       source: "history",
       store: timestamp >= active.sinceTs,
+      ...(active.fetchMedia ? { fetchMedia: true } : {}),
     };
   }
 
@@ -273,6 +277,7 @@ export class HistoryCoordinator {
         anchor: initialAnchor,
         boundarySeen: false,
         requestInFlight: false,
+        fetchMedia: initial.fetch_media === 1,
       };
       updateHistoryJob(this.options.db, this.options.accountId, jobId, {
         status: "queued",

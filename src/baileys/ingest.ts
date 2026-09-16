@@ -49,6 +49,9 @@ export interface IngestDeps {
 export interface IngestionEventClassification {
   source: IngestionSource;
   store: boolean;
+  /** Opt-in only, set by the classifier for one specific history job that
+   * requested it (ADR-0035) — never a default for `source: "history"`. */
+  fetchMedia?: boolean;
 }
 
 /** Reasons that warrant an auditable `ignored` event row (vs. bulk categories). */
@@ -98,7 +101,10 @@ export function registerIngestion(
         const stored = ingestMessage(deps, msg, classification.source);
         options.onStored?.(msg, stored !== null, classification);
         // Fire-and-forget: a media outage must never stall ingestion.
-        if (stored && classification.source === "live") {
+        if (
+          stored &&
+          (classification.source === "live" || classification.fetchMedia)
+        ) {
           void downloadAudioIfEnabled(msg, stored, deps).catch(
             (err: unknown) => {
               deps.logger.error(

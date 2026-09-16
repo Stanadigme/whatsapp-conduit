@@ -942,6 +942,7 @@ function toHistoryJobRow(row: PgHistoryJobRow): HistoryJobRow {
     started_at: row.started_at === null ? null : Number(row.started_at),
     updated_at: Number(row.updated_at),
     completed_at: row.completed_at === null ? null : Number(row.completed_at),
+    fetch_media: bit(row.fetch_media),
   };
 }
 
@@ -1017,4 +1018,5 @@ interface PgHistoryJobRow {
   started_at: string | null;
   updated_at: string;
   completed_at: string | null;
+  fetch_media: boolean;
 }

@@ -10,9 +10,16 @@ import {
   requestDirectoryResync,
   requestHistoryStart,
   requestMaintenanceReset,
+  requestMediaBackfillStart,
 } from "../control/ipc.js";
 import { McpRequestError } from "../mcp/types.js";
-import { type HistoryJobRow } from "../db/queries.js";
+import {
+  getActiveMediaBackfillJob,
+  getMediaBackfillJob,
+  listMediaDownloadFailures,
+  type HistoryJobRow,
+  type MediaBackfillJobRow,
+} from "../db/queries.js";
 import { allowDashboardChat, blockDashboardChat } from "./chats.js";
 import { findCatalogueModel } from "../stt/models.js";
 import type { ModelDownloader } from "./models.js";
@@ -194,6 +201,22 @@ function historyView(job: HistoryJobRow): Record<string, unknown> {
     coverageComplete: job.coverage_complete === 1,
     completionReason: job.completion_reason,
     errorCode: job.error_code,
+    createdAt: job.created_at,
+    startedAt: job.started_at,
+    updatedAt: job.updated_at,
+    completedAt: job.completed_at,
+  };
+}
+
+function mediaBackfillView(job: MediaBackfillJobRow): Record<string, unknown> {
+  return {
+    id: job.id,
+    chatJid: job.chat_jid,
+    status: job.status,
+    currentChatJid: job.current_chat_jid,
+    attachmentsFound: job.attachments_found,
+    attachmentsDownloaded: job.attachments_downloaded,
+    attachmentsFailed: job.attachments_failed,
     createdAt: job.created_at,
     startedAt: job.started_at,
     updatedAt: job.updated_at,
@@ -403,12 +426,14 @@ export async function dashboardApi(
       if (!Number.isInteger(since) || since < 0 || since > now) {
         return json({ error: "invalid history window" }, 400);
       }
+      const fetchMedia = url.searchParams.get("fetchMedia") === "true";
       try {
         const result = await requestHistoryStart(
           context.config.paths.controlSocket,
           {
             chat: decodeJid(historyMatch[1] ?? ""),
             since,
+            ...(fetchMedia ? { fetchMedia: true } : {}),
           },
         );
         return json(
@@ -417,6 +442,23 @@ export async function dashboardApi(
             status: result.status,
             reused: result.reused,
           },
+          202,
+        );
+      } catch (error) {
+        return errorResponse(error, 409);
+      }
+    }
+    const backfillMatch = /^\/api\/chats\/(.+)\/media-backfill$/.exec(
+      url.pathname,
+    );
+    if (backfillMatch) {
+      try {
+        const result = await requestMediaBackfillStart(
+          context.config.paths.controlSocket,
+          { chat: decodeJid(backfillMatch[1] ?? "") },
+        );
+        return json(
+          { jobId: result.jobId, status: result.status, reused: result.reused },
           202,
         );
       } catch (error) {
@@ -551,6 +593,50 @@ export async function dashboardApi(
     if (!match?.[1]) return json({ error: "not found" }, 404);
     const job = await context.reader.getHistoryJob(match[1]);
     return job ? json(historyView(job)) : json({ error: "not found" }, 404);
+  }
+  if (url.pathname === "/api/media-backfill" && request.method === "POST") {
+    try {
+      const result = await requestMediaBackfillStart(
+        context.config.paths.controlSocket,
+        {},
+      );
+      return json(
+        { jobId: result.jobId, status: result.status, reused: result.reused },
+        202,
+      );
+    } catch (error) {
+      return errorResponse(error, 409);
+    }
+  }
+  if (
+    url.pathname === "/api/media-backfill/active" &&
+    request.method === "GET"
+  ) {
+    const job = getActiveMediaBackfillJob(context.db, context.accountId);
+    return json({ job: job ? mediaBackfillView(job) : null });
+  }
+  if (
+    url.pathname === "/api/media-backfill/failures" &&
+    request.method === "GET"
+  ) {
+    const failures = listMediaDownloadFailures(context.db, context.accountId, 5);
+    return json({
+      failures: failures.map((row) => ({
+        chatJid: row.chat_jid,
+        messageId: row.message_id,
+        reason: row.download_last_error,
+        attemptedAt: row.download_attempted_at,
+      })),
+    });
+  }
+  if (
+    url.pathname.startsWith("/api/media-backfill/") &&
+    request.method === "GET"
+  ) {
+    const match = /^\/api\/media-backfill\/([^/]+)$/.exec(url.pathname);
+    if (!match?.[1]) return json({ error: "not found" }, 404);
+    const job = getMediaBackfillJob(context.db, context.accountId, match[1]);
+    return job ? json(mediaBackfillView(job)) : json({ error: "not found" }, 404);
   }
   if (url.pathname === "/api/pairing/status" && request.method === "GET") {
     return json({

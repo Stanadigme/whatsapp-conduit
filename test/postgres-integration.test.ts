@@ -121,6 +121,7 @@ describe.skipIf(!url)("PostgreSQL contract", () => {
       { name: "0004_message_search.sql" },
       { name: "0005_message_surrogate_id.sql" },
       { name: "0006_gcs_media.sql" },
+      { name: "0007_media_backfill.sql" },
     ]);
   });
 

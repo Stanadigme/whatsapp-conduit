@@ -7,9 +7,13 @@ import { resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import {
   createHistoryJob,
+  createMediaBackfillJob,
   setChatAllowed,
+  updateMediaBackfillJob,
   upsertAccount,
+  upsertAttachment,
   upsertChat,
+  upsertMessage,
 } from "../src/db/queries.js";
 import { HistoryControlServer } from "../src/control/ipc.js";
 import { createSqliteReader } from "../src/db/sqlite-reader.js";
@@ -543,6 +547,140 @@ describe("local dashboard HTTP API", () => {
       status: "done",
       contacts: 7,
       groups: 2,
+    });
+  });
+
+  it("starts a per-chat and a bulk media backfill job, and lists failures", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wac-dashboard-media-backfill-"));
+    const config = resolveConfig({}, { dataDir: dir });
+    const token = ensureDashboardToken(config.web.tokenFile);
+    const controlPath = join(dir, "control.sock");
+    config.paths.controlSocket = controlPath;
+    const db = openDb(":memory:", { migrate: true });
+    upsertAccount(db, { id: accountId });
+    upsertChat(db, { accountId, jid: chatJid, name: "Équipe produit" });
+    setChatAllowed(db, accountId, chatJid, true);
+    let jobCounter = 0;
+    const control = new HistoryControlServer(controlPath, async (request) => {
+      if (request.op !== "media-backfill.start") {
+        return { pairing: { status: "starting" } };
+      }
+      jobCounter += 1;
+      const jobId = `media-backfill-job-${String(jobCounter)}`;
+      createMediaBackfillJob(db, {
+        id: jobId,
+        accountId,
+        chatJid: request.chat ?? null,
+      });
+      return { jobId, status: "queued", reused: false };
+    });
+    await control.start();
+    const dashboard = await createDashboardServer(config, {
+      db,
+      reader: createSqliteReader(db, config, accountId),
+      config,
+      configPath: join(dir, "config.yaml"),
+      models: new ModelDownloader(join(dir, "models")),
+      accountId,
+      pairing: { status: "idle", qr: null, error: null },
+      startPairing: async () => undefined,
+      stopPairing: async () => undefined,
+    });
+    await new Promise<void>((resolve) =>
+      dashboard.server.listen(0, "127.0.0.1", resolve),
+    );
+    resources.push({
+      close: () => {
+        dashboard.server.close();
+        void control.close();
+      },
+      remove: () => {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      },
+    });
+    const address = dashboard.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("dashboard did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    const headers = { Authorization: `Bearer ${token}` };
+
+    const perChat = await fetch(
+      `${base}/api/chats/${encodeURIComponent(chatJid)}/media-backfill`,
+      { method: "POST", headers },
+    );
+    expect(perChat.status).toBe(202);
+    expect(await perChat.json()).toEqual(
+      expect.objectContaining({
+        jobId: "media-backfill-job-1",
+        status: "queued",
+        reused: false,
+      }),
+    );
+
+    const status = await fetch(`${base}/api/media-backfill/media-backfill-job-1`, {
+      headers,
+    });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual(
+      expect.objectContaining({
+        id: "media-backfill-job-1",
+        chatJid,
+        status: "queued",
+      }),
+    );
+
+    // Only one job may be active per account (media_backfill_jobs_one_active_per_account) —
+    // finish the per-chat job first, matching real sequencing.
+    updateMediaBackfillJob(db, accountId, "media-backfill-job-1", {
+      status: "completed",
+      completedAt: 1_700_000_100,
+    });
+
+    const bulk = await fetch(`${base}/api/media-backfill`, {
+      method: "POST",
+      headers,
+    });
+    expect(bulk.status).toBe(202);
+    expect(await bulk.json()).toEqual(
+      expect.objectContaining({ jobId: "media-backfill-job-2", status: "queued" }),
+    );
+    const bulkStatus = await fetch(
+      `${base}/api/media-backfill/media-backfill-job-2`,
+      { headers },
+    );
+    expect(await bulkStatus.json()).toEqual(
+      expect.objectContaining({ chatJid: null }),
+    );
+
+    upsertMessage(db, {
+      accountId,
+      chatJid,
+      messageId: "M1",
+      messageType: "audio",
+      hasMedia: true,
+    });
+    upsertAttachment(db, {
+      accountId,
+      chatJid,
+      messageId: "M1",
+      downloadAttempts: 3,
+      downloadLastError: "media no longer available",
+      downloadAttemptedAt: 1_700_000_000,
+    });
+    const failures = await fetch(`${base}/api/media-backfill/failures`, {
+      headers,
+    });
+    expect(failures.status).toBe(200);
+    expect(await failures.json()).toEqual({
+      failures: [
+        {
+          chatJid,
+          messageId: "M1",
+          reason: "media no longer available",
+          attemptedAt: 1_700_000_000,
+        },
+      ],
     });
   });
 

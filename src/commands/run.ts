@@ -25,6 +25,7 @@ import { getChat } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
 import { HistoryControlServer } from "../control/ipc.js";
 import { HistoryCoordinator } from "../history/coordinator.js";
+import { MediaBackfillCoordinator } from "../history/media-backfill-coordinator.js";
 import { createVersionResolver } from "../baileys/version.js";
 import { registerWhatsmeowIngestion } from "../whatsmeow/ingest.js";
 import { DirectorySync } from "../whatsmeow/directory.js";
@@ -121,6 +122,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     transport: historyTransport,
     logger: log,
   });
+  const mediaBackfill = new MediaBackfillCoordinator(ingestDeps);
 
   log.info(
     {
@@ -191,6 +193,25 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           }
           return { resynced: await runDirectoryResync() };
         }
+        if (request.op === "media-backfill.start") {
+          if (maintenanceIsActive(db, config.account.name)) {
+            throw new Error("a maintenance operation is already active");
+          }
+          let scopedChat: string | null = null;
+          if (request.chat) {
+            scopedChat = normalizeJid(request.chat);
+            const chat = getChat(db, config.account.name, scopedChat);
+            if (!chat || chat.is_blocked === 1 || chat.is_allowed !== 1) {
+              throw new Error("chat is not available");
+            }
+          }
+          const backfillResult = await mediaBackfill.start(scopedChat);
+          return {
+            jobId: backfillResult.job.id,
+            status: backfillResult.job.status,
+            reused: backfillResult.reused,
+          };
+        }
         if (maintenanceIsActive(db, config.account.name)) {
           throw new Error("a maintenance operation is already active");
         }
@@ -205,7 +226,12 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
         ) {
           throw new Error("since must not be in the future");
         }
-        const result = await history.start(chatJid, request.since);
+        const result = await history.start(
+          chatJid,
+          request.since,
+          undefined,
+          request.fetchMedia,
+        );
         return {
           jobId: result.job.id,
           status: result.job.status,
@@ -475,6 +501,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     });
 
     history.recoverActive();
+    mediaBackfill.recoverActive();
 
     connection.start().catch((err: unknown) => {
       log.error(
@@ -860,6 +887,9 @@ async function runWhatsmeow(
           directoryResyncInFlight = false;
         }
       }
+      if (request.op === "media-backfill.start") {
+        throw new Error("media backfill is not available with whatsmeow");
+      }
       if (request.op !== "history.start") {
         throw new Error("Baileys pairing is not available with whatsmeow");
       }
@@ -874,7 +904,12 @@ async function runWhatsmeow(
       if (request.since < 0 || request.since > Math.floor(Date.now() / 1000)) {
         throw new Error("since must not be in the future");
       }
-      const result = await history.start(chatJid, request.since);
+      const result = await history.start(
+        chatJid,
+        request.since,
+        undefined,
+        request.fetchMedia,
+      );
       return {
         jobId: result.job.id,
         status: result.job.status,

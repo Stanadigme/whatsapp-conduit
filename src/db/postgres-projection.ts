@@ -58,6 +58,7 @@ const BOOLEAN_COLUMNS: ReadonlySet<string> = new Set([
   "has_media",
   "is_active",
   "coverage_complete",
+  "fetch_media",
 ]);
 
 const ACCOUNT_SQL = `select id, label, self_jid, phone_number, created_at, updated_at
@@ -98,7 +99,7 @@ const HISTORY_JOB_SQL = `select id, account_id, chat_jid, since_ts, until_ts, st
     phase, progress_percent, anchor_sender_jid, anchor_message_id,
     anchor_timestamp, oldest_seen_ts, batches_requested, batches_completed,
     messages_received, messages_inserted, coverage_complete, completion_reason,
-    error_code, created_at, started_at, updated_at, completed_at
+    error_code, created_at, started_at, updated_at, completed_at, fetch_media
   from history_jobs where account_id = ? and id = ?`;
 
 const ENTITY_SQL = `select account_id, canonical_jid, entity_type, name, display_name,

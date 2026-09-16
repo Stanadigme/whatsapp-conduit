@@ -289,13 +289,20 @@ export async function persistAudioIfEnabled(
         if (attempt < deps.config.media.maxAttempts) continue;
       }
     }
+    const errorMessage =
+      lastError instanceof Error ? lastError.message : String(lastError);
     deps.logger.warn(
-      {
-        err: lastError instanceof Error ? lastError.message : String(lastError),
-        attempts: deps.config.media.maxAttempts,
-      },
+      { err: errorMessage, attempts: deps.config.media.maxAttempts },
       "audio download failed",
     );
+    upsertAttachment(deps.db, {
+      accountId: deps.accountId,
+      chatJid: normalized.chatJid,
+      messageId: normalized.messageId,
+      downloadAttempts: deps.config.media.maxAttempts,
+      downloadLastError: errorMessage,
+      downloadAttemptedAt: Math.floor(Date.now() / 1000),
+    });
   } finally {
     inFlight.delete(key);
   }
