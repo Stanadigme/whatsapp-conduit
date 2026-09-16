@@ -39,6 +39,19 @@ export interface PairingStartRequest {
   requestId: string;
 }
 
+/**
+ * Lets the dashboard apply a config.yaml edit that only takes effect at
+ * process start (privacy.include_groups and friends — the daemon reads
+ * config once, unlike the STT worker which re-reads it every pass). Reuses
+ * the same clean-shutdown path Docker's `restart: unless-stopped` policy
+ * already exercises for a pairing reset, so this is not a new shutdown
+ * mechanism, just a new trigger for the existing one.
+ */
+export interface DaemonRestartRequest {
+  op: "daemon.restart";
+  requestId: string;
+}
+
 export interface MaintenanceResetRequest {
   op: "maintenance.reset";
   requestId: string;
@@ -52,7 +65,8 @@ export type ControlRequest =
   | DirectoryResyncRequest
   | MediaBackfillStartRequest
   | PairingStartRequest
-  | MaintenanceResetRequest;
+  | MaintenanceResetRequest
+  | DaemonRestartRequest;
 
 /** @deprecated use {@link HistoryStartRequest} */
 export type HistoryControlRequest = HistoryStartRequest;
@@ -70,6 +84,8 @@ export interface ControlResponse {
   pairing?: { status: "starting" };
   /** `maintenance.reset` */
   maintenance?: { operationId: string; status: "queued" };
+  /** `daemon.restart` */
+  restarting?: { status: "restarting" };
   error?: string;
 }
 
@@ -80,7 +96,8 @@ export type ControlResult =
   | { jobId: string; status: string; reused: boolean }
   | { resynced: { contacts: number; groups: number } }
   | { pairing: { status: "starting" } }
-  | { maintenance: { operationId: string; status: "queued" } };
+  | { maintenance: { operationId: string; status: "queued" } }
+  | { restarting: { status: "restarting" } };
 
 export interface ControlHandler {
   (request: ControlRequest): Promise<ControlResult>;
@@ -287,6 +304,23 @@ export async function requestBaileysPairingStart(
   );
 }
 
+/**
+ * Ask the daemon to shut down cleanly so Docker's `restart: unless-stopped`
+ * policy brings it back up with the config.yaml settings it only reads at
+ * start (privacy.include_groups and friends). A short timeout: the daemon
+ * answers before it starts shutting down, not after it comes back.
+ */
+export async function requestDaemonRestart(
+  path: string,
+  timeoutMs = 5_000,
+): Promise<ControlResponse> {
+  return sendControlRequest(
+    path,
+    { op: "daemon.restart", requestId: randomUUID() },
+    timeoutMs,
+  );
+}
+
 /** Queue a destructive reset in the daemon that owns SQLite writes. */
 export async function requestMaintenanceReset(
   path: string,
@@ -340,7 +374,11 @@ function isControlRequest(value: unknown): value is ControlRequest {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
   if (typeof record.requestId !== "string") return false;
-  if (record.op === "directory.resync" || record.op === "pairing.start")
+  if (
+    record.op === "directory.resync" ||
+    record.op === "pairing.start" ||
+    record.op === "daemon.restart"
+  )
     return true;
   if (record.op === "media-backfill.start") {
     return record.chat === undefined || typeof record.chat === "string";

@@ -684,6 +684,62 @@ describe("local dashboard HTTP API", () => {
     });
   });
 
+  it("asks the daemon to restart", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wac-dashboard-restart-"));
+    const config = resolveConfig({}, { dataDir: dir });
+    const token = ensureDashboardToken(config.web.tokenFile);
+    const controlPath = join(dir, "control.sock");
+    config.paths.controlSocket = controlPath;
+    const db = openDb(":memory:", { migrate: true });
+    upsertAccount(db, { id: accountId });
+    const requests: string[] = [];
+    const control = new HistoryControlServer(controlPath, async (request) => {
+      requests.push(request.op);
+      if (request.op !== "daemon.restart") {
+        return { pairing: { status: "starting" } };
+      }
+      return { restarting: { status: "restarting" } };
+    });
+    await control.start();
+    const dashboard = await createDashboardServer(config, {
+      db,
+      reader: createSqliteReader(db, config, accountId),
+      config,
+      configPath: join(dir, "config.yaml"),
+      models: new ModelDownloader(join(dir, "models")),
+      accountId,
+      pairing: { status: "idle", qr: null, error: null },
+      startPairing: async () => undefined,
+      stopPairing: async () => undefined,
+    });
+    await new Promise<void>((resolve) =>
+      dashboard.server.listen(0, "127.0.0.1", resolve),
+    );
+    resources.push({
+      close: () => {
+        dashboard.server.close();
+        void control.close();
+      },
+      remove: () => {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      },
+    });
+    const address = dashboard.server.address();
+    if (!address || typeof address === "string")
+      throw new Error("dashboard did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    const headers = { Authorization: `Bearer ${token}` };
+
+    const response = await fetch(`${base}/api/daemon/restart`, {
+      method: "POST",
+      headers,
+    });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ status: "restarting" });
+    expect(requests).toEqual(["daemon.restart"]);
+  });
+
   it("returns 409 when the control socket is unreachable for a resync", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wac-dash-resync-"));
     const config = resolveConfig({}, { dataDir: dir });

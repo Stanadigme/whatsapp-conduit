@@ -187,6 +187,13 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
         if (pairingInFlight) {
           throw new Error("Baileys pairing is already active");
         }
+        if (request.op === "daemon.restart") {
+          if (maintenanceIsActive(db, config.account.name)) {
+            throw new Error("a maintenance operation is already active");
+          }
+          setTimeout(() => shutdown(0), 100);
+          return { restarting: { status: "restarting" } };
+        }
         if (request.op === "directory.resync") {
           if (maintenanceIsActive(db, config.account.name)) {
             throw new Error("a maintenance operation is already active");
@@ -869,6 +876,16 @@ async function runWhatsmeow(
         return {
           maintenance: { operationId: operation.id, status: "queued" },
         };
+      }
+      if (request.op === "daemon.restart") {
+        if (maintenanceIsActive(db, config.account.name)) {
+          throw new Error("a maintenance operation is already active");
+        }
+        // `shutdown` is a local of the Promise executor below, out of reach
+        // here — SIGTERM reaches the same `onSignal -> shutdown(0)` path,
+        // the one already registered there for a real container stop.
+        setTimeout(() => process.kill(process.pid, "SIGTERM"), 100);
+        return { restarting: { status: "restarting" } };
       }
       if (request.op === "directory.resync") {
         if (maintenanceIsActive(db, config.account.name)) {

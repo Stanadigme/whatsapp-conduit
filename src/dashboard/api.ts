@@ -7,6 +7,7 @@ import { flushPostgresProjection } from "../db/postgres-projection.js";
 import { maskSecrets } from "../commands/config.js";
 import {
   requestBaileysPairingStart,
+  requestDaemonRestart,
   requestDirectoryResync,
   requestHistoryStart,
   requestMaintenanceReset,
@@ -24,6 +25,7 @@ import { allowDashboardChat, blockDashboardChat } from "./chats.js";
 import { findCatalogueModel } from "../stt/models.js";
 import type { ModelDownloader } from "./models.js";
 import { applySttSettings, sttHealth, sttView } from "./stt.js";
+import { applyPrivacySettings, privacyView } from "./privacy.js";
 import { readLiveBaileysLinkQr } from "./baileys-link-qr.js";
 import { readRuntimeStatus } from "../runtime-status.js";
 import {
@@ -274,6 +276,30 @@ export async function dashboardApi(
         download: context.models.snapshot,
       }),
     );
+  }
+  if (url.pathname === "/api/privacy" && request.method === "GET") {
+    return json(privacyView(context.configPath));
+  }
+  if (url.pathname === "/api/privacy" && request.method === "POST") {
+    try {
+      applyPrivacySettings(context.configPath, url.searchParams);
+    } catch (error) {
+      return json(
+        { error: error instanceof Error ? error.message : "invalid request" },
+        400,
+      );
+    }
+    return json(privacyView(context.configPath));
+  }
+  if (url.pathname === "/api/daemon/restart" && request.method === "POST") {
+    try {
+      const result = await requestDaemonRestart(
+        context.config.paths.controlSocket,
+      );
+      return json({ status: result.restarting?.status ?? "restarting" }, 202);
+    } catch (error) {
+      return errorResponse(error, 409);
+    }
   }
   if (url.pathname === "/api/stt/check" && request.method === "POST") {
     const health = await sttHealth(context.configPath);
