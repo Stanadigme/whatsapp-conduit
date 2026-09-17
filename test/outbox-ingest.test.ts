@@ -4,7 +4,12 @@ import { ingestMessage, ingestUpdate } from "../src/baileys/ingest.js";
 import { resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import { countOutbox, leaseOutbox } from "../src/db/outbox.js";
-import { countMessages, upsertAccount } from "../src/db/queries.js";
+import {
+  countMessages,
+  setChatAllowed,
+  upsertAccount,
+  upsertChat,
+} from "../src/db/queries.js";
 import { createLogger } from "../src/util/logging.js";
 
 function message(text: string): WAMessage {
@@ -28,6 +33,15 @@ describe("ingestion outbox", () => {
       outboxKey: key,
     };
     upsertAccount(db, { id: "personal" });
+    // ADR-0037 §3: the outbox only receives the exposed set — allow the chat
+    // first, same as the dashboard's "allow" action would.
+    upsertChat(db, {
+      accountId: "personal",
+      jid: "c@s.whatsapp.net",
+      isGroup: false,
+      isStatus: false,
+    });
+    setChatAllowed(db, "personal", "c@s.whatsapp.net", true);
 
     try {
       ingestMessage(deps, message("bonjour"));
@@ -64,6 +78,33 @@ describe("ingestion outbox", () => {
     }
   });
 
+  it("stores an out-of-scope message but does not enqueue it to the outbox", () => {
+    // ADR-0037 §3: the outbox toward the client's Postgres only receives the
+    // exposed set. A blocked chat is stored (S3a: storage isn't filtered by
+    // scope any more) but must not reach the outbox.
+    const db = openDb(":memory:", { migrate: true });
+    const key = Buffer.alloc(32, 7);
+    const deps = {
+      db,
+      accountId: "personal",
+      config: resolveConfig(
+        { filters: { blocked_chats: ["c@s.whatsapp.net"] } },
+        { dataDir: "/data" },
+      ),
+      logger: createLogger({ level: "error" }),
+      outboxKey: key,
+    };
+    upsertAccount(db, { id: "personal" });
+
+    try {
+      ingestMessage(deps, message("hors périmètre"));
+      expect(countMessages(db)).toBe(1);
+      expect(countOutbox(db).pending).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
   it("rolls back the local message if the encrypted operation cannot be written", () => {
     const db = openDb(":memory:", { migrate: true });
     const deps = {
@@ -74,6 +115,13 @@ describe("ingestion outbox", () => {
       outboxKey: Buffer.alloc(1),
     };
     upsertAccount(db, { id: "personal" });
+    upsertChat(db, {
+      accountId: "personal",
+      jid: "c@s.whatsapp.net",
+      isGroup: false,
+      isStatus: false,
+    });
+    setChatAllowed(db, "personal", "c@s.whatsapp.net", true);
 
     try {
       expect(() => ingestMessage(deps, message("jamais écrit"))).toThrow(

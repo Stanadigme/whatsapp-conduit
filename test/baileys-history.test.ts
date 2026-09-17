@@ -63,6 +63,85 @@ describe("Baileys on-demand history adapter", () => {
     expect(events).toEqual(["ON_DEMAND"]);
   });
 
+  it("reports messageCount and matches endOfHistoryTransferType by JID, not by array index", async () => {
+    const listeners = new Map<string, (event: never) => void>();
+    const fetchMessageHistory = vi.fn().mockResolvedValue("request-id");
+    const socket = {
+      user: { id: "33600000000:1@s.whatsapp.net" },
+      fetchMessageHistory,
+      ev: {
+        on: (event: string, listener: (value: never) => void) => {
+          listeners.set(event, listener);
+        },
+      },
+    } as unknown as WASocket;
+    const transport = new BaileysHistoryTransport();
+    const events: Array<{
+      type: string;
+      messageCount?: number;
+      endOfHistoryTransferType?: number;
+    }> = [];
+    transport.on("history_sync", (event) => events.push(event));
+    transport.attach(socket);
+
+    await transport.requestHistory(
+      { chat: CHAT, sender: SELF, id: "M1", timestamp: 1_700_000_000 },
+      50,
+    );
+    // Requested chat's entry is second in the array on purpose: a by-index
+    // match would pick CHAT_LID's flag (0) instead of CHAT's (2).
+    listeners.get("messaging-history.set")?.({
+      syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+      contacts: [],
+      messages: [{ key: { remoteJid: CHAT, fromMe: false, id: "M2" } }],
+      chats: [
+        { id: CHAT_LID, endOfHistoryTransferType: 0 },
+        { id: CHAT, endOfHistoryTransferType: 2 },
+      ],
+    } as never);
+
+    expect(events).toEqual([
+      { type: "ON_DEMAND", messageCount: 1, endOfHistoryTransferType: 2 },
+    ]);
+  });
+
+  it("trusts the sole chats[] entry outright when only one is present", async () => {
+    const listeners = new Map<string, (event: never) => void>();
+    const fetchMessageHistory = vi.fn().mockResolvedValue("request-id");
+    const socket = {
+      user: { id: "33600000000:1@s.whatsapp.net" },
+      fetchMessageHistory,
+      ev: {
+        on: (event: string, listener: (value: never) => void) => {
+          listeners.set(event, listener);
+        },
+      },
+    } as unknown as WASocket;
+    const transport = new BaileysHistoryTransport();
+    const events: Array<{
+      type: string;
+      messageCount?: number;
+      endOfHistoryTransferType?: number;
+    }> = [];
+    transport.on("history_sync", (event) => events.push(event));
+    transport.attach(socket);
+
+    await transport.requestHistory(
+      { chat: CHAT, sender: SELF, id: "M1", timestamp: 1_700_000_000 },
+      50,
+    );
+    listeners.get("messaging-history.set")?.({
+      syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+      contacts: [],
+      messages: [],
+      chats: [{ id: "unexpected@lid", endOfHistoryTransferType: 2 }],
+    } as never);
+
+    expect(events).toEqual([
+      { type: "ON_DEMAND", messageCount: 0, endOfHistoryTransferType: 2 },
+    ]);
+  });
+
   it("launches and follows an on-demand job through Baileys history events", async () => {
     const listeners = new Map<string, Array<(event: never) => void>>();
     const emit = (event: string, value: unknown): void => {

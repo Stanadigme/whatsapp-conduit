@@ -226,7 +226,20 @@ describe("direct PostgreSQL projection", () => {
     setChatAllowed(db, "personal", "c@s.whatsapp.net", true);
     await flushPostgresProjection();
 
-    expect(pool.tables()).toEqual(["accounts", "chats", "chat_message_stats"]);
+    // ADR-0037 §3: a chat entering the exposure perimeter replays its already
+    // stored messages, not just its own row — the chat job runs first (its
+    // own accounts/chats/chat_message_stats), then one message job per
+    // stored message (which re-touches the same three tables before the
+    // message itself, since projectChatRow is shared).
+    expect(pool.tables()).toEqual([
+      "accounts",
+      "chats",
+      "chat_message_stats",
+      "accounts",
+      "chats",
+      "chat_message_stats",
+      "messages",
+    ]);
     expect(pool.rowFor("chats")).toContain(true);
   });
 

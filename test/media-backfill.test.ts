@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WAMessage } from "baileys";
+import type * as BaileysNS from "baileys";
 import { ingestMessage, type IngestDeps } from "../src/baileys/ingest.js";
 import {
   downloadStoredMedia,
@@ -27,7 +28,7 @@ import { createLogger } from "../src/util/logging.js";
 
 const baileysMock = vi.hoisted(() => ({ downloadMediaMessage: vi.fn() }));
 vi.mock("baileys", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("baileys")>();
+  const actual = await importOriginal<typeof BaileysNS>();
   return { ...actual, downloadMediaMessage: baileysMock.downloadMediaMessage };
 });
 

@@ -1,5 +1,6 @@
 import type { Database } from "better-sqlite3";
 import { describe, expect, it } from "vitest";
+import { resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import {
   insertTranscription,
@@ -14,6 +15,9 @@ import { getMessage, listMessages } from "../src/read/messages.js";
 
 const ACCOUNT = "personal";
 const CHAT = "33600000000@s.whatsapp.net";
+// Purely in-memory: resolveConfig never touches the filesystem for a raw `{}`
+// input, only loadConfig's YAML read does.
+const config = resolveConfig({}, { dataDir: "/tmp/wac-read-messages-test" });
 
 /**
  * Counts statements compiled on a connection.
@@ -72,7 +76,7 @@ function seed(messages: number): Database {
 describe("read path query count", () => {
   it("resolves a page with a fixed number of queries", () => {
     const db = seed(55);
-    const ctx = { db, accountId: ACCOUNT };
+    const ctx = { db, accountId: ACCOUNT, config };
     // Warm the connection-scoped schema caches, which is the steady state of a
     // long-running process. What is measured is the per-page cost.
     listMessages(ctx, { chat: CHAT, limit: 50 });
@@ -91,7 +95,7 @@ describe("read path query count", () => {
 
   it("does not scale with the number of rows returned", () => {
     const db = seed(55);
-    const ctx = { db, accountId: ACCOUNT };
+    const ctx = { db, accountId: ACCOUNT, config };
     listMessages(ctx, { chat: CHAT, limit: 5 });
 
     const queries = countQueries(db);
@@ -118,7 +122,7 @@ describe("sender name resolution", () => {
     chatJid: string,
     messageId: string,
   ): [string | null, string | null] {
-    const ctx = { db, accountId: ACCOUNT };
+    const ctx = { db, accountId: ACCOUNT, config };
     const listed = listMessages(ctx, { chat: chatJid }).items.find(
       (item) => item.messageId === messageId,
     );

@@ -144,6 +144,8 @@ export interface ExportSelection {
   beforeTs?: number | null | undefined;
   afterRowid?: number | null | undefined;
   allowedOnly?: boolean | undefined;
+  includeGroups?: boolean | undefined;
+  includeStatus?: boolean | undefined;
   allowedChats?: string[] | undefined;
   blockedChats?: string[] | undefined;
   limit?: number | undefined;

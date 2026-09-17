@@ -16,6 +16,14 @@ export interface TransportHistorySyncEvent {
   type: string;
   progress?: number;
   chunkOrder?: number;
+  /** Messages carried by this batch, when the transport can count them. */
+  messageCount?: number;
+  /**
+   * Baileys' `proto.Conversation.EndOfHistoryTransferType` for the chat this
+   * batch belongs to, when the transport exposes chat-level history state.
+   * Absent on transports (whatsmeow) that do not surface it.
+   */
+  endOfHistoryTransferType?: number;
 }
 
 export interface TransportMessageEvent {

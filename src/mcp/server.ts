@@ -389,6 +389,8 @@ async function exportForMcp(
     beforeTs: filters.before,
     afterRowid: cursor?.rowid ?? null,
     allowedOnly: true,
+    includeGroups: ctx.config.privacy.includeGroups,
+    includeStatus: ctx.config.privacy.includeStatus,
     allowedChats: ctx.config.filters.allowedChats,
     blockedChats: ctx.config.filters.blockedChats,
     limit: limit + 1,

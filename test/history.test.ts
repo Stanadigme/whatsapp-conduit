@@ -81,6 +81,31 @@ function groupMessageEvent(
   };
 }
 
+/** Requests a batch and reports completion via `history_sync` alone, never
+ * emitting a `message` event — the shape of an empty on-demand batch. */
+class FakeEmptyBatchTransport extends EventEmitter {
+  readonly requests: HistoryAnchor[] = [];
+
+  constructor(private readonly historySyncEvent: Record<string, unknown>) {
+    super();
+  }
+
+  async requestHistory(anchor: HistoryAnchor, _count: number): Promise<void> {
+    this.requests.push(anchor);
+    queueMicrotask(() => {
+      this.emit("history_sync", this.historySyncEvent);
+    });
+  }
+
+  start(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  stop(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
 class FakeGroupHistoryTransport extends EventEmitter {
   readonly requests: HistoryAnchor[] = [];
 
@@ -209,6 +234,56 @@ describe("history coordinator", () => {
     db.close();
   });
 
+  it("uses a caller-supplied anchor instead of consulting the local anchor table", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const config = resolveConfig({}, { dataDir: "/data" });
+    const transport = new FakeHistoryTransport();
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT, name: "Allowed" });
+    // No upsertMessage: there is no local anchor row for getHistoryAnchor to
+    // find. Without the explicit anchor, process() would stop at
+    // "no_local_anchor" the way the first test in this file does.
+
+    const coordinator = new HistoryCoordinator({
+      db,
+      accountId: ACCOUNT,
+      transport: transport as unknown as HistoryCapableTransport,
+      logger: pino({ level: "silent" }),
+    });
+    registerWhatsmeowIngestion(
+      transport as unknown as ObserveTransport,
+      {
+        db,
+        accountId: ACCOUNT,
+        config,
+        logger: pino({ level: "silent" }),
+      },
+      {
+        classify: (event) => coordinator.classify(event),
+        onStored: (event, stored, classification) =>
+          coordinator.onStored(event, stored, classification),
+      },
+    );
+    transport.emit("connected", { jid: CHAT });
+
+    const anchor = { sender: CHAT, id: "M100", timestamp: 100 };
+    const started = await coordinator.start(CHAT, 80, 100, false, anchor);
+    await waitFor(
+      () => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed",
+    );
+
+    expect(transport.requests).toHaveLength(1);
+    expect(transport.requests[0]).toMatchObject({ id: "M100", timestamp: 100 });
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
+      status: "completed",
+      coverage_complete: 1,
+      anchor_sender_jid: CHAT,
+      anchor_message_id: "M100",
+      anchor_timestamp: 100,
+    });
+    db.close();
+  });
+
   it("follows a direct chat across its LID and phone aliases", async () => {
     const db = openDb(":memory:", { migrate: true });
     const config = resolveConfig({}, { dataDir: "/data" });
@@ -291,6 +366,84 @@ describe("history coordinator", () => {
     const first = await coordinator.start(CHAT, 80, 100);
     const second = await coordinator.start(CHAT, 70, 100);
     expect(second).toMatchObject({ reused: true, job: { id: first.job.id } });
+    db.close();
+  });
+
+  it("reports window_already_delivered when the phone flags an empty batch as already delivered", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const transport = new FakeEmptyBatchTransport({
+      type: "ON_DEMAND",
+      messageCount: 0,
+      endOfHistoryTransferType: 2,
+    });
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertMessage(db, {
+      accountId: ACCOUNT,
+      chatJid: CHAT,
+      messageId: "M100",
+      senderJid: CHAT,
+      timestamp: 100,
+      messageType: "text",
+      text: "anchor",
+    });
+
+    const coordinator = new HistoryCoordinator({
+      db,
+      accountId: ACCOUNT,
+      transport: transport as unknown as HistoryCapableTransport,
+      logger: pino({ level: "silent" }),
+    });
+    transport.emit("connected", { jid: CHAT });
+
+    const started = await coordinator.start(CHAT, 80, 100);
+    await waitFor(
+      () => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed",
+    );
+
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
+      status: "completed",
+      coverage_complete: 0,
+      completion_reason: "window_already_delivered",
+      messages_received: 0,
+    });
+    db.close();
+  });
+
+  it("still reports source_exhausted when the transport does not expose completion flags", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const transport = new FakeEmptyBatchTransport({ type: "ON_DEMAND" });
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertMessage(db, {
+      accountId: ACCOUNT,
+      chatJid: CHAT,
+      messageId: "M100",
+      senderJid: CHAT,
+      timestamp: 100,
+      messageType: "text",
+      text: "anchor",
+    });
+
+    const coordinator = new HistoryCoordinator({
+      db,
+      accountId: ACCOUNT,
+      transport: transport as unknown as HistoryCapableTransport,
+      logger: pino({ level: "silent" }),
+    });
+    transport.emit("connected", { jid: CHAT });
+
+    const started = await coordinator.start(CHAT, 80, 100);
+    await waitFor(
+      () => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed",
+    );
+
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
+      status: "completed",
+      coverage_complete: 0,
+      completion_reason: "source_exhausted",
+      messages_received: 0,
+    });
     db.close();
   });
 

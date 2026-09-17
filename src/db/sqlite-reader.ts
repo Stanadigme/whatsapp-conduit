@@ -51,7 +51,7 @@ export function createSqliteReader(
     accountId,
     runtimeStatus: null,
   };
-  const readCtx = { db, accountId };
+  const readCtx = { db, accountId, config };
 
   return {
     async health() {

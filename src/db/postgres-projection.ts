@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type { Config } from "../config.js";
+import { chatExposureAllowed, exposureScopeFromConfig } from "./directory.js";
 import type { Database } from "./index.js";
 import { createPostgresPool, POSTGRES_TIMEOUT_MS } from "./postgres.js";
 
@@ -236,9 +237,36 @@ async function projectMemberRow(
   await upsert(client, "directory_group_members", MEMBER_KEYS, member);
 }
 
+/**
+ * Whether the client's own PostgreSQL database may receive this chat's
+ * messages (ADR-0037 §2-3: the destinations of client data only receive the
+ * exposed set, using the same rule as every other read path). Without a
+ * `config` — the one-shot `postgres import` backfill and a few tests start
+ * the projection directly with `startPostgresProjection(pool, logger)` — the
+ * check is skipped and every stored message projects, as before this change.
+ */
+function messageExposed(
+  db: Database,
+  accountId: string,
+  chatJid: string,
+  config: Config | undefined,
+): boolean {
+  if (!config) return true;
+  const chat = one(db, CHAT_SQL, [accountId, chatJid]);
+  if (!chat) return false;
+  return chatExposureAllowed(
+    db,
+    accountId,
+    chatJid,
+    exposureScopeFromConfig(config),
+    { isGroup: chat.is_group === 1, isStatus: chat.is_status === 1 },
+  );
+}
+
 async function projectJob(
   client: PostgresProjectionClient,
   entry: QueuedJob,
+  config: Config | undefined,
 ): Promise<void> {
   if (!(await projectAccount(client, entry))) return;
   const { accountId, db, job } = entry;
@@ -250,6 +278,7 @@ async function projectJob(
 
     case "message": {
       if (!(await projectChatRow(client, entry, job.chatJid))) return;
+      if (!messageExposed(db, accountId, job.chatJid, config)) return;
       const keys = [accountId, job.chatJid, job.messageId];
       const message = one(db, MESSAGE_SQL, keys);
       if (!message) return;
@@ -322,6 +351,7 @@ class PostgresProjection {
   constructor(
     private readonly pool: PostgresProjectionPool,
     private readonly logger: Logger,
+    private readonly config: Config | undefined = undefined,
   ) {}
 
   schedule(entry: QueuedJob): void {
@@ -374,7 +404,7 @@ class PostgresProjection {
 
     try {
       await client.query("begin");
-      await projectJob(client, entry);
+      await projectJob(client, entry, this.config);
       await client.query("commit");
     } catch (error) {
       if (!settled) {
@@ -411,12 +441,22 @@ class PostgresProjection {
 
 let active: PostgresProjection | null = null;
 
-/** Install a projection over an existing pool (used by `configure` and tests). */
+/**
+ * Install a projection over an existing pool (used by `configure`, the
+ * one-shot `postgres import` backfill, and tests).
+ *
+ * `config` is optional so existing direct callers (the backfill command, most
+ * of the test suite) keep projecting unconditionally, matching behavior
+ * before ADR-0037. Only `configurePostgresProjection` — the live ingestion
+ * path — supplies it, which is what applies the chat exposure rule
+ * (`messageExposed`) to what reaches the client's database.
+ */
 export function startPostgresProjection(
   pool: PostgresProjectionPool,
   logger: Logger,
+  config?: Config,
 ): void {
-  active = new PostgresProjection(pool, logger);
+  active = new PostgresProjection(pool, logger, config);
 }
 
 /**
@@ -429,7 +469,7 @@ export function configurePostgresProjection(
 ): void {
   const postgres = config.persistence.postgres;
   if (active || !postgres) return;
-  startPostgresProjection(createPostgresPool(postgres), logger);
+  startPostgresProjection(createPostgresPool(postgres), logger, config);
 }
 
 export function postgresProjectionEnabled(): boolean {

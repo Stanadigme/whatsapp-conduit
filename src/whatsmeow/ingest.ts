@@ -1,5 +1,9 @@
 import type { IngestDeps } from "../baileys/ingest.js";
-import { ingestNormalizedResult, rawJsonOfValue } from "../baileys/ingest.js";
+import {
+  exposedForSideEffects,
+  ingestNormalizedResult,
+  rawJsonOfValue,
+} from "../baileys/ingest.js";
 import type {
   ObserveTransport,
   TransportMessageEvent,
@@ -46,11 +50,19 @@ export function registerWhatsmeowIngestion(
         classification.source,
       );
       options.onStored?.(event, stored, classification);
+      // ponytail: garde local, à remplacer par chatExposureAllowed (S3b,
+      // src/db/directory.ts) — un message hors périmètre n'est jamais
+      // téléchargé (ADR-0037 §2).
       if (
         stored &&
         result.action === "store" &&
         classification.source === "live" &&
-        transport instanceof WhatsmeowTransport
+        transport instanceof WhatsmeowTransport &&
+        exposedForSideEffects(deps, {
+          jid: result.message.chatJid,
+          isGroup: result.message.isGroup,
+          isStatus: result.message.isStatus,
+        })
       ) {
         void downloadAudioIfEnabled(
           transport,

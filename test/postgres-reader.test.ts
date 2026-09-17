@@ -190,8 +190,11 @@ async function seed(mediaDir: string): Promise<{
 
   await flushPostgresProjection();
 
+  // "Allowed Group" is explicitly allowed via setChatAllowed above; groups are
+  // excluded by default (ADR-0037 exposure rule), so the fixture opts them
+  // back in to keep testing what it always tested.
   const config = resolveConfig(
-    { paths: { media_dir: mediaDir } },
+    { paths: { media_dir: mediaDir }, privacy: { include_groups: true } },
     { dataDir: "/data" },
   );
   return {

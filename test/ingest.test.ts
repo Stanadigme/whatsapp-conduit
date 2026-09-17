@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { Readable } from "node:stream";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { proto, type WAMessage, type WASocket } from "baileys";
+import type * as BaileysNS from "baileys";
 import { resolveConfig, type Config } from "../src/config.js";
 import {
+  exposedForSideEffects,
   ingestMessage,
   ingestReaction,
   ingestUpdate,
@@ -14,12 +17,31 @@ import {
   countMessages,
   getChat,
   getMessage,
+  setChatAllowed,
   setChatBlocked,
+  upsertChat,
   upsertParticipant,
   upsertAccount,
 } from "../src/db/queries.js";
 import { listDashboardChats } from "../src/dashboard/chats.js";
 import { createLogger } from "../src/util/logging.js";
+
+const baileysMock = vi.hoisted(() => ({ downloadMediaMessage: vi.fn() }));
+vi.mock("baileys", async (importOriginal) => {
+  const actual = await importOriginal<typeof BaileysNS>();
+  return { ...actual, downloadMediaMessage: baileysMock.downloadMediaMessage };
+});
+
+beforeEach(() => {
+  baileysMock.downloadMediaMessage.mockReset();
+  baileysMock.downloadMediaMessage.mockResolvedValue(
+    new Readable({
+      read(): void {
+        this.push(null);
+      },
+    }),
+  );
+});
 
 function deps(config: Config): IngestDeps {
   const db = openDb(":memory:", { migrate: true });
@@ -135,6 +157,28 @@ describe("ingestMessage persistence", () => {
     const row = getMessage(d.db, "personal", "c@s.whatsapp.net", "AUDIO1");
     expect(row?.sender_jid).toBe("49111@s.whatsapp.net");
     expect(row?.duration_s).toBe(42);
+    d.db.close();
+  });
+
+  it("resolves a fromMe group message from messaging-history.set with no participant to self_jid", () => {
+    const d = deps(baseConfig);
+    // messaging-history.set carries no participant at all for our own group
+    // messages (live delivery instead sets key.participant to our LID).
+    upsertAccount(d.db, {
+      id: "personal",
+      selfJid: "33744707085@s.whatsapp.net",
+    });
+    ingestMessage(
+      d,
+      msg({
+        key: { remoteJid: "g@g.us", fromMe: true, id: "SELF1" },
+        message: { conversation: "sent by me" },
+      }),
+      "history",
+    );
+    const row = getMessage(d.db, "personal", "g@g.us", "SELF1");
+    expect(row?.sender_jid).toBe("33744707085@s.whatsapp.net");
+    expect(row?.from_me).toBe(1);
     d.db.close();
   });
 
@@ -319,7 +363,10 @@ describe("ingestMessage persistence", () => {
     d.db.close();
   });
 
-  it("excludes group messages by default and stores them when enabled", () => {
+  // ADR-0037 §1: the capture scope governs exposure, not retention. A message
+  // the phone delivers is stored no matter the category or allow/block list —
+  // "excluded" now means "never exposed", decided at read time.
+  it("stores group messages regardless of `include_groups`", () => {
     const group = msg({
       key: {
         remoteJid: "g@g.us",
@@ -332,7 +379,7 @@ describe("ingestMessage persistence", () => {
 
     const off = deps(baseConfig);
     ingestMessage(off, group);
-    expect(countMessages(off.db)).toBe(0);
+    expect(countMessages(off.db)).toBe(1);
     off.db.close();
 
     const on = deps(
@@ -346,7 +393,7 @@ describe("ingestMessage persistence", () => {
     on.db.close();
   });
 
-  it("skips a blocked chat and records an audited ignored event", () => {
+  it("stores a message from a blocked chat and records no ignored event", () => {
     const d = deps(
       resolveConfig(
         { filters: { blocked_chats: ["c@s.whatsapp.net"] } },
@@ -354,14 +401,13 @@ describe("ingestMessage persistence", () => {
       ),
     );
     ingestMessage(d, msg({ message: { conversation: "topsecretbody" } }));
-    expect(countMessages(d.db)).toBe(0);
+    expect(countMessages(d.db)).toBe(1);
+    // ADR-0037 §5: no more `ignored` journal line for a scope reason — the
+    // message is in `messages`, a second record would say the same thing.
     const events = d.db
-      .prepare("select event_type, raw_json from events")
-      .all() as Array<{ event_type: string; raw_json: string }>;
-    expect(events).toHaveLength(1);
-    expect(events[0]?.event_type).toBe("ignored");
-    // The ignored-event marker never contains message text.
-    expect(events[0]?.raw_json).not.toContain("topsecretbody");
+      .prepare("select event_type from events")
+      .all() as Array<{ event_type: string }>;
+    expect(events).toHaveLength(0);
     d.db.close();
   });
 
@@ -387,7 +433,7 @@ describe("ingestMessage persistence", () => {
     d.db.close();
   });
 
-  it("honors a chat blocked via `chats block` (DB flag) at sync", () => {
+  it("still stores messages from a chat blocked via `chats block` (DB flag)", () => {
     const d = deps(baseConfig);
     // Discover the chat, then block it via the DB policy flag.
     ingestMessage(d, msg({ message: { conversation: "first" } }));
@@ -403,7 +449,7 @@ describe("ingestMessage persistence", () => {
     );
     expect(
       getMessage(d.db, "personal", "c@s.whatsapp.net", "M2"),
-    ).toBeUndefined();
+    ).toBeDefined();
     d.db.close();
   });
 
@@ -460,7 +506,7 @@ describe("ingestMessage persistence", () => {
     d.db.close();
   });
 
-  it("applies the sender filter to update-revokes (blocked participant)", () => {
+  it("no longer applies the sender filter to update-revokes (blocked participant)", () => {
     const d = deps(
       resolveConfig(
         {
@@ -471,7 +517,8 @@ describe("ingestMessage persistence", () => {
       ),
     );
     // Seed a group message, then a delete-for-everyone via messages.update
-    // from a blocked participant — it must not tombstone the message.
+    // from a "blocked" participant — sender filters no longer gate storage
+    // (ADR-0037 §1), so the tombstone is applied.
     ingestMessage(
       d,
       msg({
@@ -495,11 +542,11 @@ describe("ingestMessage persistence", () => {
     });
     expect(
       getMessage(d.db, "personal", "g@g.us", "GM")?.deleted_at ?? null,
-    ).toBeNull();
+    ).not.toBeNull();
     d.db.close();
   });
 
-  it("applies the sender filter to edits (blocked sender can't edit)", () => {
+  it("no longer applies the sender filter to edits (blocked sender can edit)", () => {
     const d = deps(
       resolveConfig(
         {
@@ -509,7 +556,8 @@ describe("ingestMessage persistence", () => {
         { dataDir: "/data" },
       ),
     );
-    // Edit from a blocked group participant must not write text.
+    // Edit from a "blocked" group participant now writes text — sender
+    // filters no longer gate storage (ADR-0037 §1).
     ingestMessage(
       d,
       msg({
@@ -528,7 +576,9 @@ describe("ingestMessage persistence", () => {
         },
       }),
     );
-    expect(getMessage(d.db, "personal", "g@g.us", "ORIG")).toBeUndefined();
+    expect(getMessage(d.db, "personal", "g@g.us", "ORIG")?.text).toBe(
+      "sneaky edit",
+    );
     d.db.close();
   });
 
@@ -556,12 +606,13 @@ describe("ingestMessage persistence", () => {
 });
 
 /**
- * The media download hook keys off this return value, so it doubles as the
- * privacy guard: a chat the filters reject must never yield a message to
- * follow up on, or we would fetch audio for a conversation we refused to
- * store.
+ * ADR-0037 §1: `ingestMessage`'s return value now only reflects whether the
+ * event could be parsed and written — a blocked or out-of-scope chat is
+ * stored like any other. The follow-up media-download gate lives separately
+ * in `exposedForSideEffects` (below), so a chat the filters reject can be
+ * stored while still never being downloaded or enqueued to the outbox.
  */
-describe("ingestMessage return value gates follow-up work", () => {
+describe("ingestMessage return value reflects persistence, not scope", () => {
   const audio = () =>
     msg({
       key: { remoteJid: "c@s.whatsapp.net", fromMe: false, id: "AUDIO1" },
@@ -576,23 +627,23 @@ describe("ingestMessage return value gates follow-up work", () => {
     d.db.close();
   });
 
-  it("returns null for a blocked chat", () => {
+  it("returns the stored message even for a blocked chat", () => {
     const d = deps(
       resolveConfig(
         { filters: { blocked_chats: ["c@s.whatsapp.net"] } },
         { dataDir: "/data" },
       ),
     );
-    expect(ingestMessage(d, audio())).toBeNull();
-    expect(countMessages(d.db)).toBe(0);
+    expect(ingestMessage(d, audio())?.messageId).toBe("AUDIO1");
+    expect(countMessages(d.db)).toBe(1);
     d.db.close();
   });
 
-  it("returns null for a chat blocked in the database", () => {
+  it("returns the stored message even for a chat blocked in the database", () => {
     const d = deps(baseConfig);
     ingestMessage(d, msg({ message: { conversation: "first" } }));
     setChatBlocked(d.db, "personal", "c@s.whatsapp.net", true);
-    expect(ingestMessage(d, audio())).toBeNull();
+    expect(ingestMessage(d, audio())?.messageId).toBe("AUDIO1");
     d.db.close();
   });
 
@@ -608,6 +659,131 @@ describe("ingestMessage return value gates follow-up work", () => {
   it("returns null for an unparseable message", () => {
     const d = deps(baseConfig);
     expect(ingestMessage(d, msg({ message: null }))).toBeNull();
+    d.db.close();
+  });
+});
+
+/**
+ * `exposedForSideEffects` is the interim guard (ADR-0037, S3a) that still
+ * bounds the two effects that reach outside SQLite — media download and
+ * outbox enqueue — until `chatExposureAllowed` (S3b, `src/db/directory.ts`)
+ * covers the whole capture scope.
+ */
+describe("exposedForSideEffects", () => {
+  it("is false for a chat excluded by category, true once enabled", () => {
+    const off = deps(baseConfig);
+    expect(
+      exposedForSideEffects(off, {
+        jid: "g@g.us",
+        isGroup: true,
+        isStatus: false,
+      }),
+    ).toBe(false);
+    off.db.close();
+
+    const on = deps(
+      resolveConfig(
+        { privacy: { include_groups: true } },
+        { dataDir: "/data" },
+      ),
+    );
+    // Newly discovered chats default to is_allowed=0 — exposure also
+    // requires the DB flag `chats allow` sets.
+    upsertChat(on.db, {
+      accountId: "personal",
+      jid: "g@g.us",
+      isGroup: true,
+      isStatus: false,
+    });
+    setChatAllowed(on.db, "personal", "g@g.us", true);
+    expect(
+      exposedForSideEffects(on, {
+        jid: "g@g.us",
+        isGroup: true,
+        isStatus: false,
+      }),
+    ).toBe(true);
+    on.db.close();
+  });
+
+  it("is false for a chat blocked in the database, even if the category is included", () => {
+    const d = deps(
+      resolveConfig(
+        { privacy: { include_groups: true } },
+        { dataDir: "/data" },
+      ),
+    );
+    upsertChat(d.db, {
+      accountId: "personal",
+      jid: "g@g.us",
+      isGroup: true,
+      isStatus: false,
+    });
+    setChatAllowed(d.db, "personal", "g@g.us", true);
+    setChatBlocked(d.db, "personal", "g@g.us", true);
+    expect(
+      exposedForSideEffects(d, {
+        jid: "g@g.us",
+        isGroup: true,
+        isStatus: false,
+      }),
+    ).toBe(false);
+    d.db.close();
+  });
+});
+
+describe("audio download honors exposedForSideEffects", () => {
+  const audio = (id: string, chatJid: string, participant?: string) =>
+    msg({
+      key: {
+        remoteJid: chatJid,
+        fromMe: false,
+        id,
+        ...(participant ? { participant } : {}),
+      },
+      message: { audioMessage: { seconds: 3, mimetype: "audio/ogg" } },
+    });
+
+  it("stores an out-of-scope group audio note but never attempts the download", () => {
+    // include_groups defaults to false: the message is stored (ADR-0037 §1)
+    // but the group is out of scope, so download must not be attempted.
+    const d = deps(baseConfig);
+    const socket = new FakeEventSocket();
+    registerIngestion(socket as unknown as WASocket, d);
+
+    socket.emit("messages.upsert", {
+      type: "notify",
+      messages: [audio("AUDIO_OOS", "g@g.us", "49a@s.whatsapp.net")],
+    });
+
+    expect(countMessages(d.db)).toBe(1);
+    expect(baileysMock.downloadMediaMessage).not.toHaveBeenCalled();
+    d.db.close();
+  });
+
+  it("attempts the download for an in-scope, allowed chat", async () => {
+    const d = deps(
+      resolveConfig({ privacy: { store_media: true } }, { dataDir: "/data" }),
+    );
+    upsertChat(d.db, {
+      accountId: "personal",
+      jid: "c@s.whatsapp.net",
+      isGroup: false,
+      isStatus: false,
+    });
+    setChatAllowed(d.db, "personal", "c@s.whatsapp.net", true);
+    const socket = new FakeEventSocket();
+    registerIngestion(socket as unknown as WASocket, d);
+
+    socket.emit("messages.upsert", {
+      type: "notify",
+      messages: [audio("AUDIO_IN_SCOPE", "c@s.whatsapp.net")],
+    });
+
+    expect(countMessages(d.db)).toBe(1);
+    await vi.waitFor(() =>
+      expect(baileysMock.downloadMediaMessage).toHaveBeenCalled(),
+    );
     d.db.close();
   });
 });

@@ -1,8 +1,12 @@
 import type { Database } from "better-sqlite3";
+import type { Config } from "../config.js";
 import {
-  directoryDisplayName,
+  buildExposureSqlFragment,
+  chatExposureAllowed,
   chatPolicyForAliases,
+  directoryDisplayName,
   directoryTablesAvailable,
+  exposureScopeFromConfig,
   getDirectoryEntityByJid,
   listEquivalentJids,
 } from "../db/directory.js";
@@ -20,6 +24,14 @@ import {
 export interface MessageReadContext {
   db: Database;
   accountId: string;
+  /**
+   * Optional only for a handful of call sites this sub-task's file scope
+   * cannot reach (a CLI command, a forbidden test file). Without it, exposure
+   * falls back to the pre-ADR-0037 check (`chats.is_allowed`/`is_blocked`
+   * only) — no includeGroups/includeStatus/allowedChats/blockedChats. Every
+   * caller that can supply it, does.
+   */
+  config?: Config;
 }
 
 export interface MessageView {
@@ -119,8 +131,19 @@ function allowedChatWithAliases(
     .get(ctx.accountId, chatJid);
   if (!row) throw new McpRequestError("chat is not available");
   const aliases = listEquivalentJids(ctx.db, ctx.accountId, chatJid);
-  const policy = chatPolicyForAliases(ctx.db, ctx.accountId, aliases);
-  if (!policy.allowed || policy.blocked) {
+  const exposed = ctx.config
+    ? chatExposureAllowed(
+        ctx.db,
+        ctx.accountId,
+        chatJid,
+        exposureScopeFromConfig(ctx.config),
+        { isGroup: row.is_group === 1, isStatus: row.is_status === 1 },
+      )
+    : (() => {
+        const policy = chatPolicyForAliases(ctx.db, ctx.accountId, aliases);
+        return policy.allowed && !policy.blocked;
+      })();
+  if (!exposed) {
     throw new McpRequestError("chat is not available");
   }
   return { row, aliases };
@@ -352,6 +375,14 @@ export function listMessages(
     aliases.forEach((alias, index) => {
       params[`chat${index}`] = alias;
     });
+  } else if (ctx.config) {
+    const fragment = buildExposureSqlFragment(
+      ctx.db,
+      ctx.accountId,
+      exposureScopeFromConfig(ctx.config),
+    );
+    where.push(fragment.sql);
+    Object.assign(params, fragment.params);
   } else {
     where.push("c.is_allowed = 1", "c.is_blocked = 0");
   }

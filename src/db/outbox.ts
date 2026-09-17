@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import type { Database } from "./index.js";
+import { getChat, getMessage, listMessageIdsForChat } from "./queries.js";
 import { nowSec } from "../util/time.js";
 
 const ALGORITHM = "aes-256-gcm";
@@ -142,6 +143,42 @@ export function enqueueOutbox(
     .get(dedupeKey);
   if (!row) throw new Error("outbox operation was not persisted");
   return row.id;
+}
+
+/**
+ * Re-queue every stored message of one chat as a `message.upsert` snapshot.
+ *
+ * Minimal equivalent of `enqueueMessageSnapshot` (src/baileys/ingest.ts),
+ * which is not exported and lives outside this sub-task's file scope; this
+ * generalizes it to a whole chat, on the same dedupe key scheme, so replaying
+ * a chat that has just been authorised (ADR-0037 §3, "quand une discussion
+ * entre dans le périmètre") is a duplicate-safe no-op for anything already
+ * forwarded. Callers should not need both copies of this logic long-term —
+ * tracked as a known duplication, not resolved here.
+ *
+ * Not wired into any caller yet: `setChatAllowed` (src/db/queries.ts) already
+ * replays into the live PostgreSQL projection via `projectMessage`, and this
+ * encrypted local outbox has no active forwarder consuming it today
+ * (src/db/postgres-outbox.ts's destination is not started anywhere). Kept
+ * here, exported, for whichever caller wires up the outbox path.
+ */
+export function enqueueChatMessagesSnapshot(
+  db: Database,
+  key: Buffer,
+  accountId: string,
+  chatJid: string,
+): void {
+  const chat = getChat(db, accountId, chatJid);
+  if (!chat) return;
+  for (const messageId of listMessageIdsForChat(db, accountId, chatJid)) {
+    const message = getMessage(db, accountId, chatJid, messageId);
+    if (!message) continue;
+    enqueueOutbox(db, key, {
+      operation: "message.upsert",
+      dedupeKey: `${accountId}\u0000${chatJid}\u0000${messageId}`,
+      payload: { version: 1, chat, message },
+    });
+  }
 }
 
 /**

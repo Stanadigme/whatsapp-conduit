@@ -11,6 +11,7 @@ import {
 import { runConfigSet, runConfigShow } from "./commands/config.js";
 import { runWeb } from "./commands/web.js";
 import { runDirectorySync } from "./commands/directory.js";
+import { runDbBackfillSender } from "./commands/db-backfill-sender.js";
 import { runDbBackup, runDbCheck, runDbMigrate } from "./commands/db.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runExport } from "./commands/export.js";
@@ -476,6 +477,21 @@ export function buildProgram(): Command {
         configPath: globals.config,
         output: opts.output,
         json: opts.json,
+      });
+    });
+
+  db.command("backfill-sender")
+    .description(
+      "backfill sender_jid on group-history rows from their preserved raw_json",
+    )
+    .option("--json", "emit machine-readable JSON")
+    .option("--dry-run", "compute counts without writing")
+    .action((opts: { json?: boolean; dryRun?: boolean }) => {
+      const globals = program.opts<GlobalOptions>();
+      runDbBackfillSender({
+        configPath: globals.config,
+        json: opts.json,
+        dryRun: opts.dryRun,
       });
     });
 

@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { phoneFromJid } from "../baileys/jid.js";
 import type { Config } from "../config.js";
+import { exposureScopeFromConfig } from "./directory.js";
 import type { DashboardChat, DashboardChatFilter } from "../dashboard/chats.js";
 import type { AudioExtensionInput } from "../ingest/audio.js";
 import type { ChatView } from "../mcp/read.js";
@@ -90,6 +91,54 @@ export function createPostgresReader(
     return rows.length > 0 ? rows.map((r) => r.alias_jid) : [jid];
   }
 
+  /** Every configured chat identity, expanded to its known aliases (Postgres twin of directory.ts's private helper of the same name). */
+  async function expandConfiguredAliases(
+    jids: readonly string[],
+  ): Promise<string[]> {
+    const set = new Set<string>();
+    for (const jid of jids) {
+      for (const alias of await equivalentJids(jid)) set.add(alias);
+    }
+    return [...set];
+  }
+
+  /**
+   * Postgres twin of src/db/directory.ts's `buildExposureSqlFragment`, for
+   * queries that list several chats at once (ADR-0037 §2 — one exposure rule,
+   * reimplemented per dialect since a sync, named-parameter SQLite fragment
+   * cannot bind against an async `pg` pool). Appends its parameters to
+   * `values` and returns a boolean expression referencing `alias`.
+   */
+  async function exposureClause(
+    values: unknown[],
+    alias = "c",
+  ): Promise<string> {
+    const scope = exposureScopeFromConfig(config);
+    values.push(scope.includeGroups, scope.includeStatus);
+    const includeGroupsParam = `$${String(values.length - 1)}`;
+    const includeStatusParam = `$${String(values.length)}`;
+    const clauses = [
+      `(not ${alias}.is_group or ${includeGroupsParam})`,
+      `(not ${alias}.is_status or ${includeStatusParam})`,
+      `not ${alias}.is_blocked`,
+    ];
+    const blockedAliases = await expandConfiguredAliases(scope.blockedChats);
+    if (blockedAliases.length > 0) {
+      values.push(blockedAliases);
+      clauses.push(`${alias}.jid <> all($${String(values.length)}::text[])`);
+    }
+    const allowedAliases = await expandConfiguredAliases(scope.allowedChats);
+    if (allowedAliases.length > 0) {
+      values.push(allowedAliases);
+      clauses.push(
+        `(${alias}.is_allowed or ${alias}.jid = any($${String(values.length)}::text[]))`,
+      );
+    } else {
+      clauses.push(`${alias}.is_allowed`);
+    }
+    return clauses.join(" and ");
+  }
+
   async function requireAllowedChat(
     chatJid: string,
   ): Promise<{ row: PgChatRow; aliases: string[] }> {
@@ -98,14 +147,31 @@ export function createPostgresReader(
       [accountId, chatJid],
     );
     if (!row) throw new McpRequestError("chat is not available");
+    const scope = exposureScopeFromConfig(config);
+    if (row.is_status && !scope.includeStatus) {
+      throw new McpRequestError("chat is not available");
+    }
+    if (row.is_group && !scope.includeGroups) {
+      throw new McpRequestError("chat is not available");
+    }
     const aliases = await equivalentJids(chatJid);
+    const blockedAliases = await expandConfiguredAliases(scope.blockedChats);
+    if (aliases.some((jid) => blockedAliases.includes(jid))) {
+      throw new McpRequestError("chat is not available");
+    }
     const policy = await one<{ allowed: boolean | null; blocked: boolean | null }>(
       `select bool_or(is_allowed) as allowed, bool_or(is_blocked) as blocked
        from chats where account_id = $1 and jid = any($2::text[])`,
       [accountId, aliases],
     );
-    if (!policy?.allowed || policy.blocked) {
+    if (policy?.blocked) {
       throw new McpRequestError("chat is not available");
+    }
+    if (!policy?.allowed) {
+      const allowedAliases = await expandConfiguredAliases(scope.allowedChats);
+      if (!aliases.some((jid) => allowedAliases.includes(jid))) {
+        throw new McpRequestError("chat is not available");
+      }
     }
     return { row, aliases };
   }
@@ -245,6 +311,13 @@ export function createPostgresReader(
     async listChats({ limit: limitInput, cursor: cursorInput }) {
       const limit = assertLimit(limitInput);
       const cursor = decodeCursor<{ ts: number; jid: string }>(cursorInput);
+      const values: unknown[] = [accountId];
+      const exposure = await exposureClause(values);
+      values.push(cursor?.ts ?? null, cursor?.jid ?? "");
+      const cursorTsParam = `$${String(values.length - 1)}`;
+      const cursorJidParam = `$${String(values.length)}`;
+      values.push(limit + 1);
+      const limitParam = `$${String(values.length)}`;
       const rows = await many<
         PgChatRow & { has_audio: boolean; dir_name: string | null; dir_push_name: string | null }
       >(
@@ -261,13 +334,13 @@ export function createPostgresReader(
                 on da.account_id = c.account_id and da.alias_jid = c.jid
          left join directory_entities ea
                 on ea.account_id = da.account_id and ea.canonical_jid = da.canonical_jid
-         where c.account_id = $1 and c.is_allowed and not c.is_blocked
-           and ($2::bigint is null or
-             coalesce(c.last_message_ts, 0) < $2 or
-             (coalesce(c.last_message_ts, 0) = $2 and c.jid > $3))
+         where c.account_id = $1 and ${exposure}
+           and (${cursorTsParam}::bigint is null or
+             coalesce(c.last_message_ts, 0) < ${cursorTsParam} or
+             (coalesce(c.last_message_ts, 0) = ${cursorTsParam} and c.jid > ${cursorJidParam}))
          order by coalesce(c.last_message_ts, 0) desc, c.jid asc
-         limit $4`,
-        [accountId, cursor?.ts ?? null, cursor?.jid ?? "", limit + 1],
+         limit ${limitParam}`,
+        values,
       );
       const last = rows[limit - 1];
       const items: ChatView[] = rows.map((row) => ({
@@ -337,6 +410,16 @@ export function createPostgresReader(
       const limit = assertLimit(limitInput);
       if (query.trim().length < 2) throw new McpRequestError("query is too short");
       const like = `%${query}%`;
+      const values: unknown[] = [accountId];
+      // Two exposure checks land in this statement (the messages' chat under
+      // `c`, the group membership's chat under `gc`); each appends its own
+      // params, so they cannot collide.
+      const messageExposure = await exposureClause(values, "c");
+      const groupExposure = await exposureClause(values, "gc");
+      values.push(like);
+      const likeParam = `$${String(values.length)}`;
+      values.push(limit);
+      const limitParam = `$${String(values.length)}`;
       const rows = await many<{
         canonical_jid: string;
         display_name: string | null;
@@ -356,28 +439,28 @@ export function createPostgresReader(
            and (exists (
              select 1 from messages m
              join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
-             where m.account_id = e.account_id and c.is_allowed and not c.is_blocked
+             where m.account_id = e.account_id and ${messageExposure}
                and (m.sender_jid = e.canonical_jid or m.quoted_sender_jid = e.canonical_jid)
            ) or exists (
              select 1 from directory_group_members gm
              join chats gc on gc.account_id = gm.account_id and gc.jid = gm.group_jid
              where gm.account_id = e.account_id and gm.member_jid = e.canonical_jid
-               and gm.is_active and gc.is_allowed and not gc.is_blocked
+               and gm.is_active and ${groupExposure}
            ))
-           and (immutable_unaccent(lower(e.canonical_jid)) like immutable_unaccent(lower($2))
-             or immutable_unaccent(lower(coalesce(e.name,''))) like immutable_unaccent(lower($2))
-             or immutable_unaccent(lower(coalesce(e.display_name,''))) like immutable_unaccent(lower($2))
-             or immutable_unaccent(lower(coalesce(e.push_name,''))) like immutable_unaccent(lower($2))
-             or immutable_unaccent(lower(coalesce(e.verified_name,''))) like immutable_unaccent(lower($2))
+           and (immutable_unaccent(lower(e.canonical_jid)) like immutable_unaccent(lower(${likeParam}))
+             or immutable_unaccent(lower(coalesce(e.name,''))) like immutable_unaccent(lower(${likeParam}))
+             or immutable_unaccent(lower(coalesce(e.display_name,''))) like immutable_unaccent(lower(${likeParam}))
+             or immutable_unaccent(lower(coalesce(e.push_name,''))) like immutable_unaccent(lower(${likeParam}))
+             or immutable_unaccent(lower(coalesce(e.verified_name,''))) like immutable_unaccent(lower(${likeParam}))
              or exists (select 1 from directory_aliases a2
                         where a2.account_id = e.account_id and a2.canonical_jid = e.canonical_jid
-                          and immutable_unaccent(lower(a2.alias_jid)) like immutable_unaccent(lower($2))))
+                          and immutable_unaccent(lower(a2.alias_jid)) like immutable_unaccent(lower(${likeParam}))))
          group by e.canonical_jid, e.display_name, e.push_name, e.verified_name,
                   e.first_seen_at, e.updated_at, e.raw_json
          order by coalesce(nullif(trim(e.display_name),''), nullif(trim(e.verified_name),''),
                            nullif(trim(e.push_name),''), e.canonical_jid)
-         limit $3`,
-        [accountId, like, limit],
+         limit ${limitParam}`,
+        values,
       );
       return rows.map((row): ParticipantRow => {
         const aliases = row.aliases ?? [];
@@ -484,7 +567,7 @@ export function createPostgresReader(
         await requireAllowedChat(filters.chat);
         add("m.chat_jid = any($$::text[])", aliases);
       } else {
-        where.push("c.is_allowed and not c.is_blocked");
+        where.push(await exposureClause(values));
       }
       if (filters.sender) add("m.sender_jid = $$", filters.sender);
       if (filters.fromMe !== undefined) add("m.from_me = $$", filters.fromMe);
@@ -513,14 +596,14 @@ export function createPostgresReader(
       }
       const terms = query.trim();
       if (!terms) throw new McpRequestError("query is required");
+      const values: unknown[] = [accountId, terms];
+      const exposure = await exposureClause(values);
       const where: string[] = [
         "m.account_id = $1",
-        "c.is_allowed",
-        "not c.is_blocked",
+        exposure,
         "(m.search_vector @@ websearch_to_tsquery('simple', immutable_unaccent($2))" +
           " or t.search_vector @@ websearch_to_tsquery('simple', immutable_unaccent($2)))",
       ];
-      const values: unknown[] = [accountId, terms];
       const add = (clause: string, value: unknown): void => {
         values.push(value);
         where.push(clause.replace("$$", `$${values.length}`));
@@ -563,16 +646,21 @@ export function createPostgresReader(
         [accountId, chatJid, messageId],
       );
       if (!center) throw new McpRequestError("message not found");
+      // `requireAllowedChat` above already threw for a chat that is not
+      // exposed; this clause re-checks the same rule defensively rather than
+      // the bare DB flags, mirroring src/mcp/read.ts's messageContext.
+      const contextValues: unknown[] = [accountId, chatJid, center.id];
+      const exposure = await exposureClause(contextValues);
       const [beforeRows, afterRows] = await Promise.all([
         selectMessages(
-          "m.account_id = $1 and m.chat_jid = $2 and c.is_allowed and not c.is_blocked and m.id < $3",
-          [accountId, chatJid, center.id],
+          `m.account_id = $1 and m.chat_jid = $2 and ${exposure} and m.id < $3`,
+          contextValues,
           assertWindow(before),
           "desc",
         ),
         selectMessages(
-          "m.account_id = $1 and m.chat_jid = $2 and c.is_allowed and not c.is_blocked and m.id > $3",
-          [accountId, chatJid, center.id],
+          `m.account_id = $1 and m.chat_jid = $2 and ${exposure} and m.id > $3`,
+          contextValues,
           assertWindow(after),
           "asc",
         ),
@@ -775,7 +863,7 @@ export function createPostgresReader(
     },
 
     async exportRows(selection: ExportSelection) {
-      const where: string[] = ["m.account_id = $1", "c.is_blocked = false"];
+      const where: string[] = ["m.account_id = $1"];
       const values: unknown[] = [accountId];
       const add = (clause: string, value: unknown): void => {
         values.push(value);
@@ -784,12 +872,39 @@ export function createPostgresReader(
       if (selection.sinceTs != null) add("m.timestamp >= $$", selection.sinceTs);
       if (selection.beforeTs != null) add("m.timestamp <= $$", selection.beforeTs);
       if (selection.afterRowid != null) add("m.id > $$", selection.afterRowid);
-      const blocked = selection.blockedChats ?? [];
-      if (blocked.length > 0) add("m.chat_jid <> all($$::text[])", blocked);
       if (selection.allowedOnly) {
-        const allow = selection.allowedChats ?? [];
-        values.push(allow);
-        where.push(`(c.is_allowed or m.chat_jid = any($${values.length}::text[]))`);
+        // The single exposure rule (ADR-0037 §2), alias-resolved — see
+        // src/db/queries.ts's selectExportMessages for the SQLite twin this
+        // mirrors.
+        const blockedAliases = await expandConfiguredAliases(
+          selection.blockedChats ?? [],
+        );
+        const allowedAliases = await expandConfiguredAliases(
+          selection.allowedChats ?? [],
+        );
+        values.push(selection.includeGroups ?? true, selection.includeStatus ?? true);
+        where.push(`(not c.is_group or $${String(values.length - 1)})`);
+        where.push(`(not c.is_status or $${String(values.length)})`);
+        where.push("not c.is_blocked");
+        if (blockedAliases.length > 0) {
+          values.push(blockedAliases);
+          where.push(`m.chat_jid <> all($${String(values.length)}::text[])`);
+        }
+        if (allowedAliases.length > 0) {
+          values.push(allowedAliases);
+          where.push(
+            `(c.is_allowed or m.chat_jid = any($${String(values.length)}::text[]))`,
+          );
+        } else {
+          where.push("c.is_allowed");
+        }
+      } else {
+        // --all bypasses is_allowed/includeGroups/includeStatus/allowedChats
+        // on purpose, but a chat blocked via the DB flag or blocked_chats is
+        // still never exported.
+        where.push("c.is_blocked = false");
+        const blocked = selection.blockedChats ?? [];
+        if (blocked.length > 0) add("m.chat_jid <> all($$::text[])", blocked);
       }
       const limitClause = selection.limit != null ? `limit $${values.length + 1}` : "";
       if (selection.limit != null) values.push(selection.limit);

@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { IngestDeps } from "../baileys/ingest.js";
-import { chatExposureAllowed } from "../db/directory.js";
+import { chatExposureAllowed, exposureScopeFromConfig } from "../db/directory.js";
 import {
   getOrCreateGcsBucket,
   gcsObjectKey,
@@ -182,7 +182,15 @@ export async function persistAudioIfEnabled(
   // it is never exposed and never transcribed for an unauthorised chat, and
   // nothing evicts it. Downloading it would accumulate private recordings with
   // no use for them.
-  if (!chatExposureAllowed(deps.db, deps.accountId, normalized.chatJid)) {
+  if (
+    !chatExposureAllowed(
+      deps.db,
+      deps.accountId,
+      normalized.chatJid,
+      exposureScopeFromConfig(deps.config),
+      { isGroup: normalized.isGroup, isStatus: normalized.isStatus },
+    )
+  ) {
     deps.logger.debug({ reason: "chat-not-allowed" }, "skipped media download");
     return;
   }

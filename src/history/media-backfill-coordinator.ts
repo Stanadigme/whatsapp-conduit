@@ -1,14 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { downloadStoredMedia } from "../baileys/media-backfill.js";
 import type { IngestDeps } from "../baileys/ingest.js";
+import { chatExposureAllowed, exposureScopeFromConfig } from "../db/directory.js";
 import {
   createMediaBackfillJob,
   getActiveMediaBackfillJob,
   getAttachment,
+  getChat,
   getMediaBackfillJob,
   listChats,
   listMediaBackfillCandidates,
   updateMediaBackfillJob,
+  type ChatRow,
   type MediaBackfillJobRow,
 } from "../db/queries.js";
 import { nowSec } from "../util/time.js";
@@ -89,9 +92,24 @@ export class MediaBackfillCoordinator {
       const job = getMediaBackfillJob(db, accountId, jobId);
       if (!job) return;
 
-      const chatJids = job.chat_jid
-        ? [job.chat_jid]
-        : listChats(db, { accountId, allowedOnly: true }).map((c) => c.jid);
+      // Media is never fetched for a chat that is not currently exposed
+      // (ADR-0037 §2), even when the caller asked for one chat explicitly by
+      // jid: `is_allowed` alone is not the full rule once includeGroups,
+      // includeStatus and the config-level allow/block lists are in play.
+      const scope = exposureScopeFromConfig(this.deps.config);
+      const candidateChats: ChatRow[] = job.chat_jid
+        ? [getChat(db, accountId, job.chat_jid)].filter(
+            (chat): chat is ChatRow => chat !== undefined,
+          )
+        : listChats(db, { accountId, allowedOnly: true });
+      const chatJids = candidateChats
+        .filter((chat) =>
+          chatExposureAllowed(db, accountId, chat.jid, scope, {
+            isGroup: chat.is_group === 1,
+            isStatus: chat.is_status === 1,
+          }),
+        )
+        .map((chat) => chat.jid);
 
       let found = 0;
       let downloaded = 0;

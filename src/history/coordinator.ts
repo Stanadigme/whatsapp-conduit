@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { proto } from "baileys";
 import type { Logger } from "pino";
 import type { Database } from "better-sqlite3";
 import {
@@ -15,10 +16,16 @@ import type { IngestionEventClassification } from "../baileys/ingest.js";
 import type {
   HistoryAnchor,
   HistoryTransport,
+  TransportHistorySyncEvent,
   TransportMessageEvent,
 } from "../transport/types.js";
 import { listEquivalentJids, resolveDirectoryJid } from "../db/directory.js";
 import { nowSec } from "../util/time.js";
+
+/** Baileys' flag for an on-demand batch the phone will not extend further. */
+const COMPLETE_ON_DEMAND_SYNC_BUT_MORE_MSG_REMAIN_ON_PRIMARY =
+  proto.Conversation.EndOfHistoryTransferType
+    .COMPLETE_ON_DEMAND_SYNC_BUT_MORE_MSG_REMAIN_ON_PRIMARY;
 
 export interface HistoryCapableTransport extends HistoryTransport {
   on(event: "connected", listener: (data: { jid: string }) => void): this;
@@ -27,11 +34,7 @@ export interface HistoryCapableTransport extends HistoryTransport {
   on(event: "error", listener: (error: Error) => void): this;
   on(
     event: "history_sync",
-    listener: (data: {
-      type: string;
-      progress?: number;
-      chunkOrder?: number;
-    }) => void,
+    listener: (data: TransportHistorySyncEvent) => void,
   ): this;
 }
 
@@ -57,6 +60,9 @@ interface ActiveRequest {
   boundarySeen: boolean;
   requestInFlight: boolean;
   fetchMedia: boolean;
+  /** Fields from the most recent `history_sync` event, reset per batch. */
+  lastBatchMessageCount: number | undefined;
+  lastBatchEndOfHistoryTransferType: number | undefined;
 }
 
 interface BatchWaiter {
@@ -89,6 +95,18 @@ export class HistoryCoordinator {
       this.connected = false;
     });
     options.transport.on("history_sync", (event) => {
+      // Merge rather than overwrite: a trailing `messaging-history.status`
+      // event carries neither field and must not erase what the batch's
+      // `messaging-history.set` event already recorded.
+      if (this.active) {
+        if (event.messageCount !== undefined) {
+          this.active.lastBatchMessageCount = event.messageCount;
+        }
+        if (event.endOfHistoryTransferType !== undefined) {
+          this.active.lastBatchEndOfHistoryTransferType =
+            event.endOfHistoryTransferType;
+        }
+      }
       if (
         this.batchWaiter &&
         event.type.replace(/[-_]/g, "").toUpperCase() === "ONDEMAND"
@@ -103,6 +121,7 @@ export class HistoryCoordinator {
     sinceTs: number,
     untilTs = nowSec(),
     fetchMedia = false,
+    anchor?: { sender: string; id: string; timestamp: number },
   ): Promise<HistoryStartResult> {
     if (!Number.isInteger(sinceTs) || sinceTs < 0 || sinceTs > untilTs) {
       throw new Error("invalid history window");
@@ -119,6 +138,13 @@ export class HistoryCoordinator {
         sinceTs,
         untilTs,
         fetchMedia,
+        ...(anchor
+          ? {
+              anchorSenderJid: anchor.sender,
+              anchorMessageId: anchor.id,
+              anchorTimestamp: anchor.timestamp,
+            }
+          : {}),
       });
     } catch (error) {
       const raced = getActiveHistoryJob(
@@ -278,6 +304,8 @@ export class HistoryCoordinator {
         boundarySeen: false,
         requestInFlight: false,
         fetchMedia: initial.fetch_media === 1,
+        lastBatchMessageCount: undefined,
+        lastBatchEndOfHistoryTransferType: undefined,
       };
       updateHistoryJob(this.options.db, this.options.accountId, jobId, {
         status: "queued",
@@ -339,6 +367,14 @@ export class HistoryCoordinator {
           next.id === anchor.id ||
           next.timestamp >= anchor.timestamp
         ) {
+          if (
+            this.active.lastBatchMessageCount === 0 &&
+            this.active.lastBatchEndOfHistoryTransferType ===
+              COMPLETE_ON_DEMAND_SYNC_BUT_MORE_MSG_REMAIN_ON_PRIMARY
+          ) {
+            this.complete(jobId, "window_already_delivered", false);
+            return;
+          }
           this.complete(jobId, "source_exhausted", false);
           return;
         }
@@ -434,7 +470,11 @@ export class HistoryCoordinator {
   }
 
   private async requestBatch(anchor: HistoryAnchor): Promise<void> {
-    if (this.active) this.active.requestInFlight = true;
+    if (this.active) {
+      this.active.requestInFlight = true;
+      this.active.lastBatchMessageCount = undefined;
+      this.active.lastBatchEndOfHistoryTransferType = undefined;
+    }
     let timer: NodeJS.Timeout | undefined;
     const completed = new Promise<void>((resolve, reject) => {
       this.batchWaiter = { resolve, reject };

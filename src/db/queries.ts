@@ -7,6 +7,7 @@ import {
   projectMessage,
 } from "./postgres-projection.js";
 import {
+  buildExposureSqlFragment,
   directoryTablesAvailable,
   markDirectoryMissingMembersInactive,
   resolveDirectoryJid,
@@ -195,7 +196,15 @@ export function upsertChat(db: Database, input: ChatInput): void {
   projectChat(db, input.accountId, input.jid);
 }
 
-/** Set a chat's allow flag (policy). Clears the block flag when allowing. */
+/**
+ * Set a chat's allow flag (policy). Clears the block flag when allowing.
+ *
+ * ADR-0037 §3: a chat entering the exposure perimeter must not wait for a new
+ * event to reach the client's PostgreSQL projection — its messages are already
+ * in SQLite, so every one of them is re-scheduled for projection here. A
+ * no-op when `persistence.postgres` is not configured (`projectMessage`
+ * schedules nothing without an active projection).
+ */
 export function setChatAllowed(
   db: Database,
   accountId: string,
@@ -210,6 +219,27 @@ export function setChatAllowed(
      where account_id = @accountId and jid = @jid`,
   ).run({ accountId, jid, allowed: allowed ? 1 : 0, now: nowSec() });
   projectChat(db, accountId, jid);
+  if (allowed) {
+    for (const messageId of listMessageIdsForChat(db, accountId, jid)) {
+      projectMessage(db, accountId, jid, messageId);
+    }
+  }
+}
+
+/** Every stored message id for one chat, oldest first — used to replay a
+ * chat's history into the client projection once it becomes exposed. */
+export function listMessageIdsForChat(
+  db: Database,
+  accountId: string,
+  chatJid: string,
+): string[] {
+  return db
+    .prepare<[string, string], { message_id: string }>(
+      `select message_id from messages
+       where account_id = ? and chat_jid = ? order by rowid asc`,
+    )
+    .all(accountId, chatJid)
+    .map((row) => row.message_id);
 }
 
 /** Set a chat's block flag (policy). Clears the allow flag when blocking. */
@@ -1259,8 +1289,18 @@ export interface ExportSelect {
   beforeTs?: number | null | undefined;
   /** Exclusive lower bound on the rowid cursor (for --since-last). */
   afterRowid?: number | null | undefined;
-  /** Restrict to allowed chats (is_allowed = 1 or in `allowedChats`). */
+  /**
+   * Restrict to the exposure rule (ADR-0037 §2, `chatExposureAllowed`):
+   * `is_allowed = 1` or listed in `allowedChats`, minus `includeGroups` /
+   * `includeStatus` / `blockedChats`. `--all` (this flag false) keeps
+   * bypassing the whole rule, as before — only the DB block flag and
+   * `blockedChats` still apply.
+   */
   allowedOnly?: boolean | undefined;
+  /** Defaults to true (no filtering) when omitted, matching pre-ADR-0037 export. */
+  includeGroups?: boolean | undefined;
+  /** Defaults to true (no filtering) when omitted, matching pre-ADR-0037 export. */
+  includeStatus?: boolean | undefined;
   allowedChats?: string[] | undefined;
   /** Config-level blocked chats to exclude in addition to the DB flag. */
   blockedChats?: string[] | undefined;
@@ -1294,28 +1334,31 @@ export function selectExportMessages(
     where.push("m.rowid > @afterRowid");
     params.afterRowid = sel.afterRowid;
   }
-  // Chats blocked via `chats block` (DB flag) are never exported.
-  where.push("c.is_blocked = 0");
-  // Config-level blocked_chats are excluded too, even under --all.
-  const blocked = sel.blockedChats ?? [];
-  if (blocked.length > 0) {
-    const placeholders = blocked.map((_, i) => `@bc${i}`);
-    blocked.forEach((jid, i) => {
-      params[`bc${i}`] = jid;
-    });
-    where.push(`m.chat_jid not in (${placeholders.join(", ")})`);
-  }
   if (sel.allowedOnly) {
-    const allow = sel.allowedChats ?? [];
-    const placeholders = allow.map((_, i) => `@ac${i}`);
-    allow.forEach((jid, i) => {
-      params[`ac${i}`] = jid;
+    // The single exposure rule (ADR-0037 §2), alias-resolved: a chat known
+    // under both a phone JID and a LID must not slip past `allowedChats`/
+    // `blockedChats` just because the config lists the other alias.
+    const fragment = buildExposureSqlFragment(db, sel.accountId ?? "", {
+      includeGroups: sel.includeGroups ?? true,
+      includeStatus: sel.includeStatus ?? true,
+      allowedChats: sel.allowedChats ?? [],
+      blockedChats: sel.blockedChats ?? [],
     });
-    const inClause =
-      placeholders.length > 0
-        ? ` or m.chat_jid in (${placeholders.join(", ")})`
-        : "";
-    where.push(`(c.is_allowed = 1${inClause})`);
+    where.push(fragment.sql);
+    Object.assign(params, fragment.params);
+  } else {
+    // --all bypasses is_allowed/includeGroups/includeStatus/allowedChats on
+    // purpose, but a chat blocked via `chats block` (DB flag) or
+    // blocked_chats is still never exported.
+    where.push("c.is_blocked = 0");
+    const blocked = sel.blockedChats ?? [];
+    if (blocked.length > 0) {
+      const placeholders = blocked.map((_, i) => `@bc${i}`);
+      blocked.forEach((jid, i) => {
+        params[`bc${i}`] = jid;
+      });
+      where.push(`m.chat_jid not in (${placeholders.join(", ")})`);
+    }
   }
   if (sel.limit != null) params.limit = sel.limit;
 

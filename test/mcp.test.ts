@@ -22,7 +22,11 @@ async function connectedClient(
     chat: string,
     since: number,
   ) => Promise<{ jobId: string; status: string; reused: boolean }>,
-  configOverrides: Record<string, unknown> = {},
+  // This fixture seeds an explicitly allowed group chat; groups are excluded
+  // by default (ADR-0037 exposure rule), so the fixture opts them back in.
+  configOverrides: Record<string, unknown> = {
+    privacy: { include_groups: true },
+  },
 ) {
   const config = resolveConfig(configOverrides, { dataDir: "/data" });
   const db = openDb(":memory:", { migrate: true });

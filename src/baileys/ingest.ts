@@ -9,12 +9,14 @@ import type { Logger } from "pino";
 import type { Config } from "../config.js";
 import type { Database } from "../db/index.js";
 import {
+  chatPolicyForAliases,
   directoryTablesAvailable,
   listEquivalentJids,
   upsertDirectoryContact,
   upsertDirectoryGroup,
 } from "../db/directory.js";
 import {
+  getAccount,
   getChat,
   getMessage,
   insertEvent,
@@ -30,11 +32,10 @@ import { downloadAudioIfEnabled } from "./media.js";
 import {
   normalizeMessage,
   normalizeReaction,
-  resolveSender,
   type NormalizedMessage,
   type NormalizeResult,
 } from "./normalize.js";
-import { chatAllowedAtSync, senderAllowedAtSync } from "../privacy/filters.js";
+import { chatAllowedAtSync } from "../privacy/filters.js";
 import type { IngestionSource } from "../db/queries.js";
 
 export interface IngestDeps {
@@ -52,21 +53,6 @@ export interface IngestionEventClassification {
   /** Opt-in only, set by the classifier for one specific history job that
    * requested it (ADR-0035) — never a default for `source: "history"`. */
   fetchMedia?: boolean;
-}
-
-/** Reasons that warrant an auditable `ignored` event row (vs. bulk categories). */
-const AUDITED_IGNORE_REASONS: ReadonlySet<string> = new Set([
-  "chat-blocked",
-  "chat-blocked-db",
-  "sender-blocked",
-  "sender-unknown",
-  "not-in-allowlist",
-  "sender-not-in-allowlist",
-]);
-
-/** True if the chat was blocked via `chats block` (DB policy flag). */
-function chatBlockedInDb(deps: IngestDeps, chatJid: string): boolean {
-  return getChat(deps.db, deps.accountId, chatJid)?.is_blocked === 1;
 }
 
 /**
@@ -103,7 +89,12 @@ export function registerIngestion(
         // Fire-and-forget: a media outage must never stall ingestion.
         if (
           stored &&
-          (classification.source === "live" || classification.fetchMedia)
+          (classification.source === "live" || classification.fetchMedia) &&
+          exposedForSideEffects(deps, {
+            jid: stored.chatJid,
+            isGroup: stored.isGroup,
+            isStatus: stored.isStatus,
+          })
         ) {
           void downloadAudioIfEnabled(msg, stored, deps).catch(
             (err: unknown) => {
@@ -375,14 +366,16 @@ interface ChatContext {
 }
 
 /**
- * Apply chat-level filters (config category/allow/block plus the DB `is_blocked`
- * flag set by `chats block`). Records an audited ignored event and returns false
- * when the chat is filtered out.
+ * ponytail: garde local, à remplacer par chatExposureAllowed (S3b,
+ * src/db/directory.ts) une fois que la définition d'exposition à la lecture
+ * couvre le périmètre de capture. ADR-0037 §1 : le périmètre de capture ne
+ * gouverne plus le stockage, seulement les effets de bord qui atteignent
+ * l'extérieur (téléchargement média, enfilage outbox) — ce sont les deux
+ * seuls appelants de cette fonction.
  */
-function chatPasses(
+export function exposedForSideEffects(
   deps: IngestDeps,
   ctx: ChatContext,
-  messageId: string | null,
 ): boolean {
   const aliases = listEquivalentJids(deps.db, deps.accountId, ctx.jid);
   const blockedAlias = aliases.find((jid) =>
@@ -395,47 +388,31 @@ function chatPasses(
     ...ctx,
     jid: blockedAlias ?? allowedAlias ?? ctx.jid,
   });
-  if (!decision.store) {
-    recordIgnored(deps, ctx.jid, messageId, decision.reason);
-    return false;
-  }
-  if (aliases.some((jid) => chatBlockedInDb(deps, jid))) {
-    recordIgnored(deps, ctx.jid, messageId, "chat-blocked-db");
-    return false;
-  }
-  return true;
-}
-
-/** Apply the sender filter; record an ignored event and return false on reject. */
-function senderPasses(
-  deps: IngestDeps,
-  chatJid: string,
-  senderJid: string | null,
-  messageId: string | null,
-): boolean {
-  const decision = senderAllowedAtSync(deps.config, senderJid);
-  if (!decision.store) {
-    recordIgnored(deps, chatJid, messageId, decision.reason);
-    return false;
-  }
-  return true;
+  if (!decision.store) return false;
+  const policy = chatPolicyForAliases(deps.db, deps.accountId, aliases);
+  return policy.allowed && !policy.blocked;
 }
 
 /** Ingest a single message from `messages.upsert`. */
 /**
  * Normalize and persist one inbound message.
  *
- * Returns the stored message, or `null` when nothing was written — a skip, or
- * a chat/sender the filters reject. Callers use that to decide whether to
- * follow up on the message: media is only ever fetched for a conversation we
- * actually persisted.
+ * Returns the stored message, or `null` when nothing was written — an
+ * unparseable event (ADR-0037 §1: the capture scope no longer prevents
+ * storage). Callers use the return value to decide whether to follow up on
+ * the message; the follow-up itself re-checks exposure separately
+ * (`exposedForSideEffects`), since a stored message is not necessarily one to
+ * download media for.
  */
 export function ingestMessage(
   deps: IngestDeps,
   msg: WAMessage,
   ingestionSource: IngestionSource = "live",
 ): NormalizedMessage | null {
-  const result = normalizeMessage(msg);
+  // A one-row lookup (accounts is keyed by account_id); not worth caching on
+  // deps for the volumes this ingests at.
+  const selfJid = getAccount(deps.db, deps.accountId)?.self_jid;
+  const result = normalizeMessage(msg, selfJid);
   if (result.action === "skip") {
     deps.logger.debug({ reason: result.reason }, "skipped message");
     return null;
@@ -472,17 +449,13 @@ export function ingestNormalizedResult(
           isStatus: result.isStatus,
         };
 
-  const messageId = messageIdOf(result);
-  if (!chatPasses(deps, ctx, messageId)) return false;
-
-  // The sender filter applies to stores AND protocol edits/revokes alike — a
-  // blocked sender must not be able to write edited text or tombstones either.
+  // The sender is still resolved (LID/PN aliasing) for the write itself; it no
+  // longer gates storage (ADR-0037 §1).
   const senderJid =
     result.action === "store" ? result.message.senderJid : result.senderJid;
   const resolvedSenderJid = senderJid
     ? resolveParticipantJid(deps.db, deps.accountId, senderJid)
     : null;
-  if (!senderPasses(deps, ctx.jid, resolvedSenderJid, messageId)) return false;
 
   if (result.action === "store") {
     persistStore(
@@ -520,17 +493,9 @@ export function ingestReaction(
   const result = normalizeReaction(key, reaction);
   if (result.action !== "store") return;
   const { message } = result;
-  const ctx: ChatContext = {
-    jid: message.chatJid,
-    isGroup: message.isGroup,
-    isStatus: message.isStatus,
-  };
-  if (!chatPasses(deps, ctx, message.messageId)) return;
   const resolvedSenderJid = message.senderJid
     ? resolveParticipantJid(deps.db, deps.accountId, message.senderJid)
     : null;
-  if (!senderPasses(deps, ctx.jid, resolvedSenderJid, message.messageId))
-    return;
   persistStore(deps, message, null, resolvedSenderJid);
 }
 
@@ -549,27 +514,13 @@ export function ingestUpdate(
     update.update?.message === null;
   if (!isRevoke) return;
 
-  const ctx: ChatContext = {
-    jid: chatJid,
-    isGroup: isGroupJid(chatJid),
-    isStatus: isStatusJid(chatJid),
-  };
-  if (!chatPasses(deps, ctx, targetId)) return;
-
-  // The live revoke route must honor the sender filter too. Derive the sender
-  // from the update key when present; otherwise null fails closed under a
-  // configured sender allowlist.
-  const senderJid = resolveSender(
-    update.key,
-    ctx.isGroup,
-    Boolean(update.key.fromMe),
+  persistRevoke(
+    deps,
+    chatJid,
+    targetId,
+    isGroupJid(chatJid),
+    isStatusJid(chatJid),
   );
-  const resolvedSenderJid = senderJid
-    ? resolveParticipantJid(deps.db, deps.accountId, senderJid)
-    : null;
-  if (!senderPasses(deps, chatJid, resolvedSenderJid, targetId)) return;
-
-  persistRevoke(deps, chatJid, targetId, ctx.isGroup, ctx.isStatus);
 }
 
 function persistStore(
@@ -704,36 +655,23 @@ function enqueueMessageSnapshot(
   if (!message || !chat) {
     throw new Error("outbox message snapshot is incomplete");
   }
+  // ponytail: garde local, à remplacer par chatExposureAllowed (S3b,
+  // src/db/directory.ts) — ADR-0037 §3 : les destinations de données du
+  // client (outbox Postgres) ne reçoivent que l'exposé.
+  if (
+    !exposedForSideEffects(deps, {
+      jid: chatJid,
+      isGroup: chat.is_group === 1,
+      isStatus: chat.is_status === 1,
+    })
+  ) {
+    return;
+  }
   enqueueOutbox(deps.db, deps.outboxKey, {
     operation: "message.upsert",
     dedupeKey: `${deps.accountId}\u0000${chatJid}\u0000${messageId}`,
     payload: { version: 1, chat, message },
   });
-}
-
-function recordIgnored(
-  deps: IngestDeps,
-  chatJid: string,
-  messageId: string | null,
-  reason: string | undefined,
-): void {
-  deps.logger.debug({ reason, chatJid }, "ignored message at sync filter");
-  if (!reason || !AUDITED_IGNORE_REASONS.has(reason)) return;
-  // Metadata only — never the message body, even for a blocked chat.
-  insertEvent(deps.db, {
-    accountId: deps.accountId,
-    eventType: "ignored",
-    eventTs: nowSec(),
-    rawJson: JSON.stringify({ chatJid, messageId, reason }),
-  });
-}
-
-function messageIdOf(result: NormalizeResult): string | null {
-  if (result.action === "store") return result.message.messageId;
-  if (result.action === "revoke" || result.action === "edit") {
-    return result.targetId;
-  }
-  return null;
 }
 
 function isUint8Array(value: unknown): value is Uint8Array {

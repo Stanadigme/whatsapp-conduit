@@ -418,6 +418,9 @@ describe("dashboard message consultation", () => {
     expect(appText).toContain("Corriger");
     expect(appText).toContain("Télécharger le média");
     expect(appText).toContain("Profondeur maximale fournie par WhatsApp");
+    expect(appText).toContain(
+      "WhatsApp a déjà livré ces messages à cet appareil et ne les renvoie jamais",
+    );
     expect(appText).toContain("transcription/correction");
     expect(await (await fetch(`${base}/styles.css`)).text()).toContain(
       "message-list",

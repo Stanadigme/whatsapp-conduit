@@ -9,8 +9,10 @@ import type {
   ParticipantRow,
 } from "../db/queries.js";
 import {
+  buildExposureSqlFragment,
   directoryDisplayName,
   directoryTablesAvailable,
+  exposureScopeFromConfig,
   getDirectoryEntityByJid,
   listDirectoryAliases,
   listDirectoryGroupMembers,
@@ -95,31 +97,32 @@ export function listChats(
 ): Page<ChatView> {
   const limit = assertLimit(limitInput);
   const cursor = decodeCursor<{ ts: number; jid: string }>(cursorInput);
+  const fragment = buildExposureSqlFragment(
+    ctx.db,
+    ctx.accountId,
+    exposureScopeFromConfig(ctx.config),
+  );
   const rows = ctx.db
-    .prepare<
-      [string, number | null, number | null, number | null, string, number],
-      ChatRow & { has_audio: number }
-    >(
+    .prepare(
       `select c.*,
          exists(select 1 from messages m
           where m.account_id = c.account_id and m.chat_jid = c.jid
             and m.message_type = 'audio') as has_audio
        from chats c
-       where c.account_id = ? and c.is_allowed = 1 and c.is_blocked = 0
-         and (? is null or
-           coalesce(c.last_message_ts, 0) < ? or
-           (coalesce(c.last_message_ts, 0) = ? and c.jid > ?))
+       where c.account_id = @accountId and ${fragment.sql}
+         and (@cursorTs is null or
+           coalesce(c.last_message_ts, 0) < @cursorTs or
+           (coalesce(c.last_message_ts, 0) = @cursorTs and c.jid > @cursorJid))
        order by coalesce(c.last_message_ts, 0) desc, c.jid asc
-       limit ?`,
+       limit @limit`,
     )
-    .all(
-      ctx.accountId,
-      cursor ? cursor.ts : null,
-      cursor ? cursor.ts : null,
-      cursor ? cursor.ts : null,
-      cursor?.jid ?? "",
-      limit + 1,
-    );
+    .all({
+      accountId: ctx.accountId,
+      cursorTs: cursor ? cursor.ts : null,
+      cursorJid: cursor?.jid ?? "",
+      limit: limit + 1,
+      ...fragment.params,
+    }) as Array<ChatRow & { has_audio: number }>;
   const last = rows[limit - 1];
   return page(
     rows.map((row) =>
@@ -145,53 +148,59 @@ export function searchContacts(
 ): ParticipantRow[] {
   const limit = assertLimit(limitInput);
   if (query.trim().length < 2) throw new McpRequestError("query is too short");
+  const scope = exposureScopeFromConfig(ctx.config);
+  // Two exposure checks land in the same statement (the messages' chat under
+  // `c`, the group membership's chat under `gc`); prefixed params keep their
+  // bindings from colliding.
+  const chatExposure = buildExposureSqlFragment(ctx.db, ctx.accountId, scope, "c", "chat_");
+  const groupExposure = buildExposureSqlFragment(ctx.db, ctx.accountId, scope, "gc", "group_");
   if (directoryTablesAvailable(ctx.db)) {
     const like = `%${query}%`;
     return ctx.db
-      .prepare<
-        [string, string, string, string, string, string, string, number],
-        ParticipantRow
-      >(
+      .prepare(
         `select distinct p.* from directory_entities e
          left join participants p on p.account_id = e.account_id and p.jid = e.canonical_jid
-         where e.account_id = ? and e.entity_type = 'contact'
+         where e.account_id = @accountId and e.entity_type = 'contact'
            and (exists (
              select 1 from messages m
              join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
-             where m.account_id = e.account_id and c.is_allowed = 1 and c.is_blocked = 0
+             where m.account_id = e.account_id and ${chatExposure.sql}
                and (m.sender_jid = e.canonical_jid or m.quoted_sender_jid = e.canonical_jid)
            ) or exists (
              select 1 from directory_group_members gm
              join directory_entities g on g.id = gm.group_entity_id
              join chats gc on gc.account_id = g.account_id and gc.jid = g.canonical_jid
              where gm.account_id = e.account_id and gm.member_entity_id = e.id
-               and gm.is_active = 1 and gc.is_allowed = 1 and gc.is_blocked = 0
+               and gm.is_active = 1 and ${groupExposure.sql}
            ))
-           and (lower(coalesce(e.canonical_jid, '')) like lower(?)
-             or lower(coalesce(e.name, '')) like lower(?)
-             or lower(coalesce(e.display_name, '')) like lower(?)
-             or lower(coalesce(e.push_name, '')) like lower(?)
-             or lower(coalesce(e.verified_name, '')) like lower(?)
+           and (lower(coalesce(e.canonical_jid, '')) like lower(@like)
+             or lower(coalesce(e.name, '')) like lower(@like)
+             or lower(coalesce(e.display_name, '')) like lower(@like)
+             or lower(coalesce(e.push_name, '')) like lower(@like)
+             or lower(coalesce(e.verified_name, '')) like lower(@like)
              or exists (select 1 from directory_aliases a
-                        where a.entity_id = e.id and lower(a.alias_jid) like lower(?)))
+                        where a.entity_id = e.id and lower(a.alias_jid) like lower(@like)))
          order by coalesce(e.display_name, e.verified_name, e.push_name,
                            e.name, e.canonical_jid)
-         limit ?`,
+         limit @limit`,
       )
-      .all(ctx.accountId, like, like, like, like, like, like, limit);
+      .all({
+        accountId: ctx.accountId,
+        like,
+        limit,
+        ...chatExposure.params,
+        ...groupExposure.params,
+      }) as ParticipantRow[];
   }
   return ctx.db
-    .prepare<
-      [string, string, string, string, string, string, number],
-      ParticipantRow
-    >(
+    .prepare(
       `select distinct p.* from participants p
-       where p.account_id = ?
+       where p.account_id = @accountId
          and (exists (
            select 1 from messages m
            join chats c on c.account_id = m.account_id and c.jid = m.chat_jid
            where m.account_id = p.account_id
-             and c.is_allowed = 1 and c.is_blocked = 0
+             and ${chatExposure.sql}
            and (m.sender_jid = p.jid or m.quoted_sender_jid = p.jid)
            )
          or exists (
@@ -201,25 +210,23 @@ export function searchContacts(
            where gm.account_id = p.account_id
              and gm.participant_jid = p.jid
              and gm.is_active = 1
-             and gc.is_allowed = 1 and gc.is_blocked = 0
+             and ${groupExposure.sql}
           ))
-          and (lower(coalesce(p.jid, '')) like lower(?)
-            or lower(coalesce(p.lid, '')) like lower(?)
-            or lower(coalesce(p.display_name, '')) like lower(?)
-            or lower(coalesce(p.push_name, '')) like lower(?)
-            or lower(coalesce(p.verified_name, '')) like lower(?))
+          and (lower(coalesce(p.jid, '')) like lower(@like)
+            or lower(coalesce(p.lid, '')) like lower(@like)
+            or lower(coalesce(p.display_name, '')) like lower(@like)
+            or lower(coalesce(p.push_name, '')) like lower(@like)
+            or lower(coalesce(p.verified_name, '')) like lower(@like))
        order by coalesce(p.display_name, p.verified_name, p.push_name, p.jid)
-       limit ?`,
+       limit @limit`,
     )
-    .all(
-      ctx.accountId,
-      `%${query}%`,
-      `%${query}%`,
-      `%${query}%`,
-      `%${query}%`,
-      `%${query}%`,
+    .all({
+      accountId: ctx.accountId,
+      like: `%${query}%`,
       limit,
-    );
+      ...chatExposure.params,
+      ...groupExposure.params,
+    }) as ParticipantRow[];
 }
 
 export function listGroupParticipants(
@@ -314,21 +321,30 @@ export function messageContext(
     >("select m.*, m.rowid as rowid from messages m where m.account_id = ? and m.chat_jid = ? and m.message_id = ?")
     .get(ctx.accountId, chatJid, messageId);
   if (!center) throw new McpRequestError("message not found");
+  // `allowedChat` above already threw for a chat that is not exposed; this
+  // fragment re-checks the same rule defensively rather than the bare DB
+  // flags, so a future change to `allowedChat` cannot silently widen it here.
+  const fragment = buildExposureSqlFragment(
+    ctx.db,
+    ctx.accountId,
+    exposureScopeFromConfig(ctx.config),
+  );
   const window = {
     chat: chatJid,
     center: center.rowid,
+    ...fragment.params,
   };
   const beforeRows = messageRows(
     ctx,
     `where m.account_id = @accountId and m.chat_jid = @chat
-       and c.is_allowed = 1 and c.is_blocked = 0 and m.rowid < @center`,
+       and ${fragment.sql} and m.rowid < @center`,
     window,
     assertWindow(before),
   );
   const afterRows = messageRows(
     ctx,
     `where m.account_id = @accountId and m.chat_jid = @chat
-       and c.is_allowed = 1 and c.is_blocked = 0 and m.rowid > @center`,
+       and ${fragment.sql} and m.rowid > @center`,
     window,
     assertWindow(after),
     "asc",
@@ -376,10 +392,14 @@ export function searchMessages(
       throw new McpRequestError("kind and hasMedia filters are contradictory");
     }
   }
+  const fragment = buildExposureSqlFragment(
+    ctx.db,
+    ctx.accountId,
+    exposureScopeFromConfig(ctx.config),
+  );
   const where = [
     "m.account_id = @accountId",
-    "c.is_allowed = 1",
-    "c.is_blocked = 0",
+    fragment.sql,
     // The FTS constraint goes through a rowid subquery rather than a direct
     // `messages_fts match`: SQLite rejects MATCH inside an `or` ("unable to use
     // function MATCH in the requested context"), which is exactly the shape the
@@ -393,6 +413,7 @@ export function searchMessages(
   const params: Record<string, unknown> = {
     query: ftsQuery(query),
     like: `%${query}%`,
+    ...fragment.params,
   };
   if (filters.chat) {
     allowedChat(ctx, filters.chat);

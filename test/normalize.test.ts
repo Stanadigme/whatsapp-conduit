@@ -129,6 +129,112 @@ describe("normalizeMessage: storable content", () => {
     expect(r.message.senderJid).toBe("49111@s.whatsapp.net");
   });
 
+  it("history-delivered group message falls back to the root participant", () => {
+    // messaging-history.set batches carry the group sender on WAMessage.participant,
+    // not key.participant (proto.IWebMessageInfo).
+    const r = normalizeMessage(
+      msg({
+        key: { remoteJid: "123-456@g.us", fromMe: false, id: "H1" },
+        participant: "49111:2@s.whatsapp.net",
+        message: { conversation: "from history" },
+      }),
+    );
+    expect(r.action).toBe("store");
+    if (r.action !== "store") return;
+    expect(r.message.isGroup).toBe(true);
+    expect(r.message.senderJid).toBe("49111@s.whatsapp.net");
+  });
+
+  it("key.participant wins over a root participant when both are present", () => {
+    const r = normalizeMessage(
+      msg({
+        key: {
+          remoteJid: "123-456@g.us",
+          fromMe: false,
+          id: "G2",
+          participant: "49222:1@s.whatsapp.net",
+        },
+        participant: "49999:9@s.whatsapp.net",
+        message: { conversation: "live" },
+      }),
+    );
+    expect(r.action).toBe("store");
+    if (r.action !== "store") return;
+    expect(r.message.senderJid).toBe("49222@s.whatsapp.net");
+  });
+
+  it("group message without any participant (key or root) has no sender", () => {
+    const r = normalizeMessage(
+      msg({
+        key: { remoteJid: "123-456@g.us", fromMe: false, id: "G3" },
+        message: { conversation: "no author" },
+      }),
+    );
+    expect(r.action).toBe("store");
+    if (r.action !== "store") return;
+    expect(r.message.isGroup).toBe(true);
+    expect(r.message.senderJid).toBeNull();
+  });
+
+  it("fromMe group message with no participant and no selfJid has no sender", () => {
+    const r = normalizeMessage(
+      msg({
+        key: { remoteJid: "123-456@g.us", fromMe: true, id: "SELF0" },
+        message: { conversation: "sent by me" },
+      }),
+    );
+    expect(r.action).toBe("store");
+    if (r.action !== "store") return;
+    expect(r.message.senderJid).toBeNull();
+  });
+
+  it("fromMe group message with no participant resolves to selfJid", () => {
+    // On-demand history batches carry no participant at all for our own
+    // messages — live delivery instead sets key.participant to our LID.
+    const r = normalizeMessage(
+      msg({
+        key: { remoteJid: "123-456@g.us", fromMe: true, id: "SELF1" },
+        message: { conversation: "sent by me" },
+      }),
+      "33744707085@s.whatsapp.net",
+    );
+    expect(r.action).toBe("store");
+    if (r.action !== "store") return;
+    expect(r.message.isGroup).toBe(true);
+    expect(r.message.senderJid).toBe("33744707085@s.whatsapp.net");
+  });
+
+  it("fromMe group message with a key.participant LID is unaffected by selfJid", () => {
+    const r = normalizeMessage(
+      msg({
+        key: {
+          remoteJid: "123-456@g.us",
+          fromMe: true,
+          id: "SELF2",
+          participant: "49111:2@s.whatsapp.net",
+        },
+        message: { conversation: "sent by me" },
+      }),
+      "33744707085@s.whatsapp.net",
+    );
+    expect(r.action).toBe("store");
+    if (r.action !== "store") return;
+    expect(r.message.senderJid).toBe("49111@s.whatsapp.net");
+  });
+
+  it("1:1 message is unaffected by a root participant", () => {
+    const r = normalizeMessage(
+      msg({
+        key: { remoteJid: "c@s.whatsapp.net", fromMe: false, id: "D1" },
+        message: { conversation: "direct" },
+      }),
+    );
+    expect(r.action).toBe("store");
+    if (r.action !== "store") return;
+    expect(r.message.isGroup).toBe(false);
+    expect(r.message.senderJid).toBe("c@s.whatsapp.net");
+  });
+
   it("unknown content type stores as unknown without inventing text", () => {
     const r = normalizeMessage(
       msg({ message: { someFutureMessage: { foo: 1 } } as never }),

@@ -20,6 +20,14 @@ export interface HistoryStartRequest {
   since: number;
   /** Opt-in only (ADR-0035): also fetch media for this job's history rows. */
   fetchMedia?: boolean;
+  /**
+   * Diagnostic override of the anchor the coordinator would otherwise derive
+   * from `history_anchor`/checkpoint rows. Not exposed by `wa_history_download`
+   * or the dashboard route — reachable only through a one-off script calling
+   * `requestHistoryStart` directly (ADR-0012, phase
+   * `2026-09-17-historique-livre-une-fois`, sous-tâche D0).
+   */
+  anchor?: { sender: string; id: string; timestamp: number };
 }
 
 export interface DirectoryResyncRequest {
@@ -395,7 +403,25 @@ function isControlRequest(value: unknown): value is ControlRequest {
     typeof record.chat === "string" &&
     typeof record.since === "number" &&
     Number.isInteger(record.since) &&
-    (record.fetchMedia === undefined || typeof record.fetchMedia === "boolean")
+    (record.fetchMedia === undefined ||
+      typeof record.fetchMedia === "boolean") &&
+    (record.anchor === undefined || isHistoryStartAnchor(record.anchor))
+  );
+}
+
+function isHistoryStartAnchor(
+  value: unknown,
+): value is NonNullable<HistoryStartRequest["anchor"]> {
+  if (typeof value !== "object" || value === null) return false;
+  const anchor = value as Record<string, unknown>;
+  return (
+    typeof anchor.sender === "string" &&
+    anchor.sender.length > 0 &&
+    typeof anchor.id === "string" &&
+    anchor.id.length > 0 &&
+    typeof anchor.timestamp === "number" &&
+    Number.isInteger(anchor.timestamp) &&
+    anchor.timestamp >= 0
   );
 }
 

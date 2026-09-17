@@ -184,6 +184,8 @@ export async function runExport(
       sinceTs,
       afterRowid,
       allowedOnly,
+      includeGroups: config.privacy.includeGroups,
+      includeStatus: config.privacy.includeStatus,
       allowedChats: config.filters.allowedChats,
       blockedChats: config.filters.blockedChats,
       limit: options.limit,

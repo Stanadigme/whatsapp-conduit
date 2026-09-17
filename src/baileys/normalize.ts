@@ -114,15 +114,40 @@ function extractDurationSeconds(
   return seconds == null ? null : Math.max(0, Math.floor(seconds));
 }
 
+/**
+ * `rootParticipant` covers `WAMessage.participant` (`proto.IWebMessageInfo`),
+ * which is where on-demand history batches (`messaging-history.set`) carry the
+ * group sender — `key.participant` is empty there. Live events (and
+ * `messages.update`, which only ever passes a bare key) keep working through
+ * the existing `key.participant` path; `rootParticipant` is consulted only as
+ * a fallback, never overriding a present `key.participant`.
+ *
+ * `selfJid` covers a further gap in the same history batches: a group message
+ * we sent ourselves (`fromMe`) carries no participant at all — live delivery
+ * of the same message instead sets `key.participant` to our own LID, which
+ * the directory resolves. Without `selfJid` the sender stays unresolved; with
+ * it, `fromMe` in a group with no participant is unambiguously us.
+ */
 export function resolveSender(
   key: proto.IMessageKey,
   isGroup: boolean,
   fromMe: boolean,
+  rootParticipant?: string | null,
+  selfJid?: string | null,
 ): string | null {
-  if (typeof key.participant === "string" && key.participant.length > 0) {
-    return normalizeJid(key.participant);
+  const participant =
+    typeof key.participant === "string" && key.participant.length > 0
+      ? key.participant
+      : typeof rootParticipant === "string" && rootParticipant.length > 0
+        ? rootParticipant
+        : null;
+  if (participant) return normalizeJid(participant);
+  if (isGroup) {
+    if (fromMe && typeof selfJid === "string" && selfJid.length > 0) {
+      return normalizeJid(selfJid);
+    }
+    return null; // group sender unknown without participant
   }
-  if (isGroup) return null; // group sender unknown without participant
   if (fromMe) return null; // our own jid is recorded on the account, not here
   return key.remoteJid ? normalizeJid(key.remoteJid) : null;
 }
@@ -131,8 +156,15 @@ export function resolveSender(
  * Normalize a Baileys message into a persistence action. Pure and defensive:
  * anything it cannot parse becomes either a `skip` or an `unknown`-typed store
  * with no invented fields.
+ *
+ * `selfJid` (the account's own JID, `accounts.self_jid`) is optional and only
+ * consulted by {@link resolveSender} for the `fromMe`-without-participant
+ * group case; every other resolution path ignores it.
  */
-export function normalizeMessage(msg: WAMessage): NormalizeResult {
+export function normalizeMessage(
+  msg: WAMessage,
+  selfJid?: string | null,
+): NormalizeResult {
   const key = msg.key;
   const chatJid = key?.remoteJid ?? null;
   const messageId = key?.id ?? null;
@@ -151,20 +183,35 @@ export function normalizeMessage(msg: WAMessage): NormalizeResult {
 
   const contentType = getContentType(content);
   if (!contentType) {
-    return buildStore(msg, chatJid, messageId, isGroup, isStatus, fromMe, {
-      messageType: "unknown",
-      text: null,
-      hasMedia: false,
-      durationS: null,
-      quoted: { quotedMessageId: null, quotedSenderJid: null },
-    });
+    return buildStore(
+      msg,
+      chatJid,
+      messageId,
+      isGroup,
+      isStatus,
+      fromMe,
+      selfJid,
+      {
+        messageType: "unknown",
+        text: null,
+        hasMedia: false,
+        durationS: null,
+        quoted: { quotedMessageId: null, quotedSenderJid: null },
+      },
+    );
   }
 
   const node = (content as Record<string, unknown>)[contentType];
 
   // Protocol messages: revocations and edits target another message.
   if (contentType === "protocolMessage" && isRecord(node)) {
-    const senderJid = resolveSender(key, isGroup, fromMe);
+    const senderJid = resolveSender(
+      key,
+      isGroup,
+      fromMe,
+      msg.participant,
+      selfJid,
+    );
     return normalizeProtocol(
       node,
       chatJid,
@@ -197,13 +244,22 @@ export function normalizeMessage(msg: WAMessage): NormalizeResult {
   }
 
   const messageType = CONTENT_TYPE_MAP[contentType] ?? "unknown";
-  return buildStore(msg, chatJid, messageId, isGroup, isStatus, fromMe, {
-    messageType,
-    text: extractText(contentType, node),
-    hasMedia: MEDIA_TYPES.has(messageType),
-    durationS: extractDurationSeconds(contentType, node),
-    quoted: extractContext(node),
-  });
+  return buildStore(
+    msg,
+    chatJid,
+    messageId,
+    isGroup,
+    isStatus,
+    fromMe,
+    selfJid,
+    {
+      messageType,
+      text: extractText(contentType, node),
+      hasMedia: MEDIA_TYPES.has(messageType),
+      durationS: extractDurationSeconds(contentType, node),
+      quoted: extractContext(node),
+    },
+  );
 }
 
 interface ReactionParts {
@@ -352,6 +408,7 @@ function buildStore(
   isGroup: boolean,
   isStatus: boolean,
   fromMe: boolean,
+  selfJid: string | null | undefined,
   parts: StoreParts,
 ): NormalizeResult {
   return {
@@ -359,7 +416,13 @@ function buildStore(
     message: {
       chatJid,
       messageId,
-      senderJid: resolveSender(msg.key, isGroup, fromMe),
+      senderJid: resolveSender(
+        msg.key,
+        isGroup,
+        fromMe,
+        msg.participant,
+        selfJid,
+      ),
       fromMe,
       timestamp: toEpochSeconds(msg.messageTimestamp as LongLike),
       messageType: parts.messageType,

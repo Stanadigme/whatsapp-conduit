@@ -61,7 +61,7 @@ export function runMessagesList(options: MessagesListOptions = {}): void {
     let rows: MessageView[];
     try {
       rows = listMessages(
-        { db, accountId: config.account.name },
+        { db, accountId: config.account.name, config },
         {
           ...(options.chat !== undefined ? { chat: options.chat } : {}),
           ...(sinceTs !== null ? { after: sinceTs } : {}),

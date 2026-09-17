@@ -1,4 +1,5 @@
 import type { Database } from "better-sqlite3";
+import type { Config } from "../config.js";
 import { normalizeJid, phoneFromJid } from "../baileys/jid.js";
 import { nowSec } from "../util/time.js";
 import {
@@ -203,18 +204,145 @@ export function chatPolicyForAliases(
   return { allowed: row.allowed === 1, blocked: row.blocked === 1 };
 }
 
-/** Whether a chat may be exposed, resolving aliases first. */
+/**
+ * Runtime privacy scope that gates exposure alongside the persisted
+ * `chats.is_allowed` / `chats.is_blocked` flags (ADR-0037 §1-2). Comes from the
+ * in-memory `Config` — these are process settings (ADR-0036), never a
+ * per-message flag.
+ */
+export interface ExposureScope {
+  includeGroups: boolean;
+  includeStatus: boolean;
+  allowedChats: readonly string[];
+  blockedChats: readonly string[];
+}
+
+export interface ExposureChatContext {
+  isGroup: boolean;
+  isStatus: boolean;
+}
+
+/** Build an {@link ExposureScope} from the loaded config. */
+export function exposureScopeFromConfig(config: Config): ExposureScope {
+  return {
+    includeGroups: config.privacy.includeGroups,
+    includeStatus: config.privacy.includeStatus,
+    allowedChats: config.filters.allowedChats,
+    blockedChats: config.filters.blockedChats,
+  };
+}
+
+/**
+ * Whether a chat may be exposed, resolving aliases first (ADR-0037 §2 — the
+ * single exposure rule; every read path, the media path and the client
+ * projection call this or its SQL twin, {@link buildExposureSqlFragment}, so
+ * they cannot drift apart).
+ *
+ * `includeGroups`/`includeStatus` are hard exclusions. `blockedChats` always
+ * wins over `allowedChats`. Below that, the persisted `is_allowed`/`is_blocked`
+ * flags decide; `allowedChats` is an override on top of them (a discovered,
+ * not-yet-allowed chat becomes visible if it is explicitly listed), matching
+ * the export path's long-standing behavior.
+ */
 export function chatExposureAllowed(
   db: Database,
   accountId: string,
   chatJid: string,
+  scope: ExposureScope,
+  ctx: ExposureChatContext,
 ): boolean {
-  const policy = chatPolicyForAliases(
+  if (ctx.isStatus && !scope.includeStatus) return false;
+  if (ctx.isGroup && !scope.includeGroups) return false;
+  const aliases = listEquivalentJids(db, accountId, chatJid);
+  const blockedChats = scope.blockedChats.map((jid) => normalizeJid(jid));
+  if (aliases.some((jid) => blockedChats.includes(jid))) return false;
+  const policy = chatPolicyForAliases(db, accountId, aliases);
+  if (policy.blocked) return false;
+  if (policy.allowed) return true;
+  const allowedChats = scope.allowedChats.map((jid) => normalizeJid(jid));
+  return aliases.some((jid) => allowedChats.includes(jid));
+}
+
+export interface ExposureSqlFragment {
+  /** A boolean expression, safe to `and` into a `where` clause. */
+  sql: string;
+  params: Record<string, unknown>;
+}
+
+/**
+ * SQL twin of {@link chatExposureAllowed} for paginated queries. `alias` is
+ * the table alias the caller joined `chats` under (`c` everywhere in this
+ * repo). Every clause reads columns off that alias only, so it can be spliced
+ * into any query that already joins `chats`.
+ *
+ * Uses named parameters (`@name`): better-sqlite3 does not allow mixing named
+ * and anonymous parameters in one statement, so a caller that currently binds
+ * positionally has to switch that one statement to named parameters too.
+ * `paramPrefix` disambiguates two calls merged into the same statement (e.g.
+ * one exposure check on the message's chat, one on a group membership's
+ * chat) — without it their `@includeGroups` etc. params would collide.
+ */
+export function buildExposureSqlFragment(
+  db: Database,
+  accountId: string,
+  scope: ExposureScope,
+  alias = "c",
+  paramPrefix = "",
+): ExposureSqlFragment {
+  const p = (name: string): string => `@${paramPrefix}${name}`;
+  const params: Record<string, unknown> = {
+    [`${paramPrefix}includeGroups`]: scope.includeGroups ? 1 : 0,
+    [`${paramPrefix}includeStatus`]: scope.includeStatus ? 1 : 0,
+  };
+  const clauses = [
+    `(${alias}.is_group = 0 or ${p("includeGroups")} = 1)`,
+    `(${alias}.is_status = 0 or ${p("includeStatus")} = 1)`,
+    `${alias}.is_blocked = 0`,
+  ];
+  const blockedAliases = expandConfiguredAliases(
     db,
     accountId,
-    listEquivalentJids(db, accountId, chatJid),
+    scope.blockedChats,
   );
-  return policy.allowed && !policy.blocked;
+  blockedAliases.forEach((jid, index) => {
+    params[`${paramPrefix}exposureBlocked${index}`] = jid;
+  });
+  if (blockedAliases.length > 0) {
+    clauses.push(
+      `${alias}.jid not in (${blockedAliases
+        .map((_, index) => p(`exposureBlocked${index}`))
+        .join(", ")})`,
+    );
+  }
+  const allowedAliases = expandConfiguredAliases(
+    db,
+    accountId,
+    scope.allowedChats,
+  );
+  allowedAliases.forEach((jid, index) => {
+    params[`${paramPrefix}exposureAllowed${index}`] = jid;
+  });
+  clauses.push(
+    allowedAliases.length > 0
+      ? `(${alias}.is_allowed = 1 or ${alias}.jid in (${allowedAliases
+          .map((_, index) => p(`exposureAllowed${index}`))
+          .join(", ")}))`
+      : `${alias}.is_allowed = 1`,
+  );
+  return { sql: clauses.join(" and "), params };
+}
+
+/** Every configured chat identity, expanded to its known aliases. */
+function expandConfiguredAliases(
+  db: Database,
+  accountId: string,
+  jids: readonly string[],
+): string[] {
+  const set = new Set<string>();
+  for (const jid of jids) {
+    for (const alias of listEquivalentJids(db, accountId, jid)) set.add(alias);
+  }
+  return [...set];
 }
 
 export function upsertDirectoryContact(

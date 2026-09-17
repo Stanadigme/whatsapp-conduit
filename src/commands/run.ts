@@ -238,6 +238,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           request.since,
           undefined,
           request.fetchMedia,
+          request.anchor,
         );
         return {
           jobId: result.job.id,
@@ -926,6 +927,7 @@ async function runWhatsmeow(
         request.since,
         undefined,
         request.fetchMedia,
+        request.anchor,
       );
       return {
         jobId: result.job.id,
