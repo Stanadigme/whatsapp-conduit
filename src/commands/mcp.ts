@@ -19,10 +19,11 @@ export interface McpOptions {
   port?: number | undefined;
 }
 
-/** Run the read-only MCP server over stdin/stdout, or over Streamable HTTP. */
+/** Run the MCP reader and bounded local controls over stdio or HTTP. */
 export async function runMcp(options: McpOptions = {}): Promise<void> {
-  const config = loadConfig(resolveConfigPath(options.configPath));
-  const handle: McpContextHandle = await createMcpContext(config);
+  const configPath = resolveConfigPath(options.configPath);
+  const config = loadConfig(configPath);
+  const handle: McpContextHandle = await createMcpContext(config, configPath);
   try {
     if (options.http) {
       await runMcpHttp(handle.context, config, options);

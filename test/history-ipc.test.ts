@@ -10,6 +10,7 @@ import {
   requestBaileysPairingStart,
   requestDirectoryResync,
   requestHistoryStart,
+  requestMediaBackfillStatus,
   type HistoryStartRequest,
 } from "../src/control/ipc.js";
 
@@ -141,6 +142,54 @@ describe("history control IPC", () => {
       await expect(requestDirectoryResync(path)).rejects.toThrow(
         "not connected to WhatsApp",
       );
+    } finally {
+      await server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads only media backfill progress, including an absent job", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wac-backfill-ipc-"));
+    const path = join(root, "control.sock");
+    const server = new HistoryControlServer(path, async (request) => {
+      if (request.op !== "media-backfill.status") throw new Error("unexpected op");
+      if (request.jobId === "other-account") throw new Error("access denied");
+      return {
+        mediaBackfill: request.jobId === "missing"
+          ? null
+          : {
+              jobId: "job-1",
+              status: "running",
+              attachmentsFound: 2,
+              attachmentsDownloaded: 1,
+              attachmentsFailed: 0,
+              createdAt: 1_700_000_000,
+              startedAt: 1_700_000_001,
+              updatedAt: 1_700_000_002,
+              completedAt: null,
+            },
+      };
+    });
+    await server.start();
+    try {
+      const active = await requestMediaBackfillStatus(path);
+      expect(active.mediaBackfill).toEqual({
+        jobId: "job-1",
+        status: "running",
+        attachmentsFound: 2,
+        attachmentsDownloaded: 1,
+        attachmentsFailed: 0,
+        createdAt: 1_700_000_000,
+        startedAt: 1_700_000_001,
+        updatedAt: 1_700_000_002,
+        completedAt: null,
+      });
+      await expect(requestMediaBackfillStatus(path, { jobId: "missing" }))
+        .resolves.toMatchObject({ ok: true, mediaBackfill: null });
+      await expect(requestMediaBackfillStatus(path, { jobId: "other-account" }))
+        .rejects.toThrow("access denied");
+      await expect(requestMediaBackfillStatus(path, { jobId: "" }))
+        .rejects.toThrow("invalid request");
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });

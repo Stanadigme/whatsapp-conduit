@@ -8,6 +8,7 @@ import { Pool } from "pg";
 import { resolveConfig } from "../src/config.js";
 import { openDb, type Database } from "../src/db/index.js";
 import {
+  createHistoryJob,
   insertTranscription,
   setChatAllowed,
   upsertAccount,
@@ -115,6 +116,11 @@ describe.skipIf(!url || !caFile)("MCP server over PostgreSQL (TLS)", () => {
       messageType: "text",
       text: "secret hidden chat",
     });
+    createHistoryJob(db, {
+      id: "pg-history-job", accountId: "personal",
+      chatJid: "33600000000@s.whatsapp.net",
+      sinceTs: 1_600_000_000, untilTs: 1_700_000_000,
+    });
     upsertMessage(db, {
       accountId: "personal",
       chatJid: "33600000000@s.whatsapp.net",
@@ -167,6 +173,22 @@ describe.skipIf(!url || !caFile)("MCP server over PostgreSQL (TLS)", () => {
         });
         expect(JSON.stringify(chats)).toContain("Allowed");
         expect(JSON.stringify(chats)).not.toContain("Hidden");
+
+        const filtered = await mcpClient.callTool({
+          name: "wa_chats_list",
+          arguments: { query: "33600000000@", kind: "contact", hasAudio: true },
+        });
+        expect(JSON.stringify(filtered)).toContain("Allowed");
+        const hiddenFiltered = await mcpClient.callTool({
+          name: "wa_chats_list", arguments: { query: "Hidden" },
+        });
+        expect(JSON.stringify(hiddenFiltered)).not.toContain("Hidden");
+        const active = await mcpClient.callTool({ name: "wa_history_active", arguments: {} });
+        expect(JSON.stringify(active)).toContain("pg-history-job");
+        const history = await mcpClient.callTool({
+          name: "wa_history_status", arguments: { jobId: "pg-history-job" },
+        });
+        expect(JSON.stringify(history)).toContain("pg-history-job");
 
         const messages = await mcpClient.callTool({
           name: "wa_messages_list",

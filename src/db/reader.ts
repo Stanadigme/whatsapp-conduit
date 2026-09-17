@@ -1,5 +1,5 @@
 import type { DashboardChat, DashboardChatFilter } from "../dashboard/chats.js";
-import type { ChatView } from "../mcp/read.js";
+import type { ChatListFilters, ChatView } from "../mcp/read.js";
 import type { Page } from "../mcp/types.js";
 import type { ChatMessageStats } from "../read/chat-stats.js";
 import type {
@@ -44,7 +44,8 @@ export interface ClientDataReader {
   getSchemaVersion(): Promise<string | null>;
 
   getChat(chatJid: string): Promise<ChatRow | undefined>;
-  listChats(opts: { limit?: number; cursor?: string }): Promise<Page<ChatView>>;
+  listChats(opts: ChatListFilters): Promise<Page<ChatView>>;
+  isChatExposed(chatJid: string): Promise<boolean>;
   listDashboardChats(filter?: DashboardChatFilter): Promise<DashboardChat[]>;
 
   searchContacts(query: string, limit?: number): Promise<ParticipantRow[]>;

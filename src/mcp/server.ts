@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Database } from "better-sqlite3";
-import type { Config } from "../config.js";
+import { loadConfig, type Config } from "../config.js";
 import { toExportRecord, type ExportConfig } from "../commands/export.js";
 import { openDb } from "../db/index.js";
 import { createPostgresPool } from "../db/postgres.js";
@@ -12,7 +12,18 @@ import { mcpMessageView } from "../read/messages.js";
 import { readRuntimeStatus } from "../runtime-status.js";
 import { requestHistoryStart } from "../control/ipc.js";
 import { nowSec } from "../util/time.js";
-import { historyStatus, startHistoryDownload } from "./history.js";
+import { activeHistoryJob, historyStatus, startHistoryDownload } from "./history.js";
+import {
+  mediaBackfillStart,
+  mediaBackfillStatus,
+  privacySettings,
+  privacyStatus,
+  refreshDirectory,
+  restartIngestion,
+  sttCheck,
+  sttSettings,
+  sttStatus,
+} from "./control.js";
 import {
   assertLimit,
   decodeCursor,
@@ -32,6 +43,12 @@ const historyControlAnnotations = {
   readOnlyHint: false,
   destructiveHint: false,
   openWorldHint: true,
+};
+
+const localControlAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  openWorldHint: false,
 };
 
 const pageInput = {
@@ -94,6 +111,7 @@ async function safeCall<T>(
   action: () => T | Promise<T>,
 ): Promise<ReturnType<typeof jsonResult> | ReturnType<typeof errorResult>> {
   try {
+    if (ctx.configPath) Object.assign(ctx.config, loadConfig(ctx.configPath));
     return jsonResult(await action(), maxChars);
   } catch (error) {
     return errorResult(error);
@@ -105,7 +123,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     { name: "whatsapp-conduit", version: "0.1.0" },
     {
       instructions:
-        "Lecture seule. Les conversations non autorisées ne sont jamais exposées.",
+        "Consultation et contrôles locaux bornés. Les conversations non autorisées ne sont jamais exposées ; aucun message WhatsApp n'est envoyé ni modifié.",
     },
   );
   const maxChars = ctx.config.mcp.maxResultChars;
@@ -157,11 +175,95 @@ export function createMcpServer(ctx: McpContext): McpServer {
   );
 
   server.registerTool(
+    "wa_history_active",
+    {
+      title: "Active history download",
+      description: "Return the visible active history job, if any.",
+      annotations: readOnlyAnnotations,
+    },
+    async () => safeCall(ctx, maxChars, () => activeHistoryJob(ctx)),
+  );
+
+  server.registerTool("wa_stt_status", {
+    title: "Transcription status",
+    description: "Return configured transcription settings, installed model identifiers and worker heartbeat without local paths.",
+    annotations: readOnlyAnnotations,
+  }, async () => safeCall(ctx, maxChars, () => sttStatus(ctx)));
+
+  server.registerTool("wa_stt_settings", {
+    title: "Set transcription settings",
+    description: "Set enabled, language or an installed model identifier in config.yaml.",
+    inputSchema: z.object({
+      enabled: z.boolean().optional(),
+      language: z.enum(["fr", "en", "auto"]).optional(),
+      modelId: z.string().min(1).max(128).optional(),
+    }).strict().refine((args) => Object.keys(args).length > 0, "at least one setting is required"),
+    annotations: localControlAnnotations,
+  }, async (args) => safeCall(ctx, maxChars, () => sttSettings(ctx, args)));
+
+  server.registerTool("wa_stt_check", {
+    title: "Check local STT engine",
+    description: "Check only the STT engine installed in this MCP container, not the separate worker.",
+    annotations: readOnlyAnnotations,
+  }, async () => safeCall(ctx, maxChars, () => sttCheck(ctx)));
+
+  server.registerTool("wa_privacy_status", {
+    title: "Capture settings",
+    description: "Return the three dashboard controlled capture settings.",
+    annotations: readOnlyAnnotations,
+  }, async () => safeCall(ctx, maxChars, () => privacyStatus(ctx)));
+
+  server.registerTool("wa_privacy_settings", {
+    title: "Set capture settings",
+    description: "Set storeMedia, includeGroups or includeStatus in config.yaml; ingestion restart is required.",
+    inputSchema: z.object({
+      storeMedia: z.boolean().optional(),
+      includeGroups: z.boolean().optional(),
+      includeStatus: z.boolean().optional(),
+    }).strict().refine((args) => Object.keys(args).length > 0, "at least one setting is required"),
+    annotations: localControlAnnotations,
+  }, async (args) => safeCall(ctx, maxChars, () => privacySettings(ctx, args)));
+
+  server.registerTool("wa_media_backfill_start", {
+    title: "Backfill stored media",
+    description: "Start media recovery for one allowed chat, or all allowed chats with explicit allChats opt-in.",
+    inputSchema: z.object({
+      chat: z.string().min(1).optional(),
+      allChats: z.literal(true).optional(),
+    }).strict().refine((args) => Boolean(args.chat) !== Boolean(args.allChats), "choose one chat or allChats"),
+    annotations: historyControlAnnotations,
+  }, async (args) => safeCall(ctx, maxChars, () => mediaBackfillStart(ctx, args)));
+
+  server.registerTool("wa_media_backfill_status", {
+    title: "Media backfill status",
+    description: "Return the active job or one known job by id, without chat identifiers or paths.",
+    inputSchema: z.object({ jobId: z.string().min(1).max(128).optional() }),
+    annotations: readOnlyAnnotations,
+  }, async (args) => safeCall(ctx, maxChars, () => mediaBackfillStatus(ctx, args.jobId)));
+
+  server.registerTool("wa_directory_refresh", {
+    title: "Refresh contact directory",
+    description: "Ask ingestion to refresh WhatsApp contact and group names.",
+    annotations: historyControlAnnotations,
+  }, async () => safeCall(ctx, maxChars, () => refreshDirectory(ctx)));
+
+  server.registerTool("wa_ingestion_restart", {
+    title: "Restart ingestion",
+    description: "Ask the ingestion daemon to restart cleanly and apply saved capture settings.",
+    annotations: localControlAnnotations,
+  }, async () => safeCall(ctx, maxChars, () => restartIngestion(ctx)));
+
+  server.registerTool(
     "wa_chats_list",
     {
       title: "List allowed chats",
-      description: "List allowed WhatsApp conversations, most recent first.",
-      inputSchema: z.object(pageInput),
+      description: "Filter allowed WhatsApp conversations by name or JID, kind and audio, most recent first.",
+      inputSchema: z.object({
+        ...pageInput,
+        query: z.string().optional(),
+        kind: z.enum(["contact", "group", "status"]).optional(),
+        hasAudio: z.boolean().optional(),
+      }),
       annotations: readOnlyAnnotations,
     },
     async (args) =>
@@ -169,6 +271,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
         ctx.reader.listChats({
           ...(args.limit !== undefined ? { limit: args.limit } : {}),
           ...(args.cursor !== undefined ? { cursor: args.cursor } : {}),
+          ...(args.query !== undefined ? { query: args.query } : {}),
+          ...(args.kind !== undefined ? { kind: args.kind } : {}),
+          ...(args.hasAudio !== undefined ? { hasAudio: args.hasAudio } : {}),
         }),
       ),
   );
@@ -427,10 +532,12 @@ export interface McpContextHandle {
  */
 export async function createMcpContext(
   config: Config,
+  configPath?: string,
 ): Promise<McpContextHandle> {
   const accountId = config.account.name;
   const shared = {
     config,
+    ...(configPath ? { configPath } : {}),
     accountId,
     runtimeStatus: await readRuntimeStatus(config.paths.runtimeStatus),
     historyControl: (chat: string, since: number, fetchMedia?: boolean) =>

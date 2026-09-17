@@ -15,6 +15,7 @@ export const MCP_MAX_PAGE_SIZE = 200;
 export interface McpContext {
   reader: ClientDataReader;
   config: Config;
+  configPath?: string;
   accountId: string;
   runtimeStatus: RuntimeStatus | null;
   historyControl?: (

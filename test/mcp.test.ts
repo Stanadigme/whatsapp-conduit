@@ -6,6 +6,7 @@ import { openDb } from "../src/db/index.js";
 import {
   insertTranscription,
   setChatAllowed,
+  setChatBlocked,
   createHistoryJob,
   upsertAccount,
   upsertChat,
@@ -125,7 +126,17 @@ describe("MCP server", () => {
         "wa_group_participants",
         "wa_health",
         "wa_history_download",
+        "wa_history_active",
         "wa_history_status",
+        "wa_stt_status",
+        "wa_stt_settings",
+        "wa_stt_check",
+        "wa_privacy_status",
+        "wa_privacy_settings",
+        "wa_media_backfill_start",
+        "wa_media_backfill_status",
+        "wa_directory_refresh",
+        "wa_ingestion_restart",
         "wa_message_context",
         "wa_messages_list",
         "wa_messages_search",
@@ -133,6 +144,43 @@ describe("MCP server", () => {
       ].sort(),
     );
     expect(names.some((name) => name.includes("send"))).toBe(false);
+    await client.close();
+    await server.close();
+    db.close();
+  });
+
+  it("filters visible chats before paginating by name, JID, kind and audio", async () => {
+    const { client, server, db } = await connectedClient();
+    upsertMessage(db, {
+      accountId: "personal", chatJid: "33600000000@s.whatsapp.net",
+      messageId: "audio-visible", senderJid: "33600000000@s.whatsapp.net",
+      timestamp: 1_700_000_003, messageType: "audio",
+    });
+    upsertMessage(db, {
+      accountId: "personal", chatJid: "33600000001@s.whatsapp.net",
+      messageId: "audio-hidden", senderJid: "33600000001@s.whatsapp.net",
+      timestamp: 1_700_000_004, messageType: "audio",
+    });
+    const items = async (arguments_: Record<string, unknown>) => {
+      const result = await client.callTool({ name: "wa_chats_list", arguments: arguments_ });
+      return JSON.parse(((result as { content: Array<{ text: string }> }).content[0]!).text) as {
+        items: Array<{ jid: string }>; nextCursor: string | null;
+      };
+    };
+    expect((await items({ query: "Allowed contact" })).items.map((c) => c.jid))
+      .toEqual(["33600000000@s.whatsapp.net"]);
+    expect((await items({ query: "120@" })).items.map((c) => c.jid))
+      .toEqual(["120@g.us"]);
+    expect((await items({ kind: "contact", hasAudio: true })).items.map((c) => c.jid))
+      .toEqual(["33600000000@s.whatsapp.net"]);
+    expect((await items({ kind: "group", hasAudio: false })).items.map((c) => c.jid))
+      .toEqual(["120@g.us"]);
+    expect((await items({ kind: "status" })).items).toEqual([]);
+    const first = await items({ limit: 1 });
+    const second = await items({ limit: 1, cursor: first.nextCursor });
+    expect([...first.items, ...second.items].map((c) => c.jid))
+      .toEqual(["120@g.us", "33600000000@s.whatsapp.net"]);
+    expect(JSON.stringify(await items({ query: "Hidden" }))).not.toContain("Hidden");
     await client.close();
     await server.close();
     db.close();
@@ -289,7 +337,64 @@ describe("MCP server", () => {
     const serialized = JSON.stringify(result);
     expect(serialized).toContain('\\"messagesReceived\\":4');
     expect(serialized).toContain('\\"progressPercent\\":42');
+    const active = await client.callTool({ name: "wa_history_active", arguments: {} });
+    expect(JSON.stringify(active)).toContain("job-1");
     expect(JSON.stringify(result)).not.toContain("hello from allowed chat");
+    await client.close();
+    await server.close();
+    db.close();
+  });
+
+  it("hides historical jobs when their chat is unavailable", async () => {
+    const { client, server, db } = await connectedClient();
+    createHistoryJob(db, {
+      id: "hidden-job", accountId: "personal",
+      chatJid: "33600000001@s.whatsapp.net",
+      sinceTs: 1_600_000_000, untilTs: 1_700_000_000,
+    });
+    const active = await client.callTool({ name: "wa_history_active", arguments: {} });
+    expect((active as { content: Array<{ text: string }> }).content[0]!.text).toBe("null");
+    const status = await client.callTool({
+      name: "wa_history_status", arguments: { jobId: "hidden-job" },
+    });
+    expect(status.isError).toBe(true);
+    expect(JSON.stringify(status)).not.toContain("33600000001@s.whatsapp.net");
+    db.prepare("update history_jobs set status = 'completed' where id = 'hidden-job'").run();
+    createHistoryJob(db, {
+      id: "revoked-job", accountId: "personal",
+      chatJid: "33600000000@s.whatsapp.net",
+      sinceTs: 1_600_000_000, untilTs: 1_700_000_000,
+    });
+    setChatBlocked(db, "personal", "33600000000@s.whatsapp.net", true);
+    const revoked = await client.callTool({
+      name: "wa_history_status", arguments: { jobId: "revoked-job" },
+    });
+    expect(revoked.isError).toBe(true);
+    expect(JSON.stringify(revoked)).not.toContain("33600000000@s.whatsapp.net");
+    await client.close();
+    await server.close();
+    db.close();
+  });
+
+  it("keeps history controls behind configured chat blocks", async () => {
+    const { client, server, db } = await connectedClient(
+      async () => ({ jobId: "should-not-start", status: "queued", reused: false }),
+      { privacy: { include_groups: true }, filters: { blocked_chats: ["33600000000@s.whatsapp.net"] } },
+    );
+    createHistoryJob(db, {
+      id: "configured-block", accountId: "personal",
+      chatJid: "33600000000@s.whatsapp.net",
+      sinceTs: 1_600_000_000, untilTs: 1_700_000_000,
+    });
+    const list = await client.callTool({ name: "wa_chats_list", arguments: {} });
+    expect(JSON.stringify(list)).not.toContain("33600000000@s.whatsapp.net");
+    const start = await client.callTool({
+      name: "wa_history_download",
+      arguments: { chat: "33600000000@s.whatsapp.net", since: 1_600_000_000 },
+    });
+    expect(start.isError).toBe(true);
+    const active = await client.callTool({ name: "wa_history_active", arguments: {} });
+    expect((active as { content: Array<{ text: string }> }).content[0]!.text).toBe("null");
     await client.close();
     await server.close();
     db.close();

@@ -73,6 +73,14 @@ export interface ChatView {
   hasAudio: boolean;
 }
 
+export interface ChatListFilters {
+  limit?: number;
+  cursor?: string;
+  query?: string;
+  kind?: "contact" | "group" | "status";
+  hasAudio?: boolean;
+}
+
 function chatView(
   row: ChatRow,
   hasAudio: boolean,
@@ -92,27 +100,50 @@ function chatView(
 
 export function listChats(
   ctx: SqliteMcpContext,
-  limitInput?: number,
-  cursorInput?: string,
+  filters: ChatListFilters = {},
 ): Page<ChatView> {
-  const limit = assertLimit(limitInput);
-  const cursor = decodeCursor<{ ts: number; jid: string }>(cursorInput);
+  const limit = assertLimit(filters.limit);
+  const cursor = decodeCursor<{ ts: number; jid: string }>(filters.cursor);
   const fragment = buildExposureSqlFragment(
     ctx.db,
     ctx.accountId,
     exposureScopeFromConfig(ctx.config),
   );
+  const directory = directoryTablesAvailable(ctx.db);
+  const joins = directory
+    ? `left join directory_entities ec on ec.account_id = c.account_id and ec.canonical_jid = c.jid
+       left join directory_aliases da on da.account_id = c.account_id and da.alias_jid = c.jid
+       left join directory_entities ea on ea.id = da.entity_id`
+    : "";
+  const directoryName = directory
+    ? `coalesce(nullif(trim(ec.display_name), ''), nullif(trim(ec.verified_name), ''),
+        nullif(trim(ec.push_name), ''), nullif(trim(ec.name), ''), nullif(trim(ec.canonical_jid), ''),
+        nullif(trim(ea.display_name), ''), nullif(trim(ea.verified_name), ''),
+        nullif(trim(ea.push_name), ''), nullif(trim(ea.name), ''), nullif(trim(ea.canonical_jid), ''))`
+    : "null";
+  const directoryPushName = directory ? "coalesce(ec.push_name, ea.push_name)" : "null";
+  const audio = `exists(select 1 from messages m
+    where m.account_id = c.account_id and m.chat_jid = c.jid and m.message_type = 'audio')`;
+  const where = ["c.account_id = @accountId", fragment.sql];
+  if (filters.kind === "status") where.push("c.is_status = 1");
+  else if (filters.kind === "group") where.push("c.is_group = 1 and c.is_status = 0");
+  else if (filters.kind === "contact") where.push("c.is_group = 0 and c.is_status = 0");
+  if (filters.hasAudio !== undefined) where.push(`${audio} = @hasAudio`);
+  const query = filters.query?.trim().toLocaleLowerCase();
+  if (query) {
+    const columns = ["c.name", "c.push_name", "c.jid", directoryName, directoryPushName];
+    where.push(`(${columns.map((column) => `lower_u(${column}) like @query`).join(" or ")})`);
+  }
+  where.push(`(@cursorTs is null or
+    coalesce(c.last_message_ts, 0) < @cursorTs or
+    (coalesce(c.last_message_ts, 0) = @cursorTs and c.jid > @cursorJid))`);
   const rows = ctx.db
     .prepare(
       `select c.*,
-         exists(select 1 from messages m
-          where m.account_id = c.account_id and m.chat_jid = c.jid
-            and m.message_type = 'audio') as has_audio
+         ${audio} as has_audio
        from chats c
-       where c.account_id = @accountId and ${fragment.sql}
-         and (@cursorTs is null or
-           coalesce(c.last_message_ts, 0) < @cursorTs or
-           (coalesce(c.last_message_ts, 0) = @cursorTs and c.jid > @cursorJid))
+       ${joins}
+       where ${where.join(" and ")}
        order by coalesce(c.last_message_ts, 0) desc, c.jid asc
        limit @limit`,
     )
@@ -120,6 +151,8 @@ export function listChats(
       accountId: ctx.accountId,
       cursorTs: cursor ? cursor.ts : null,
       cursorJid: cursor?.jid ?? "",
+      hasAudio: filters.hasAudio ? 1 : 0,
+      query: query ? `%${query}%` : "",
       limit: limit + 1,
       ...fragment.params,
     }) as Array<ChatRow & { has_audio: number }>;
@@ -129,7 +162,7 @@ export function listChats(
       chatView(
         row,
         row.has_audio === 1,
-        directoryTablesAvailable(ctx.db)
+        directory
           ? getDirectoryEntityByJid(ctx.db, ctx.accountId, row.jid)
           : undefined,
       ),
@@ -624,4 +657,3 @@ export function health(ctx: SqliteMcpContext): Record<string, unknown> {
       : "unavailable",
   };
 }
-

@@ -15,6 +15,7 @@ import {
   searchMessages as sqliteSearchMessages,
   type SqliteMcpContext,
 } from "../mcp/read.js";
+import { McpRequestError } from "../mcp/types.js";
 import { getChatMessageStats } from "../read/chat-stats.js";
 import {
   allowedChat,
@@ -84,7 +85,17 @@ export function createSqliteReader(
     },
 
     async listChats(opts) {
-      return sqliteListChats(ctx, opts.limit, opts.cursor);
+      return sqliteListChats(ctx, opts);
+    },
+
+    async isChatExposed(chatJid) {
+      try {
+        allowedChat(readCtx, chatJid);
+        return true;
+      } catch (error) {
+        if (error instanceof McpRequestError) return false;
+        throw error;
+      }
     },
 
     async listDashboardChats(filter) {

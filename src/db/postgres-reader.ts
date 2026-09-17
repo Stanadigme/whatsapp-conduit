@@ -308,23 +308,43 @@ export function createPostgresReader(
       return row ? toChatRow(row) : undefined;
     },
 
-    async listChats({ limit: limitInput, cursor: cursorInput }) {
-      const limit = assertLimit(limitInput);
-      const cursor = decodeCursor<{ ts: number; jid: string }>(cursorInput);
+    async listChats(filters) {
+      const limit = assertLimit(filters.limit);
+      const cursor = decodeCursor<{ ts: number; jid: string }>(filters.cursor);
       const values: unknown[] = [accountId];
       const exposure = await exposureClause(values);
+      const where = ["c.account_id = $1", exposure];
+      if (filters.kind === "status") where.push("c.is_status");
+      else if (filters.kind === "group") where.push("c.is_group and not c.is_status");
+      else if (filters.kind === "contact") where.push("not c.is_group and not c.is_status");
+      const audio = `exists(select 1 from messages m
+        where m.account_id = c.account_id and m.chat_jid = c.jid and m.message_type = 'audio')`;
+      if (filters.hasAudio !== undefined) {
+        values.push(filters.hasAudio);
+        where.push(`${audio} = $${String(values.length)}`);
+      }
+      const query = filters.query?.trim();
+      if (query) {
+        values.push(`%${query}%`);
+        const term = `$${String(values.length)}`;
+        const like = (column: string): string =>
+          `immutable_unaccent(lower(coalesce(${column}, ''))) like immutable_unaccent(lower(${term}))`;
+        where.push(`(${["c.name", "c.push_name", "c.jid", DIRECTORY_NAME_COALESCE,
+          "coalesce(ec.push_name, ea.push_name)"].map(like).join(" or ")})`);
+      }
       values.push(cursor?.ts ?? null, cursor?.jid ?? "");
       const cursorTsParam = `$${String(values.length - 1)}`;
       const cursorJidParam = `$${String(values.length)}`;
+      where.push(`(${cursorTsParam}::bigint is null or
+        coalesce(c.last_message_ts, 0) < ${cursorTsParam} or
+        (coalesce(c.last_message_ts, 0) = ${cursorTsParam} and c.jid > ${cursorJidParam}))`);
       values.push(limit + 1);
       const limitParam = `$${String(values.length)}`;
       const rows = await many<
         PgChatRow & { has_audio: boolean; dir_name: string | null; dir_push_name: string | null }
       >(
         `select c.*,
-           exists(select 1 from messages m
-             where m.account_id = c.account_id and m.chat_jid = c.jid
-               and m.message_type = 'audio') as has_audio,
+           ${audio} as has_audio,
            ${DIRECTORY_NAME_COALESCE} as dir_name,
            coalesce(ec.push_name, ea.push_name) as dir_push_name
          from chats c
@@ -334,10 +354,7 @@ export function createPostgresReader(
                 on da.account_id = c.account_id and da.alias_jid = c.jid
          left join directory_entities ea
                 on ea.account_id = da.account_id and ea.canonical_jid = da.canonical_jid
-         where c.account_id = $1 and ${exposure}
-           and (${cursorTsParam}::bigint is null or
-             coalesce(c.last_message_ts, 0) < ${cursorTsParam} or
-             (coalesce(c.last_message_ts, 0) = ${cursorTsParam} and c.jid > ${cursorJidParam}))
+         where ${where.join(" and ")}
          order by coalesce(c.last_message_ts, 0) desc, c.jid asc
          limit ${limitParam}`,
         values,
@@ -356,8 +373,18 @@ export function createPostgresReader(
       return page(
         items,
         limit,
-        last ? encodeCursor({ ts: last.last_message_ts ?? 0, jid: last.jid }) : null,
+        last ? encodeCursor({ ts: Number(last.last_message_ts ?? 0), jid: last.jid }) : null,
       );
+    },
+
+    async isChatExposed(chatJid) {
+      try {
+        await requireAllowedChat(chatJid);
+        return true;
+      } catch (error) {
+        if (error instanceof McpRequestError) return false;
+        throw error;
+      }
     },
 
     async listDashboardChats(filter: DashboardChatFilter = {}) {

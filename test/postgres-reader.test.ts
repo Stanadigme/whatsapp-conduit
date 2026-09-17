@@ -227,6 +227,28 @@ describe.skipIf(!url)("PostgresReader parity with SqliteReader", () => {
     expect(pg.items).toEqual(sq.items);
   });
 
+  it("agrees on filtered chat pages and chat exposure", async () => {
+    const { sqlite, postgres } = await seed(mkdtempSync(join(tmpdir(), "wac-pgr-")));
+    for (const filter of [
+      { query: "Allowed" },
+      { query: "33600000000@" },
+      { kind: "contact" as const, hasAudio: true },
+      { kind: "group" as const, hasAudio: false },
+      { kind: "status" as const },
+      { limit: 1 },
+    ]) {
+      const [sq, pg] = await Promise.all([sqlite.listChats(filter), postgres.listChats(filter)]);
+      expect(pg).toEqual(sq);
+      if (sq.nextCursor) {
+        const next = { ...filter, cursor: sq.nextCursor };
+        expect(await postgres.listChats(next)).toEqual(await sqlite.listChats(next));
+      }
+    }
+    for (const jid of ["33600000000@s.whatsapp.net", "33600000001@s.whatsapp.net", "120@g.us"]) {
+      expect(await postgres.isChatExposed(jid)).toBe(await sqlite.isChatExposed(jid));
+    }
+  });
+
   it("agrees on the dashboard's unfiltered chat list", async () => {
     const { sqlite, postgres } = await seed(mkdtempSync(join(tmpdir(), "wac-pgr-")));
     const [sq, pg] = await Promise.all([

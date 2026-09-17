@@ -1,5 +1,6 @@
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -13,6 +14,7 @@ import {
 } from "../src/db/queries.js";
 import { createSqliteReader } from "../src/db/sqlite-reader.js";
 import { createMcpHttpServer } from "../src/mcp/http.js";
+import { createMcpServer } from "../src/mcp/server.js";
 import type { McpContext } from "../src/mcp/types.js";
 import { createLogger } from "../src/util/logging.js";
 
@@ -66,6 +68,7 @@ async function fixtureContext() {
 
 interface Harness {
   db: Database;
+  context: McpContext;
   baseUrl: string;
   close: () => Promise<void>;
 }
@@ -84,6 +87,7 @@ beforeEach(async () => {
   const { port } = server.address() as AddressInfo;
   harness = {
     db,
+    context,
     baseUrl: `http://127.0.0.1:${port}`,
     close: () =>
       new Promise<void>((resolve) => {
@@ -109,22 +113,40 @@ function authedClient() {
 }
 
 describe("MCP Streamable HTTP transport", () => {
-  it("exposes the same read tools as stdio over an authenticated session", async () => {
+  it("exposes the same tool names and annotations as stdio", async () => {
     const { transport, client } = authedClient();
+    const stdioServer = createMcpServer(harness.context);
+    const [stdioClientTransport, stdioServerTransport] =
+      InMemoryTransport.createLinkedPair();
+    const stdioClient = new Client({ name: "mcp-stdio-test", version: "0.1.0" });
+    await stdioServer.connect(stdioServerTransport);
+    await stdioClient.connect(stdioClientTransport);
     await client.connect(transport as unknown as Transport);
     try {
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(13);
+      const stdioTools = await stdioClient.listTools();
+      const surface = (items: typeof tools.tools) => items
+        .map(({ name, annotations }) => ({ name, annotations }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      expect(surface(tools.tools)).toEqual(surface(stdioTools.tools));
       expect(tools.tools.map((tool) => tool.name)).toContain("wa_health");
       expect(tools.tools.some((tool) => tool.name.includes("send"))).toBe(
         false,
       );
+      for (const name of ["wa_stt_settings", "wa_privacy_settings", "wa_media_backfill_start", "wa_directory_refresh", "wa_ingestion_restart"]) {
+        expect(tools.tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint).toBe(false);
+      }
+      for (const name of ["wa_stt_status", "wa_stt_check", "wa_privacy_status", "wa_media_backfill_status"]) {
+        expect(tools.tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint).toBe(true);
+      }
       // A second call reuses the established Mcp-Session-Id.
       expect(transport.sessionId).toBeTruthy();
       const again = await client.listTools();
-      expect(again.tools).toHaveLength(13);
+      expect(surface(again.tools)).toEqual(surface(stdioTools.tools));
     } finally {
       await client.close();
+      await stdioClient.close();
+      await stdioServer.close();
     }
   });
 

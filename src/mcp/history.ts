@@ -40,7 +40,8 @@ export async function startHistoryDownload(
     throw new McpRequestError("since must be a valid past Unix timestamp");
   }
   const chatRow = await ctx.reader.getChat(chat);
-  if (!chatRow || chatRow.is_allowed !== 1 || chatRow.is_blocked !== 0) {
+  if (!chatRow || chatRow.is_allowed !== 1 ||
+    !(await ctx.reader.isChatExposed(chat))) {
     throw new McpRequestError("chat is not available");
   }
   if (chatRow.is_group === 1 && !ctx.config.privacy.includeGroups) {
@@ -62,8 +63,19 @@ export async function historyStatus(
 ): Promise<HistoryJobView> {
   if (!jobId) throw new McpRequestError("jobId is required");
   const row = await ctx.reader.getHistoryJob(jobId);
-  if (!row) throw new McpRequestError("history job not found");
+  if (!row || !(await ctx.reader.isChatExposed(row.chat_jid))) {
+    throw new McpRequestError("history job not found");
+  }
   return historyJobView(row);
+}
+
+export async function activeHistoryJob(
+  ctx: McpContext,
+): Promise<HistoryJobView | null> {
+  const row = await ctx.reader.getActiveHistoryJob();
+  return row && (await ctx.reader.isChatExposed(row.chat_jid))
+    ? historyJobView(row)
+    : null;
 }
 
 function historyJobView(row: HistoryJobRow): HistoryJobView {

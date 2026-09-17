@@ -42,6 +42,25 @@ export interface MediaBackfillStartRequest {
   chat?: string;
 }
 
+export interface MediaBackfillStatusRequest {
+  op: "media-backfill.status";
+  requestId: string;
+  /** Omitted reads the active job; a known id reads that job. */
+  jobId?: string;
+}
+
+export interface MediaBackfillStatus {
+  jobId: string;
+  status: "queued" | "running" | "completed" | "failed";
+  attachmentsFound: number;
+  attachmentsDownloaded: number;
+  attachmentsFailed: number;
+  createdAt: number;
+  startedAt: number | null;
+  updatedAt: number;
+  completedAt: number | null;
+}
+
 export interface PairingStartRequest {
   op: "pairing.start";
   requestId: string;
@@ -72,6 +91,7 @@ export type ControlRequest =
   | HistoryStartRequest
   | DirectoryResyncRequest
   | MediaBackfillStartRequest
+  | MediaBackfillStatusRequest
   | PairingStartRequest
   | MaintenanceResetRequest
   | DaemonRestartRequest;
@@ -86,6 +106,8 @@ export interface ControlResponse {
   jobId?: string;
   status?: string;
   reused?: boolean;
+  /** `media-backfill.status` */
+  mediaBackfill?: MediaBackfillStatus | null;
   /** `directory.resync` */
   resynced?: { contacts: number; groups: number };
   /** `pairing.start` */
@@ -102,6 +124,7 @@ export type HistoryControlResponse = ControlResponse;
 
 export type ControlResult =
   | { jobId: string; status: string; reused: boolean }
+  | { mediaBackfill: MediaBackfillStatus | null }
   | { resynced: { contacts: number; groups: number } }
   | { pairing: { status: "starting" } }
   | { maintenance: { operationId: string; status: "queued" } }
@@ -288,6 +311,18 @@ export async function requestMediaBackfillStart(
   );
 }
 
+export async function requestMediaBackfillStatus(
+  path: string,
+  input: Omit<MediaBackfillStatusRequest, "op" | "requestId"> = {},
+  timeoutMs = 5_000,
+): Promise<ControlResponse> {
+  return sendControlRequest(
+    path,
+    { op: "media-backfill.status", requestId: randomUUID(), ...input },
+    timeoutMs,
+  );
+}
+
 /** Ask the running daemon to re-fetch contact and group names from WhatsApp. */
 export async function requestDirectoryResync(
   path: string,
@@ -390,6 +425,14 @@ function isControlRequest(value: unknown): value is ControlRequest {
     return true;
   if (record.op === "media-backfill.start") {
     return record.chat === undefined || typeof record.chat === "string";
+  }
+  if (record.op === "media-backfill.status") {
+    return (
+      record.jobId === undefined ||
+      (typeof record.jobId === "string" &&
+        record.jobId.length > 0 &&
+        record.jobId.length <= 128)
+    );
   }
   if (
     record.op === "maintenance.reset" &&

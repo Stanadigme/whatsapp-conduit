@@ -28,9 +28,16 @@ import {
   postgresProjectionEnabled,
 } from "../db/postgres-projection.js";
 import { upsertAccount } from "../db/queries.js";
-import { getChat } from "../db/queries.js";
+import {
+  getActiveMediaBackfillJob,
+  getChat,
+  getMediaBackfillJob,
+} from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
-import { HistoryControlServer } from "../control/ipc.js";
+import {
+  HistoryControlServer,
+  type MediaBackfillStatusRequest,
+} from "../control/ipc.js";
 import { HistoryCoordinator } from "../history/coordinator.js";
 import { MediaBackfillCoordinator } from "../history/media-backfill-coordinator.js";
 import { createVersionResolver } from "../baileys/version.js";
@@ -68,6 +75,31 @@ export interface RunOptions {
 }
 
 const RUNTIME_STATUS_HEARTBEAT_MS = 15_000;
+
+function mediaBackfillStatus(
+  db: ReturnType<typeof openDb>,
+  accountId: string,
+  request: MediaBackfillStatusRequest,
+) {
+  const job = request.jobId
+    ? getMediaBackfillJob(db, accountId, request.jobId)
+    : getActiveMediaBackfillJob(db, accountId);
+  return {
+    mediaBackfill: job
+      ? {
+          jobId: job.id,
+          status: job.status,
+          attachmentsFound: job.attachments_found,
+          attachmentsDownloaded: job.attachments_downloaded,
+          attachmentsFailed: job.attachments_failed,
+          createdAt: job.created_at,
+          startedAt: job.started_at,
+          updatedAt: job.updated_at,
+          completedAt: job.completed_at,
+        }
+      : null,
+  };
+}
 
 /**
  * Run the foreground observe-only sync daemon: connect, reconnect on transient
@@ -165,6 +197,9 @@ export async function runRun(
     const control = new HistoryControlServer(
       config.paths.controlSocket,
       async (request) => {
+        if (request.op === "media-backfill.status") {
+          return mediaBackfillStatus(db, config.account.name, request);
+        }
         if (request.op === "maintenance.reset") {
           if (pairingInFlight) {
             throw new Error("Baileys pairing is already active");
@@ -695,6 +730,9 @@ async function runBaileysWaitingForPairing(
     const control = new HistoryControlServer(
       config.paths.controlSocket,
       async (request) => {
+        if (request.op === "media-backfill.status") {
+          return mediaBackfillStatus(db, config.account.name, request);
+        }
         if (request.op === "maintenance.reset") {
           if (pairingInFlight) {
             throw new Error("Baileys pairing is already active");
@@ -964,6 +1002,9 @@ async function runWhatsmeow(
   const control = new HistoryControlServer(
     config.paths.controlSocket,
     async (request) => {
+      if (request.op === "media-backfill.status") {
+        throw new Error("media backfill is not available with whatsmeow");
+      }
       if (request.op === "maintenance.reset") {
         if (directoryResyncInFlight) {
           throw new Error("directory resynchronization is already active");
