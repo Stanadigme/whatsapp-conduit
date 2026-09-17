@@ -11,13 +11,14 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { getVersion } from "../version.js";
+import { readRuntimeStatus } from "../runtime-status.js";
 import { createMcpServer } from "./server.js";
 import type { McpContext } from "./types.js";
 
 /**
- * Streamable HTTP transport for the read-only MCP surface (ADR-0002).
+ * Streamable HTTP transport for the MCP surface (ADR-0002).
  *
- * The functional surface — the 13 tools, their schemas, the allowlist,
+ * The functional surface — tools, schemas, allowlist,
  * pagination and result caps — comes entirely from {@link createMcpServer}. This
  * module only adds the transport: a bearer-protected `/mcp` endpoint with one
  * MCP session per `Mcp-Session-Id`, and a public unauthenticated `/health`.
@@ -148,12 +149,14 @@ async function mcpHealth(ctx: McpContext): Promise<Record<string, unknown>> {
   } catch {
     schema = null;
   }
+  const runtime = await readRuntimeStatus(ctx.config.paths.runtimeStatus) ??
+    (ctx.configPath ? null : ctx.runtimeStatus);
   return {
     status: "ok",
     name: "whatsapp-conduit",
     version: getVersion(),
-    transport: ctx.runtimeStatus?.transport ?? ctx.config.transport,
-    connection: ctx.runtimeStatus?.connection ?? "unknown",
+    transport: runtime?.transport ?? ctx.config.transport,
+    connection: runtime?.connection ?? "unknown",
     schema,
   };
 }

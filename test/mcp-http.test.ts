@@ -1,4 +1,7 @@
 import type { AddressInfo } from "node:net";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -16,6 +19,7 @@ import { createSqliteReader } from "../src/db/sqlite-reader.js";
 import { createMcpHttpServer } from "../src/mcp/http.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { McpContext } from "../src/mcp/types.js";
+import { RuntimeStatusWriter } from "../src/runtime-status.js";
 import { createLogger } from "../src/util/logging.js";
 
 const TOKEN = "t".repeat(48);
@@ -199,6 +203,38 @@ describe("MCP Streamable HTTP transport", () => {
     expect(raw).not.toContain("hello from allowed chat");
     expect(raw).not.toContain("@s.whatsapp.net");
     expect(raw).not.toMatch(/messages?"\s*:/i);
+  });
+
+  it("reads updated runtime status for both health surfaces", async () => {
+    const root = mkdtempSync(join(tmpdir(), "wac-mcp-runtime-"));
+    harness.context.config.paths.runtimeStatus = join(root, "runtime-status.json");
+    const writer = new RuntimeStatusWriter(harness.context.config.paths.runtimeStatus, {
+      transport: "baileys",
+      connection: "disconnected",
+      authLinked: true,
+    });
+    const { transport, client } = authedClient();
+    try {
+      await writer.update();
+      await client.connect(transport as unknown as Transport);
+      const first = await fetch(`${harness.baseUrl}/health`);
+      expect((await first.json()) as Record<string, unknown>).toMatchObject({ connection: "disconnected" });
+
+      await writer.update({ connection: "connected", lastEventAt: 1_700_000_000 });
+      const publicResult = await fetch(`${harness.baseUrl}/health`);
+      const publicBody = (await publicResult.json()) as Record<string, unknown>;
+      expect(publicBody).toMatchObject({ connection: "connected", transport: "baileys" });
+      expect(JSON.stringify(publicBody)).not.toContain("@s.whatsapp.net");
+      expect(JSON.stringify(publicBody)).not.toContain("hello from allowed chat");
+
+      const result = await client.callTool({ name: "wa_health", arguments: {} });
+      const content = (result as { content: Array<{ text: string }> }).content[0]!.text;
+      expect(JSON.parse(content)).toMatchObject({ connection: "connected", authLinked: true,
+        lastEventAt: 1_700_000_000 });
+    } finally {
+      await client.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("rejects an unknown Mcp-Session-Id on a non-initialize request", async () => {

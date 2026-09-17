@@ -452,11 +452,13 @@ async function buildHealthResponse(
   ctx: McpContext,
 ): Promise<Record<string, unknown>> {
   const counts = await ctx.reader.health();
-  const lastEventAt = ctx.runtimeStatus?.lastEventAt;
+  const runtime = await readRuntimeStatus(ctx.config.paths.runtimeStatus) ??
+    (ctx.configPath ? null : ctx.runtimeStatus);
+  const lastEventAt = runtime?.lastEventAt;
   return {
-    transport: ctx.runtimeStatus?.transport ?? ctx.config.transport,
-    connection: ctx.runtimeStatus?.connection ?? "unknown",
-    authLinked: ctx.runtimeStatus?.authLinked ?? Boolean(counts.selfJid),
+    transport: runtime?.transport ?? ctx.config.transport,
+    connection: runtime?.connection ?? "unknown",
+    authLinked: runtime?.authLinked ?? Boolean(counts.selfJid),
     lastEventAt: lastEventAt ?? null,
     lastEventAge:
       lastEventAt === null || lastEventAt === undefined
