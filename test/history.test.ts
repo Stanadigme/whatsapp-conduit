@@ -216,18 +216,90 @@ describe("history coordinator", () => {
       coverage_complete: 1,
       batches_completed: 1,
       messages_received: 2,
-      messages_inserted: 1,
+      messages_inserted: 2,
       oldest_seen_ts: 70,
     });
+    // ADR-0037 §1: M70 precedes sinceTs=80 but was delivered, so it is stored.
     expect(
       db
-        .prepare("select count(*) as n from messages where message_id = 'M70'")
+        .prepare(
+          "select ingestion_source from messages where message_id = 'M70'",
+        )
         .get(),
-    ).toEqual({ n: 0 });
+    ).toEqual({ ingestion_source: "history" });
     expect(
       db
         .prepare(
           "select ingestion_source from messages where message_id = 'M90'",
+        )
+        .get(),
+    ).toEqual({ ingestion_source: "history" });
+    db.close();
+  });
+
+  it("stores a batch entirely older than sinceTs instead of discarding it (ADR-0037 §1)", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const config = resolveConfig({}, { dataDir: "/data" });
+    const transport = new FakeHistoryTransport();
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT, name: "Allowed" });
+    upsertMessage(db, {
+      accountId: ACCOUNT,
+      chatJid: CHAT,
+      messageId: "M100",
+      senderJid: CHAT,
+      timestamp: 100,
+      messageType: "text",
+      text: "anchor",
+    });
+
+    const coordinator = new HistoryCoordinator({
+      db,
+      accountId: ACCOUNT,
+      transport: transport as unknown as HistoryCapableTransport,
+      logger: pino({ level: "silent" }),
+    });
+    registerWhatsmeowIngestion(
+      transport as unknown as ObserveTransport,
+      {
+        db,
+        accountId: ACCOUNT,
+        config,
+        logger: pino({ level: "silent" }),
+      },
+      {
+        classify: (event) => coordinator.classify(event),
+        onStored: (event, stored, classification) =>
+          coordinator.onStored(event, stored, classification),
+      },
+    );
+    transport.emit("connected", { jid: CHAT });
+
+    // sinceTs=95: both M90 and M70 (delivered by the batch) precede it. The
+    // phone will not resend them once delivered, so both must be stored.
+    const started = await coordinator.start(CHAT, 95, 100);
+    await waitFor(
+      () => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed",
+    );
+
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
+      status: "completed",
+      coverage_complete: 1,
+      completion_reason: "boundary_reached",
+      messages_received: 2,
+      messages_inserted: 2,
+    });
+    expect(
+      db
+        .prepare(
+          "select ingestion_source from messages where message_id = 'M90'",
+        )
+        .get(),
+    ).toEqual({ ingestion_source: "history" });
+    expect(
+      db
+        .prepare(
+          "select ingestion_source from messages where message_id = 'M70'",
         )
         .get(),
     ).toEqual({ ingestion_source: "history" });
@@ -339,7 +411,7 @@ describe("history coordinator", () => {
     expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
       coverage_complete: 1,
       messages_received: 2,
-      messages_inserted: 1,
+      messages_inserted: 2,
     });
     db.close();
   });
@@ -507,15 +579,18 @@ describe("history coordinator", () => {
       coverage_complete: 1,
       batches_completed: 1,
       messages_received: 2,
-      messages_inserted: 1,
+      messages_inserted: 2,
       oldest_seen_ts: 70,
     });
-    // G70 is below sinceTs=80, must not be stored
+    // ADR-0037 §1: G70 precedes sinceTs=80 but was delivered by the phone, so
+    // it is stored — `since` only stops pagination, it never discards a row.
     expect(
       db
-        .prepare("select count(*) as n from messages where message_id = 'G70'")
+        .prepare(
+          "select ingestion_source from messages where message_id = 'G70'",
+        )
         .get(),
-    ).toEqual({ n: 0 });
+    ).toEqual({ ingestion_source: "history" });
     // G90 is inside the window, stored as history in the group chat
     expect(
       db

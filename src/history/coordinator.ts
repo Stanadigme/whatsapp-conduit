@@ -211,9 +211,11 @@ export class HistoryCoordinator {
 
     active.boundarySeen ||= timestamp <= active.sinceTs;
     this.recordReceived(timestamp);
+    // ADR-0037 §1: a message the phone delivers is written, full stop; `since`
+    // only stops pagination (`boundarySeen`) — the phone will not resend it.
     return {
       source: "history",
-      store: timestamp >= active.sinceTs,
+      store: true,
       ...(active.fetchMedia ? { fetchMedia: true } : {}),
     };
   }

@@ -245,13 +245,18 @@ describe("Baileys on-demand history adapter", () => {
     );
     expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
       messages_received: 2,
-      messages_inserted: 1,
+      // ADR-0037 §1: the phone delivered M70 even though it precedes `since`;
+      // it is written, never discarded, since the phone will not resend it.
+      messages_inserted: 2,
       coverage_complete: 1,
+      completion_reason: "boundary_reached",
     });
     expect(getMessage(db, ACCOUNT, CHAT, "M90")?.ingestion_source).toBe(
       "history",
     );
-    expect(getMessage(db, ACCOUNT, CHAT, "M70")).toBeUndefined();
+    expect(getMessage(db, ACCOUNT, CHAT, "M70")?.ingestion_source).toBe(
+      "history",
+    );
     db.close();
   });
 });
