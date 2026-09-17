@@ -104,8 +104,8 @@ export class ConduitConnection {
   private readonly config: Config;
   private readonly authState: AuthState;
   private readonly logger: Logger;
-  private readonly mode: ConnectionMode;
-  private readonly handlers: ConnectionHandlers;
+  private mode: ConnectionMode;
+  private handlers: ConnectionHandlers;
   private readonly socketFactory: SocketFactory;
   private readonly fetchVersion?: (() => Promise<WAVersion>) | undefined;
   private readonly reconnectDelayMs: number;
@@ -265,6 +265,12 @@ export class ConduitConnection {
   /** The live socket while a connection is open; `undefined` otherwise. */
   socket(): WASocket | undefined {
     return this.sock;
+  }
+
+  /** Continue a freshly linked socket under the daemon's lifecycle handlers. */
+  promote(handlers: ConnectionHandlers): void {
+    this.mode = "run";
+    this.handlers = handlers;
   }
 
   /** Stop reconnecting and close the current socket. */

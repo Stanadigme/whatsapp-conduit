@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveConfig } from "../src/config.js";
 import type { AuthState } from "../src/baileys/auth.js";
 import {
@@ -244,6 +244,39 @@ describe("ConduitConnection", () => {
     await tick();
     expect(sockets).toHaveLength(2);
     conn.stop();
+  });
+
+  it("keeps the pairing socket and reconnects under daemon handlers after promotion", async () => {
+    const sockets: FakeSocket[] = [];
+    const registerSocket = vi.fn();
+    const onOpen = vi.fn();
+    const connection = new ConduitConnection({
+      config,
+      authState,
+      logger,
+      mode: "link",
+      reconnectDelayMs: 0,
+      socketFactory: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WASocket;
+      },
+      handlers: { registerSocket },
+    });
+    await connection.start();
+    expect(registerSocket).toHaveBeenCalledOnce();
+    connection.promote({ registerSocket, onOpen });
+    sockets[0]!.emit("connection.update", { connection: "open" });
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(sockets[0]!.ended).toBe(false);
+    sockets[0]!.emit("connection.update", {
+      connection: "close",
+      lastDisconnect: { error: boom(428), date: new Date(0) },
+    });
+    await tick();
+    expect(sockets).toHaveLength(2);
+    expect(registerSocket).toHaveBeenCalledTimes(2);
+    connection.stop();
   });
 
   it("does not reconnect after logout", async () => {

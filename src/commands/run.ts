@@ -1,12 +1,19 @@
 import { loadConfig } from "../config.js";
 import { authStateExists, openAuthState } from "../baileys/auth.js";
-import { ConduitConnection } from "../baileys/connect.js";
+import {
+  ConduitConnection,
+  type ConnectionHandlers,
+} from "../baileys/connect.js";
 import { acquireBaileysSessionLock } from "../baileys/session-lock.js";
 import {
   prepareBaileysRelink,
   restoreBaileysRelink,
 } from "../baileys/relink.js";
-import { registerIngestion, type IngestDeps } from "../baileys/ingest.js";
+import {
+  registerIngestion,
+  type BaileysIngestionOptions,
+  type IngestDeps,
+} from "../baileys/ingest.js";
 import { resyncBaileysDirectory } from "../baileys/directory.js";
 import {
   BaileysHistoryTransport,
@@ -36,7 +43,7 @@ import {
   type SessionLock,
 } from "../whatsmeow/session-lock.js";
 import { RuntimeStatusWriter } from "../runtime-status.js";
-import { runLink } from "./link.js";
+import { runLink, type LinkResult } from "./link.js";
 import { join } from "node:path";
 import {
   beginMaintenanceOperation,
@@ -69,7 +76,14 @@ const RUNTIME_STATUS_HEARTBEAT_MS = 15_000;
  *
  * The returned promise resolves on graceful shutdown.
  */
-export async function runRun(options: RunOptions = {}): Promise<void> {
+export async function runRun(
+  options: RunOptions = {},
+  handoff?: NonNullable<LinkResult["retained"]> & {
+    db: ReturnType<typeof openDb>;
+    outboxKey?: Buffer;
+    ingestionOptions?: BaileysIngestionOptions;
+  },
+): Promise<void> {
   const configPath = resolveConfigPath(options.configPath);
   const config = loadConfig(configPath);
   const log = appLogger(config);
@@ -81,11 +95,12 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
   // A fresh auth state cannot connect by itself. Keep a local control socket
   // open so the authenticated dashboard can ask this same ingestion process to
   // own a QR pairing session (ADR-0026), rather than opening Baileys itself.
-  if (!authStateExists(config.paths.authDir)) {
+  if (!handoff && !authStateExists(config.paths.authDir)) {
     return runBaileysWaitingForPairing(config, configPath, log, options.signal);
   }
 
-  const sessionLock = acquireBaileysSessionLock(config.paths.authDir);
+  let sessionLock =
+    handoff?.sessionLock ?? acquireBaileysSessionLock(config.paths.authDir);
 
   // Alpha profile (ADR-0033): the client database is written directly, so no
   // outbox snapshot is queued. Without it, the SQLite/outbox path is unchanged.
@@ -93,7 +108,7 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
   const outboxKey = postgresProjectionEnabled()
     ? undefined
     : ensureOutboxKey(config.paths.outboxKey);
-  const db = openDb(config.paths.sqlite, { migrate: true });
+  const db = handoff?.db ?? openDb(config.paths.sqlite, { migrate: true });
 
   upsertAccount(db, {
     id: config.account.name,
@@ -101,7 +116,8 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
   });
   recoverInterruptedMaintenanceOperations(db, config.account.name);
 
-  const authState = await openAuthState(config.paths.authDir);
+  let authState =
+    handoff?.authState ?? (await openAuthState(config.paths.authDir));
   const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
     transport: "baileys",
     connection: "disconnected",
@@ -345,12 +361,16 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
       shuttingDown = true;
       log.info("shutting down");
       clearInterval(heartbeat);
-      void runtimeStatus.update({ connection: "disconnected" });
+      const statusUpdate = runtimeStatus
+        .update({ connection: "disconnected" })
+        .catch(() => undefined);
       pairingAbort?.abort();
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
+      options.signal?.removeEventListener("abort", onAbort);
       void (async () => {
         await connection.stop().catch(() => undefined);
+        await statusUpdate;
         await control.close().catch(() => undefined);
         try {
           await closeDbAfterPostgresProjection(db);
@@ -363,9 +383,11 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
       })();
     };
     const onSignal = (): void => shutdown(0);
+    const onAbort = (): void => shutdown(0);
 
     async function beginBaileysPairing(): Promise<void> {
       let archivedAuthDir: string | null = null;
+      let linked = false;
       try {
         // `stop()` awaits Baileys' socket close before the auth directory is
         // moved. This is the boundary between the daemon and the QR session.
@@ -377,13 +399,30 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           restoreBaileysRelink(config.paths.authDir, archivedAuthDir);
           return;
         }
-        await runLink({
-          configPath,
-          qr: true,
-          qrOut: join(config.paths.dataDir, "pairing-qr.svg"),
-          timeoutSec: 600,
-          signal: pairingAbort?.signal,
-        });
+        const result = await runLink(
+          {
+            configPath,
+            qr: true,
+            qrOut: join(config.paths.dataDir, "pairing-qr.svg"),
+            timeoutSec: 600,
+            signal: pairingAbort?.signal,
+          },
+          {
+            retainConnection: true,
+            ingestDeps,
+            registerSocket,
+          },
+        );
+        if (!result.retained)
+          throw new Error("pairing connection was not retained");
+        connection = result.retained.connection;
+        authState = result.retained.authState;
+        sessionLock = result.retained.sessionLock;
+        connection.promote(handlers);
+        linked = true;
+        pairingInFlight = false;
+        initialResyncDone = false;
+        handlers.onOpen?.({ selfJid: result.selfJid });
       } catch (error) {
         if (archivedAuthDir) {
           try {
@@ -407,99 +446,127 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
           );
         }
       } finally {
-        // Docker's `unless-stopped` policy starts a clean daemon with either
-        // the newly linked state or the restored previous state.
-        if (!shuttingDown) shutdown(0);
+        if (!linked && !shuttingDown) shutdown(0);
       }
     }
 
-    const connection = new ConduitConnection({
-      config,
-      authState,
-      logger: baileysLogger(config),
-      mode: "run",
-      fetchVersion: createVersionResolver(config, log),
-      handlers: {
-        onConnecting() {
-          void runtimeStatus.update({ connection: "unknown" });
-          log.info("connecting to WhatsApp");
-        },
-        onOpen(info) {
-          historyTransport.connected(info.selfJid ?? config.account.name);
-          void runtimeStatus.update({
-            connection: "connected",
-            authLinked: true,
-          });
-          log.info({ selfJid: info.selfJid }, "connected");
-          const rebuildState = maintenanceState(db, config.account.name);
-          if (
-            (config.baileys.resyncDirectoryOnConnect ||
-              rebuildState.directoryRebuildRequired) &&
-            !initialResyncDone
-          ) {
-            initialResyncDone = true;
-            if (connection.socket()) {
-              void runDirectoryResync({
-                strict: rebuildState.directoryRebuildRequired,
-              })
-                .then((r) => {
-                  if (rebuildState.directoryRebuildRequired) {
-                    markDirectoryRebuildResult(db, config.account.name, null);
-                  }
-                  log.info(
-                    { contacts: r.contacts, groups: r.groups },
-                    "directory resynced on connect",
-                  );
-                })
-                .catch((err: unknown) => {
-                  if (rebuildState.directoryRebuildRequired) {
-                    markDirectoryRebuildResult(
-                      db,
-                      config.account.name,
-                      "directory synchronization failed",
-                    );
-                  }
-                  log.warn(
-                    { err: err instanceof Error ? err.message : String(err) },
-                    "directory resync on connect failed",
-                  );
-                });
-            }
-          }
-        },
-        onClose(info) {
-          historyTransport.disconnected();
-          void runtimeStatus.update({
-            connection: "disconnected",
-            authLinked: !info.loggedOut,
-          });
-          if (info.loggedOut) {
-            log.error("logged out — re-link required; stopping");
-            shutdown(1);
-            return;
-          }
-          log.warn(
-            { statusCode: info.statusCode, willReconnect: info.willReconnect },
-            "connection closed",
-          );
-        },
-        registerSocket(sock) {
-          historyTransport.attach(sock);
-          registerIngestion(sock, ingestDeps, {
-            classify: (message) =>
-              history.classifyMessage(
-                message.key.remoteJid ?? "",
-                baileysTimestamp(message.messageTimestamp),
-              ),
-            onStored: (_message, stored, classification) =>
-              history.onStoredResult(stored, classification),
-          });
-        },
+    const registerSocket: NonNullable<ConnectionHandlers["registerSocket"]> = (
+      sock,
+    ) => {
+      historyTransport.attach(sock);
+      registerIngestion(sock, ingestDeps, {
+        classify: (message, requestId) =>
+          history.classifyMessage(
+            message.key.remoteJid ?? "",
+            baileysTimestamp(message.messageTimestamp),
+            requestId,
+          ),
+        onStored: (message, stored, classification) =>
+          history.onStoredResult(stored, classification, message.key.remoteJid ?? undefined, message.key.id ?? undefined),
+        onError: () => history.onStorageError(),
+      });
+    };
+    if (handoff?.ingestionOptions) {
+      handoff.ingestionOptions.classify = (message, requestId) =>
+        history.classifyMessage(
+          message.key.remoteJid ?? "",
+          baileysTimestamp(message.messageTimestamp),
+          requestId,
+        );
+      handoff.ingestionOptions.onStored = (message, stored, classification) =>
+        history.onStoredResult(stored, classification, message.key.remoteJid ?? undefined, message.key.id ?? undefined);
+      handoff.ingestionOptions.onError = () => history.onStorageError();
+    }
+    const handlers: ConnectionHandlers = {
+      onConnecting() {
+        void runtimeStatus.update({ connection: "unknown" });
+        log.info("connecting to WhatsApp");
       },
-    });
+      onOpen(info) {
+        historyTransport.connected(info.selfJid ?? config.account.name);
+        void runtimeStatus.update({
+          connection: "connected",
+          authLinked: true,
+        });
+        log.info({ selfJid: info.selfJid }, "connected");
+        const rebuildState = maintenanceState(db, config.account.name);
+        if (
+          (config.baileys.resyncDirectoryOnConnect ||
+            rebuildState.directoryRebuildRequired) &&
+          !initialResyncDone
+        ) {
+          initialResyncDone = true;
+          if (connection.socket()) {
+            void runDirectoryResync({
+              strict: rebuildState.directoryRebuildRequired,
+            })
+              .then((r) => {
+                if (rebuildState.directoryRebuildRequired) {
+                  markDirectoryRebuildResult(db, config.account.name, null);
+                }
+                log.info(
+                  { contacts: r.contacts, groups: r.groups },
+                  "directory resynced on connect",
+                );
+              })
+              .catch((err: unknown) => {
+                if (rebuildState.directoryRebuildRequired) {
+                  markDirectoryRebuildResult(
+                    db,
+                    config.account.name,
+                    "directory synchronization failed",
+                  );
+                }
+                log.warn(
+                  { err: err instanceof Error ? err.message : String(err) },
+                  "directory resync on connect failed",
+                );
+              });
+          }
+        }
+      },
+      onClose(info) {
+        historyTransport.disconnected();
+        void runtimeStatus.update({
+          connection: "disconnected",
+          authLinked: !info.loggedOut,
+        });
+        if (info.loggedOut) {
+          log.error("logged out — re-link required; stopping");
+          shutdown(1);
+          return;
+        }
+        log.warn(
+          { statusCode: info.statusCode, willReconnect: info.willReconnect },
+          "connection closed",
+        );
+      },
+      registerSocket,
+    };
+    let connection =
+      handoff?.connection ??
+      new ConduitConnection({
+        config,
+        authState,
+        logger: baileysLogger(config),
+        mode: "run",
+        fetchVersion: createVersionResolver(config, log),
+        handlers,
+      });
+    if (handoff) {
+      connection.promote(handlers);
+      const sock = connection.socket();
+      if (sock) historyTransport.attach(sock);
+      handlers.onOpen?.({ selfJid: undefined });
+    }
 
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
+    if (options.signal?.aborted) {
+      shutdown(0);
+      return;
+    }
+    options.signal?.addEventListener("abort", onAbort, { once: true });
 
     control.start().catch((err: unknown) => {
       log.warn(
@@ -511,13 +578,14 @@ export async function runRun(options: RunOptions = {}): Promise<void> {
     history.recoverActive();
     mediaBackfill.recoverActive();
 
-    connection.start().catch((err: unknown) => {
-      log.error(
-        { err: err instanceof Error ? err.message : String(err) },
-        "failed to start connection",
-      );
-      shutdown(1);
-    });
+    if (!handoff)
+      connection.start().catch((err: unknown) => {
+        log.error(
+          { err: err instanceof Error ? err.message : String(err) },
+          "failed to start connection",
+        );
+        shutdown(1);
+      });
   });
 }
 
@@ -534,7 +602,12 @@ async function runBaileysWaitingForPairing(
 ): Promise<void> {
   // The dashboard keeps data maintenance available even before the first
   // linked device exists. The dashboard still speaks only to this local daemon.
+  configurePostgresProjection(config, log);
+  const outboxKey = postgresProjectionEnabled()
+    ? undefined
+    : ensureOutboxKey(config.paths.outboxKey);
   const db = openDb(config.paths.sqlite, { migrate: true });
+  const ingestionOptions: BaileysIngestionOptions = {};
   upsertAccount(db, {
     id: config.account.name,
     label: config.account.description ?? null,
@@ -548,13 +621,17 @@ async function runBaileysWaitingForPairing(
   await runtimeStatus.update();
   log.info("no linked Baileys device yet; waiting for dashboard pairing");
 
-  return new Promise<void>((resolve, reject) => {
+  const retained = await new Promise<
+    NonNullable<LinkResult["retained"]> | undefined
+  >((resolve, reject) => {
     let stopped = false;
     let pairingInFlight = false;
     let finishing: Promise<void> | undefined;
     const pairingAbort = new AbortController();
 
-    const finish = (): Promise<void> => {
+    const finish = (
+      connection?: NonNullable<LinkResult["retained"]>,
+    ): Promise<void> => {
       if (finishing) return finishing;
       stopped = true;
       pairingAbort.abort();
@@ -569,8 +646,8 @@ async function runBaileysWaitingForPairing(
         .catch(() => undefined)
         .then(() => control.close().catch(() => undefined))
         .then(() => {
-          db.close();
-          resolve();
+          if (!connection) db.close();
+          resolve(connection);
         });
       return finishing;
     };
@@ -579,13 +656,30 @@ async function runBaileysWaitingForPairing(
 
     const beginPairing = async (): Promise<void> => {
       try {
-        await runLink({
-          configPath,
-          qr: true,
-          qrOut: join(config.paths.dataDir, "pairing-qr.svg"),
-          timeoutSec: 600,
-          signal: pairingAbort.signal,
-        });
+        const result = await runLink(
+          {
+            configPath,
+            qr: true,
+            qrOut: join(config.paths.dataDir, "pairing-qr.svg"),
+            timeoutSec: 600,
+            signal: pairingAbort.signal,
+          },
+          {
+            retainConnection: true,
+            ingestDeps: {
+              db,
+              accountId: config.account.name,
+              config,
+              logger: log,
+              ...(outboxKey ? { outboxKey } : {}),
+            },
+            ingestionOptions,
+          },
+        );
+        if (!result.retained)
+          throw new Error("pairing connection was not retained");
+        await finish(result.retained);
+        return;
       } catch (error) {
         if (!stopped) {
           log.warn(
@@ -594,7 +688,7 @@ async function runBaileysWaitingForPairing(
           );
         }
       } finally {
-        void finish();
+        if (!stopped) void finish();
       }
     };
 
@@ -660,6 +754,16 @@ async function runBaileysWaitingForPairing(
       reject(error instanceof Error ? error : new Error(String(error)));
     });
   });
+  if (retained)
+    await runRun(
+      { configPath, signal },
+      {
+        ...retained,
+        db,
+        ...(outboxKey ? { outboxKey } : {}),
+        ingestionOptions,
+      },
+    );
 }
 
 /**
@@ -980,6 +1084,7 @@ async function runWhatsmeow(
       classify: (event) => history.classify(event),
       onStored: (event, stored, classification) =>
         history.onStored(event, stored, classification),
+      onError: () => history.onStorageError(),
     },
   );
 

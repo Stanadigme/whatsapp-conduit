@@ -25,12 +25,14 @@ export function registerWhatsmeowIngestion(
       stored: boolean,
       classification: IngestionEventClassification,
     ) => void;
+    onError?: () => void;
   } = {},
 ): void {
   transport.on("message", (event) => {
     options.onEvent?.();
+    let classification: IngestionEventClassification | undefined;
     try {
-      const classification = options.classify?.(event) ?? {
+      classification = options.classify?.(event) ?? {
         source: "live",
         store: true,
       };
@@ -77,6 +79,7 @@ export function registerWhatsmeowIngestion(
         });
       }
     } catch (error) {
+      if (classification?.source === "history") options.onError?.();
       deps.logger.error(
         { err: error instanceof Error ? error.message : String(error) },
         "failed to ingest whatsmeow message",

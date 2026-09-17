@@ -7,13 +7,16 @@ import type {
 
 export interface HistoryAnchor {
   chat: string;
-  sender: string;
+  sender?: string;
+  fromMe?: boolean;
   id: string;
   timestamp: number;
 }
 
 export interface TransportHistorySyncEvent {
   type: string;
+  chatJid?: string;
+  requestId?: string;
   progress?: number;
   chunkOrder?: number;
   /** Messages carried by this batch, when the transport can count them. */
@@ -54,7 +57,7 @@ export interface DirectoryReadTransport {
 }
 
 export interface HistoryTransport {
-  requestHistory(anchor: HistoryAnchor, count: number): Promise<void>;
+  requestHistory(anchor: HistoryAnchor, count: number): Promise<string | void>;
 }
 
 export interface ObserveTransport {

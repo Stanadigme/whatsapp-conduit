@@ -32,11 +32,21 @@ export interface BuildSocketConfigArgs {
  *  - `markOnlineOnConnect` follows config (default false) — never advertise the
  *    linked device as online by default.
  *  - `syncFullHistory` follows config (default false), so we never *request*
- *    full device history unless explicitly enabled. We deliberately do NOT
- *    override `shouldSyncHistoryMessage`: forcing it to always-false makes
- *    Baileys skip the initial on-connect sync that carries LID mappings, which
- *    upstream flags as causing session instability. Letting it default keeps
- *    only the limited recent on-connect history, which an inbox sync wants.
+ *    full device history unless explicitly enabled. When it is enabled, the
+ *    browser profile switches to `Browsers.macOS("Desktop")`: WhatsApp only
+ *    honours `requireFullSync` for a Desktop `webSubPlatform`
+ *    (`Mac OS`/`Windows` + browser name `Desktop`, see Baileys'
+ *    `getWebInfo`/`generateRegistrationNode`), and `Browsers.appropriate`
+ *    stays on the generic web sub-platform on Linux. Otherwise the configured
+ *    browser name is kept as before.
+ *  - `shouldSyncHistoryMessage` always returns `true`, overriding Baileys'
+ *    default which silently drops FULL notifications. Receiving a
+ *    notification is not the same as requesting one: `syncFullHistory` above
+ *    is what controls the request (`requireFullSync` at registration).
+ *    Whatever the phone actually pushes — FULL included, e.g. after a prior
+ *    full-history pairing — must still be stored rather than discarded,
+ *    consistent with "everything delivered is kept" (parent-repo ADR-0037,
+ *    not present in this submodule's tree).
  *  - `getMessage` is a no-op returning undefined: it exists only to support
  *    message *re-sending*, which this observe-only bridge never does.
  *  - `version` is the WA Web protocol version resolved live at connect
@@ -46,6 +56,9 @@ export interface BuildSocketConfigArgs {
 export function buildSocketConfig(args: BuildSocketConfigArgs): SocketConfig {
   const { config, authState, version, logger } = args;
   const effectiveVersion = version ?? config.baileys.version;
+  const browser = config.baileys.syncFullHistory
+    ? Browsers.macOS("Desktop")
+    : Browsers.appropriate(config.baileys.browserName);
 
   const socketConfig: SocketConfig = {
     logger,
@@ -53,9 +66,13 @@ export function buildSocketConfig(args: BuildSocketConfigArgs): SocketConfig {
       creds: authState.state.creds,
       keys: makeCacheableSignalKeyStore(authState.state.keys, logger),
     },
-    browser: Browsers.appropriate(config.baileys.browserName),
+    browser,
     markOnlineOnConnect: config.baileys.markOnlineOnConnect,
     syncFullHistory: config.baileys.syncFullHistory,
+    // Accept every history notification the phone pushes, including FULL.
+    // Baileys' default (`syncType !== FULL`) discards FULL on receipt;
+    // `syncFullHistory` controls whether a full sync is requested.
+    shouldSyncHistoryMessage: () => true,
     generateHighQualityLinkPreview: false,
     // Observe-only: we never resend messages, so no real message lookup.
     getMessage: async () => undefined,

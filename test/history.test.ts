@@ -5,6 +5,7 @@ import { resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import { upsertDirectoryContact } from "../src/db/directory.js";
 import {
+  getHistoryAnchor,
   getHistoryJob,
   upsertAccount,
   upsertChat,
@@ -139,6 +140,149 @@ async function waitFor(
 }
 
 describe("history coordinator", () => {
+  it("uses a real anchor with stored from_me even when the sender is unknown", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertMessage(db, { accountId: ACCOUNT, chatJid: CHAT, messageId: "reaction:old:self", senderJid: CHAT, timestamp: 10 });
+    upsertMessage(db, { accountId: ACCOUNT, chatJid: CHAT, messageId: "M20", fromMe: true, timestamp: 20 });
+    expect(getHistoryAnchor(db, ACCOUNT, CHAT)).toMatchObject({ message_id: "M20", from_me: 1, sender_jid: null });
+    const transport = new FakeEmptyBatchTransport({ type: "ON_DEMAND" });
+    const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
+    transport.emit("connected", { jid: CHAT });
+    const started = await coordinator.start(CHAT, 0, 30, false, { sender: CHAT, id: "reaction:old:self", timestamp: 10 });
+    await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed");
+    expect(transport.requests[0]).toMatchObject({ id: "M20", fromMe: true });
+    expect(transport.requests[0]?.sender).toBeUndefined();
+    db.close();
+  });
+
+  it("continues across equal timestamps using only anchors stored from the current batch", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const config = resolveConfig({}, { dataDir: "/data" });
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertMessage(db, { accountId: ACCOUNT, chatJid: CHAT, messageId: "M100", senderJid: CHAT, timestamp: 100 });
+    class EqualTimestampTransport extends EventEmitter {
+      requests: HistoryAnchor[] = [];
+      async requestHistory(anchor: HistoryAnchor): Promise<void> {
+        this.requests.push(anchor);
+        queueMicrotask(() => {
+          this.emit("message", messageEvent(this.requests.length === 1 ? "M100B" : "M70", this.requests.length === 1 ? 100 : 70));
+          this.emit("history_sync", { type: "ON_DEMAND", chatJid: CHAT });
+        });
+      }
+    }
+    const transport = new EqualTimestampTransport();
+    const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
+    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification) });
+    transport.emit("connected", { jid: CHAT });
+    const started = await coordinator.start(CHAT, 80, 100);
+    await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed");
+    expect(transport.requests.map((anchor) => anchor.id)).toEqual(["M100", "M100B"]);
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({ completion_reason: "boundary_reached", coverage_complete: 0, messages_inserted: 2 });
+    db.close();
+  });
+
+  it("stops when equal-timestamp batches cycle back to an earlier anchor", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const config = resolveConfig({}, { dataDir: "/data" });
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertMessage(db, { accountId: ACCOUNT, chatJid: CHAT, messageId: "A", senderJid: CHAT, timestamp: 100 });
+    class CyclicTransport extends EventEmitter {
+      requests: HistoryAnchor[] = [];
+      async requestHistory(anchor: HistoryAnchor): Promise<void> {
+        this.requests.push(anchor);
+        queueMicrotask(() => {
+          this.emit("message", messageEvent(this.requests.length === 1 ? "B" : "A", 100));
+          this.emit("history_sync", { type: "ON_DEMAND", chatJid: CHAT });
+        });
+      }
+    }
+    const transport = new CyclicTransport();
+    const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
+    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification) });
+    transport.emit("connected", { jid: CHAT });
+    const started = await coordinator.start(CHAT, 80, 100);
+    await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed");
+    expect(transport.requests.map((anchor) => anchor.id)).toEqual(["A", "B"]);
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({ completion_reason: "source_exhausted", coverage_complete: 0 });
+    db.close();
+  });
+
+  it("fails the job when a history message cannot be stored", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const config = resolveConfig({}, { dataDir: "/data" });
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertMessage(db, { accountId: ACCOUNT, chatJid: CHAT, messageId: "M100", senderJid: CHAT, timestamp: 100 });
+    db.exec("create trigger reject_history before insert on messages when new.message_id = 'M90' begin select raise(abort, 'storage failed'); end");
+    const transport = new FakeHistoryTransport();
+    const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
+    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification), onError: () => coordinator.onStorageError() });
+    transport.emit("connected", { jid: CHAT });
+    const started = await coordinator.start(CHAT, 80, 100);
+    await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "failed");
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({ error_code: "history_storage_failed", batches_completed: 0, coverage_complete: 0 });
+    db.close();
+  });
+
+  it("counts a stored whatsmeow message whose event chat has a device suffix", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const config = resolveConfig({}, { dataDir: "/data" });
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertMessage(db, { accountId: ACCOUNT, chatJid: CHAT, messageId: "M100", senderJid: CHAT, timestamp: 100 });
+    class DeviceJidTransport extends EventEmitter {
+      async requestHistory(): Promise<void> {
+        queueMicrotask(() => {
+          const event = messageEvent("M70", 70);
+          event.info.chat = CHAT.replace("@", ":1@");
+          this.emit("message", event);
+          this.emit("history_sync", { type: "ON_DEMAND", chatJid: CHAT });
+        });
+      }
+    }
+    const transport = new DeviceJidTransport();
+    const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
+    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification), onError: () => coordinator.onStorageError() });
+    transport.emit("connected", { jid: CHAT });
+    const started = await coordinator.start(CHAT, 80, 100);
+    await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed");
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({ messages_inserted: 1, completion_reason: "boundary_reached" });
+    db.close();
+  });
+
+  it("counts an incoming message with unknown sender without using it as an anchor", async () => {
+    const db = openDb(":memory:", { migrate: true });
+    const config = resolveConfig({}, { dataDir: "/data" });
+    upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertMessage(db, { accountId: ACCOUNT, chatJid: CHAT, messageId: "M100", senderJid: CHAT, timestamp: 100 });
+    class UnknownSenderTransport extends EventEmitter {
+      requests: HistoryAnchor[] = [];
+      async requestHistory(anchor: HistoryAnchor): Promise<void> {
+        this.requests.push(anchor);
+        queueMicrotask(() => {
+          const event = messageEvent("M70", 70);
+          event.info.sender = "";
+          this.emit("message", event);
+          this.emit("history_sync", { type: "ON_DEMAND", chatJid: CHAT });
+        });
+      }
+    }
+    const transport = new UnknownSenderTransport();
+    const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
+    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification), onError: () => coordinator.onStorageError() });
+    transport.emit("connected", { jid: CHAT });
+    const started = await coordinator.start(CHAT, 50, 100);
+    await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed");
+    expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({ messages_inserted: 1, messages_received: 1, completion_reason: "source_exhausted", error_code: null });
+    expect(db.prepare("select sender_jid, from_me from messages where message_id = 'M70'").get()).toEqual({ sender_jid: null, from_me: 0 });
+    expect(transport.requests.map((anchor) => anchor.id)).toEqual(["M100"]);
+    db.close();
+  });
   it("finishes without coverage when WhatsApp cannot be queried without a local anchor", async () => {
     const db = openDb(":memory:", { migrate: true });
     const transport = new FakeHistoryTransport();
@@ -213,7 +357,7 @@ describe("history coordinator", () => {
     expect(transport.requests[0]).toMatchObject({ id: "M100", timestamp: 100 });
     expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
       status: "completed",
-      coverage_complete: 1,
+      coverage_complete: 0,
       batches_completed: 1,
       messages_received: 2,
       messages_inserted: 2,
@@ -284,7 +428,7 @@ describe("history coordinator", () => {
 
     expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
       status: "completed",
-      coverage_complete: 1,
+      coverage_complete: 0,
       completion_reason: "boundary_reached",
       messages_received: 2,
       messages_inserted: 2,
@@ -348,7 +492,7 @@ describe("history coordinator", () => {
     expect(transport.requests[0]).toMatchObject({ id: "M100", timestamp: 100 });
     expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
       status: "completed",
-      coverage_complete: 1,
+      coverage_complete: 0,
       anchor_sender_jid: CHAT,
       anchor_message_id: "M100",
       anchor_timestamp: 100,
@@ -409,7 +553,7 @@ describe("history coordinator", () => {
       timestamp: 100,
     });
     expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
-      coverage_complete: 1,
+      coverage_complete: 0,
       messages_received: 2,
       messages_inserted: 2,
     });
@@ -576,7 +720,7 @@ describe("history coordinator", () => {
     });
     expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
       status: "completed",
-      coverage_complete: 1,
+      coverage_complete: 0,
       batches_completed: 1,
       messages_received: 2,
       messages_inserted: 2,

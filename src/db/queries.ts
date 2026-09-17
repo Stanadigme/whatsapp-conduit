@@ -749,6 +749,7 @@ export interface HistoryAnchorRow {
   chat_jid: string;
   message_id: string;
   sender_jid: string | null;
+  from_me: number;
   timestamp: number;
 }
 
@@ -893,15 +894,18 @@ export function getHistoryAnchor(
   db: Database,
   accountId: string,
   chatJid: string,
+  messageId?: string,
 ): HistoryAnchorRow | undefined {
   return db
-    .prepare<[string, string], HistoryAnchorRow>(
-      `select chat_jid, message_id, sender_jid, timestamp
+    .prepare<[string, string, string | null, string | null], HistoryAnchorRow>(
+      `select chat_jid, message_id, sender_jid, from_me, timestamp
        from messages
-       where account_id = ? and chat_jid = ? and timestamp is not null
+       where account_id = ? and chat_jid = ? and message_id not like 'reaction:%'
+         and (from_me = 1 or sender_jid is not null)
+         and timestamp is not null and (? is null or message_id = ?)
        order by timestamp asc, rowid asc limit 1`,
     )
-    .get(accountId, chatJid);
+    .get(accountId, chatJid, messageId ?? null, messageId ?? null);
 }
 
 export type MediaBackfillJobStatus =

@@ -6,11 +6,7 @@ import qrcode from "qrcode-terminal";
 import { qrSvg } from "../util/qr-svg.js";
 import type { WASocket } from "baileys";
 import { loadConfig, type Config } from "../config.js";
-import {
-  clearAppStateSyncVersions,
-  clearPendingPairing,
-  openAuthState,
-} from "../baileys/auth.js";
+import { clearPendingPairing, openAuthState } from "../baileys/auth.js";
 import {
   ConduitConnection,
   statusCodeOf,
@@ -24,12 +20,14 @@ import { WhatsmeowTransport } from "../whatsmeow/transport.js";
 import { acquireSessionLock } from "../whatsmeow/session-lock.js";
 import { createVersionResolver } from "../baileys/version.js";
 import { acquireBaileysSessionLock } from "../baileys/session-lock.js";
-import { BAILEYS_DIRECTORY_APP_STATE_COLLECTIONS } from "../baileys/directory.js";
+import type { BaileysSessionLock } from "../baileys/session-lock.js";
+import type { AuthState } from "../baileys/auth.js";
 import {
-  markDirectoryRebuildResult,
-  runMaintenanceOperation,
-  startMaintenanceOperation,
-} from "../db/maintenance.js";
+  registerIngestion,
+  type BaileysIngestionOptions,
+  type IngestDeps,
+} from "../baileys/ingest.js";
+import { markDirectoryRebuildResult } from "../db/maintenance.js";
 
 export interface LinkOptions {
   configPath?: string | undefined;
@@ -52,8 +50,13 @@ export interface LinkOptions {
 export interface LinkResult {
   selfJid?: string | undefined;
   accountId: string;
-  /** False only when the new auth works but the local directory reset failed. */
+  /** False only when the new auth works but directory resync could not be queued. */
   directoryRebuildReady: boolean;
+  retained?: {
+    connection: ConduitConnection;
+    authState: AuthState;
+    sessionLock: BaileysSessionLock;
+  };
 }
 
 export interface LinkConnection {
@@ -63,6 +66,11 @@ export interface LinkConnection {
 
 export interface LinkDependencies {
   connectionFactory?: (deps: ConnectionDeps) => LinkConnection;
+  /** Daemon handoff: ingestion uses its open database and keeps the socket. */
+  retainConnection?: boolean;
+  ingestDeps?: IngestDeps;
+  ingestionOptions?: BaileysIngestionOptions;
+  registerSocket?: ConnectionDeps["handlers"]["registerSocket"];
 }
 
 /**
@@ -90,8 +98,23 @@ export async function runLink(
     : await resolvePhoneNumber(options.phoneNumber);
   const log = appLogger(config);
   const sessionLock = acquireBaileysSessionLock(config.paths.authDir);
+  let retained = false;
   try {
     const authState = await openAuthState(config.paths.authDir);
+    const ownDb = dependencies.ingestDeps
+      ? undefined
+      : openDb(config.paths.sqlite, { migrate: true });
+    if (ownDb)
+      upsertAccount(ownDb, {
+        id: config.account.name,
+        label: config.account.description ?? null,
+      });
+    const ingestDeps = dependencies.ingestDeps ?? {
+      db: ownDb!,
+      accountId: config.account.name,
+      config,
+      logger: log,
+    };
 
     const qrOut = useQr ? options.qrOut : undefined;
     if (qrOut) mkdirSync(dirname(qrOut), { recursive: true });
@@ -116,6 +139,16 @@ export async function runLink(
           mode: "link",
           fetchVersion: createVersionResolver(config, log),
           handlers: {
+            registerSocket(sock) {
+              if (dependencies.registerSocket)
+                dependencies.registerSocket(sock);
+              else
+                registerIngestion(
+                  sock,
+                  ingestDeps,
+                  dependencies.ingestionOptions,
+                );
+            },
             onSocket(sock) {
               if (!useQr) pairingSocket = sock;
             },
@@ -233,9 +266,10 @@ export async function runLink(
           settled = true;
           clearTimeout(timer);
           options.signal?.removeEventListener("abort", onAbort);
-          void Promise.resolve(connection.stop());
           removeQrOutput();
-          void clearPendingPairing(authState)
+          void Promise.resolve(connection.stop())
+            .then(() => ownDb?.close())
+            .then(() => clearPendingPairing(authState))
             .catch(() => {
               log.warn("failed to clear incomplete pairing state");
             })
@@ -257,26 +291,42 @@ export async function runLink(
           settled = true;
           clearTimeout(timer);
           options.signal?.removeEventListener("abort", onAbort);
-          void Promise.resolve(connection.stop()).finally(() => {
-            removeQrOutput();
-            const accountId = persistAccount(config, opened?.selfJid);
-            process.stdout.write(
-              `\nLinked successfully${opened?.selfJid ? ` as ${opened.selfJid}` : ""}.\n` +
-                "Auth state saved. Directory reconstruction will start on the next connection.\n",
-            );
-            resolve({ selfJid: opened?.selfJid, accountId });
-          });
+          const keep =
+            dependencies.retainConnection &&
+            connection instanceof ConduitConnection;
+          void (async () => {
+            try {
+              if (!keep) await connection.stop();
+              removeQrOutput();
+              const accountId = persistAccount(config, opened?.selfJid);
+              if (!keep) ownDb?.close();
+              process.stdout.write(
+                `\nLinked successfully${opened?.selfJid ? ` as ${opened.selfJid}` : ""}.\n` +
+                  "Auth state saved. Directory reconstruction will start on the next connection.\n",
+              );
+              resolve({
+                selfJid: opened?.selfJid,
+                accountId,
+                ...(keep
+                  ? { retained: { connection, authState, sessionLock } }
+                  : {}),
+              });
+            } catch (error) {
+              await connection.stop();
+              ownDb?.close();
+              removeQrOutput();
+              await clearPendingPairing(authState).catch(() => undefined);
+              reject(error);
+            }
+          })();
         }
       },
     );
-    const directoryRebuildReady = await prepareDirectoryRebuild(
-      config,
-      authState,
-      log,
-    );
+    const directoryRebuildReady = prepareDirectoryRebuild(config);
+    retained = !!linked.retained;
     return { ...linked, directoryRebuildReady };
   } finally {
-    sessionLock.release();
+    if (!retained) sessionLock.release();
   }
 }
 
@@ -342,55 +392,17 @@ async function runWhatsmeowLink(
   });
 }
 
-/**
- * The linking socket must not keep partial app-state cursors.  It has no
- * ingestion handlers, so a clean daemon will rebuild the directory from a
- * snapshot after it has registered those handlers.
- */
-async function prepareDirectoryRebuild(
-  config: Config,
-  authState: Awaited<ReturnType<typeof openAuthState>>,
-  log: ReturnType<typeof appLogger>,
-): Promise<boolean> {
-  let readinessError: string | null = null;
-  try {
-    await clearAppStateSyncVersions(
-      authState,
-      BAILEYS_DIRECTORY_APP_STATE_COLLECTIONS,
-    );
-  } catch (error) {
-    readinessError = "unable to reset app-state cursors";
-    log.warn(
-      { err: error instanceof Error ? error.message : String(error) },
-      "could not reset Baileys app-state cursors after linking",
-    );
-  }
+/** Request the normal directory resync without deleting pairing metadata. */
+function prepareDirectoryRebuild(config: Config): boolean {
   const db = openDb(config.paths.sqlite, { migrate: true });
   try {
-    const operation = startMaintenanceOperation(
+    markDirectoryRebuildResult(
       db,
       config.account.name,
-      "directory",
+      "directory resync pending",
     );
-    await runMaintenanceOperation({
-      db,
-      accountId: config.account.name,
-      scope: "directory",
-      mediaDir: config.paths.mediaDir,
-      operationId: operation.id,
-    });
-    if (readinessError) {
-      markDirectoryRebuildResult(db, config.account.name, readinessError);
-      return false;
-    }
     return true;
-  } catch (error) {
-    const safe = "directory reset failed after linking";
-    markDirectoryRebuildResult(db, config.account.name, safe);
-    log.warn(
-      { err: error instanceof Error ? error.message : String(error) },
-      "could not reset the directory after linking",
-    );
+  } catch {
     return false;
   } finally {
     db.close();

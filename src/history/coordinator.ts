@@ -7,7 +7,7 @@ import {
   getActiveHistoryJob,
   getHistoryAnchor,
   getHistoryJob,
-  getAccount,
+  getMessage,
   updateHistoryJob,
   type HistoryAnchorRow,
   type HistoryJobRow,
@@ -20,6 +20,7 @@ import type {
   TransportMessageEvent,
 } from "../transport/types.js";
 import { listEquivalentJids, resolveDirectoryJid } from "../db/directory.js";
+import { normalizeJid } from "../baileys/jid.js";
 import { nowSec } from "../util/time.js";
 
 /** Baileys' flag for an on-demand batch the phone will not extend further. */
@@ -63,6 +64,8 @@ interface ActiveRequest {
   /** Fields from the most recent `history_sync` event, reset per batch. */
   lastBatchMessageCount: number | undefined;
   lastBatchEndOfHistoryTransferType: number | undefined;
+  nextAnchor: HistoryAnchor | null;
+  requestId: string | undefined;
 }
 
 interface BatchWaiter {
@@ -95,23 +98,23 @@ export class HistoryCoordinator {
       this.connected = false;
     });
     options.transport.on("history_sync", (event) => {
-      // Merge rather than overwrite: a trailing `messaging-history.status`
-      // event carries neither field and must not erase what the batch's
-      // `messaging-history.set` event already recorded.
-      if (this.active) {
-        if (event.messageCount !== undefined) {
-          this.active.lastBatchMessageCount = event.messageCount;
-        }
-        if (event.endOfHistoryTransferType !== undefined) {
-          this.active.lastBatchEndOfHistoryTransferType =
-            event.endOfHistoryTransferType;
-        }
+      if (!this.active || !this.active.requestInFlight) return;
+      if (event.chatJid && resolveDirectoryJid(this.options.db, this.options.accountId, event.chatJid) !== resolveDirectoryJid(this.options.db, this.options.accountId, this.active.chatJid)) return;
+      if (event.requestId && this.active.requestId && event.requestId !== this.active.requestId) return;
+      // Merge partial batch notifications without erasing fields already seen.
+      if (event.messageCount !== undefined) {
+        this.active.lastBatchMessageCount = event.messageCount;
+      }
+      if (event.endOfHistoryTransferType !== undefined) {
+        this.active.lastBatchEndOfHistoryTransferType =
+          event.endOfHistoryTransferType;
       }
       if (
         this.batchWaiter &&
         event.type.replace(/[-_]/g, "").toUpperCase() === "ONDEMAND"
       ) {
-        this.batchWaiter.resolve();
+        const waiter = this.batchWaiter;
+        setImmediate(() => waiter.resolve());
       }
     });
   }
@@ -190,11 +193,13 @@ export class HistoryCoordinator {
   classifyMessage(
     chat: string,
     timestamp: number,
+    requestId?: string,
   ): IngestionEventClassification {
     const active = this.active;
     if (
       !active ||
       !active.requestInFlight ||
+      (requestId && active.requestId && requestId !== active.requestId) ||
       resolveDirectoryJid(this.options.db, this.options.accountId, chat) !==
         resolveDirectoryJid(
           this.options.db,
@@ -209,8 +214,6 @@ export class HistoryCoordinator {
       return { source: "live", store: true };
     }
 
-    active.boundarySeen ||= timestamp <= active.sinceTs;
-    this.recordReceived(timestamp);
     // ADR-0037 §1: a message the phone delivers is written, full stop; `since`
     // only stops pagination (`boundarySeen`) — the phone will not resend it.
     return {
@@ -221,19 +224,39 @@ export class HistoryCoordinator {
   }
 
   onStored(
-    _event: TransportMessageEvent,
+    event: TransportMessageEvent,
     stored: boolean,
     classification: IngestionEventClassification,
   ): void {
-    this.onStoredResult(stored, classification);
+    this.onStoredResult(stored, classification, event.info.chat, event.info.id);
   }
 
   /** Record a successful storage operation without retaining transport payloads. */
   onStoredResult(
     stored: boolean,
     classification: IngestionEventClassification,
+    chat?: string,
+    id?: string,
   ): void {
-    if (!stored || classification.source !== "history") return;
+    if (classification.source !== "history" || !this.active) return;
+    if (!stored || !chat || !id) {
+      this.onStorageError();
+      return;
+    }
+    const row = getMessage(this.options.db, this.options.accountId, chat, id)
+      ?? (normalizeJid(chat) === chat ? undefined : getMessage(this.options.db, this.options.accountId, normalizeJid(chat), id));
+    if (!row) {
+      this.onStorageError();
+      return;
+    }
+    if (row.timestamp !== null) {
+      this.active.boundarySeen ||= row.timestamp <= this.active.sinceTs;
+      this.recordReceived(row.timestamp);
+      if (!id.startsWith("reaction:") && (row.from_me === 1 || row.sender_jid)) {
+        const candidate = this.anchorFromRow({ ...row, timestamp: row.timestamp }, this.active.chatJid);
+        if (candidate && (!this.active.nextAnchor || candidate.timestamp < this.active.nextAnchor.timestamp)) this.active.nextAnchor = candidate;
+      }
+    }
     const job = this.active
       ? getHistoryJob(
           this.options.db,
@@ -245,6 +268,10 @@ export class HistoryCoordinator {
     updateHistoryJob(this.options.db, this.options.accountId, job.id, {
       messagesInserted: job.messages_inserted + 1,
     });
+  }
+
+  onStorageError(): void {
+    if (this.active?.requestInFlight) this.batchWaiter?.reject(new Error("history_storage_failed"));
   }
 
   private recordReceived(timestamp: number): void {
@@ -294,7 +321,7 @@ export class HistoryCoordinator {
         return;
       }
       if (initialAnchor.timestamp <= initial.since_ts) {
-        this.complete(jobId, "already_satisfied");
+        this.complete(jobId, "already_satisfied", false);
         return;
       }
 
@@ -308,6 +335,8 @@ export class HistoryCoordinator {
         fetchMedia: initial.fetch_media === 1,
         lastBatchMessageCount: undefined,
         lastBatchEndOfHistoryTransferType: undefined,
+        nextAnchor: null,
+        requestId: undefined,
       };
       updateHistoryJob(this.options.db, this.options.accountId, jobId, {
         status: "queued",
@@ -316,18 +345,25 @@ export class HistoryCoordinator {
       });
 
       let anchor = initialAnchor;
+      const requestedAnchors = new Set<string>();
       while (true) {
         if (this.active.boundarySeen || anchor.timestamp <= initial.since_ts) {
-          this.complete(jobId, "boundary_reached");
+          this.complete(jobId, "boundary_reached", false);
           return;
         }
         await this.waitForConnection(jobId);
         if (!this.active) return;
+        const anchorKey = `${anchor.chat}\u0000${anchor.id}`;
+        if (requestedAnchors.has(anchorKey)) {
+          this.complete(jobId, "source_exhausted", false);
+          return;
+        }
+        requestedAnchors.add(anchorKey);
         this.active.anchor = anchor;
         updateHistoryJob(this.options.db, this.options.accountId, jobId, {
           status: "running",
           phase: "requesting",
-          anchorSenderJid: anchor.sender,
+          anchorSenderJid: anchor.sender ?? null,
           anchorMessageId: anchor.id,
           anchorTimestamp: anchor.timestamp,
         });
@@ -356,18 +392,14 @@ export class HistoryCoordinator {
         }
 
         if (this.active.boundarySeen) {
-          this.complete(jobId, "boundary_reached");
+          this.complete(jobId, "boundary_reached", false);
           return;
         }
-        const next = this.resolveAnchor(
-          getHistoryJob(this.options.db, this.options.accountId, jobId) ??
-            initial,
-          false,
-        );
+        const next = this.active.nextAnchor;
         if (
           !next ||
-          next.id === anchor.id ||
-          next.timestamp >= anchor.timestamp
+          requestedAnchors.has(`${next.chat}\u0000${next.id}`) ||
+          next.timestamp > anchor.timestamp
         ) {
           if (
             this.active.lastBatchMessageCount === 0 &&
@@ -388,7 +420,7 @@ export class HistoryCoordinator {
         );
         if (checkpoint) {
           updateHistoryJob(this.options.db, this.options.accountId, jobId, {
-            anchorSenderJid: anchor.sender,
+            anchorSenderJid: anchor.sender ?? null,
             anchorMessageId: anchor.id,
             anchorTimestamp: anchor.timestamp,
           });
@@ -412,21 +444,21 @@ export class HistoryCoordinator {
   ): HistoryAnchor | null {
     if (
       useCheckpoint &&
-      job.anchor_sender_jid &&
       job.anchor_message_id &&
+      !job.anchor_message_id.startsWith("reaction:") &&
       job.anchor_timestamp !== null
     ) {
+      const checkpoint = listEquivalentJids(this.options.db, this.options.accountId, job.chat_jid)
+        .map((jid) => getHistoryAnchor(this.options.db, this.options.accountId, jid, job.anchor_message_id ?? undefined))
+        .find((candidate) => candidate?.timestamp === job.anchor_timestamp);
+      if (checkpoint) return this.anchorFromRow(checkpoint, job.chat_jid);
       return {
         chat: resolveDirectoryJid(
           this.options.db,
           this.options.accountId,
           job.chat_jid,
         ),
-        sender: resolveDirectoryJid(
-          this.options.db,
-          this.options.accountId,
-          job.anchor_sender_jid,
-        ),
+        ...(job.anchor_sender_jid ? { sender: resolveDirectoryJid(this.options.db, this.options.accountId, job.anchor_sender_jid) } : {}),
         id: job.anchor_message_id,
         timestamp: job.anchor_timestamp,
       };
@@ -442,21 +474,23 @@ export class HistoryCoordinator {
       .filter((candidate): candidate is HistoryAnchorRow => Boolean(candidate))
       .sort((left, right) => left.timestamp - right.timestamp)[0];
     if (!row) return null;
-    const sender =
-      row.sender_jid ??
-      getAccount(this.options.db, this.options.accountId)?.self_jid;
-    if (!sender) return null;
+    return this.anchorFromRow(row, job.chat_jid);
+  }
+
+  private anchorFromRow(row: HistoryAnchorRow, chatJid: string): HistoryAnchor | null {
+    if (!row.from_me && !row.sender_jid) return null;
     return {
       chat: resolveDirectoryJid(
         this.options.db,
         this.options.accountId,
-        job.chat_jid,
+        chatJid,
       ),
-      sender: resolveDirectoryJid(
+      ...(row.sender_jid ? { sender: resolveDirectoryJid(
         this.options.db,
         this.options.accountId,
-        sender,
-      ),
+        row.sender_jid,
+      ) } : {}),
+      fromMe: row.from_me === 1,
       id: row.message_id,
       timestamp: row.timestamp,
     };
@@ -476,6 +510,8 @@ export class HistoryCoordinator {
       this.active.requestInFlight = true;
       this.active.lastBatchMessageCount = undefined;
       this.active.lastBatchEndOfHistoryTransferType = undefined;
+      this.active.nextAnchor = null;
+      this.active.requestId = undefined;
     }
     let timer: NodeJS.Timeout | undefined;
     const completed = new Promise<void>((resolve, reject) => {
@@ -486,8 +522,10 @@ export class HistoryCoordinator {
       );
     });
     try {
-      await this.options.transport.requestHistory(anchor, this.batchSize);
-      await completed;
+      const request = this.options.transport.requestHistory(anchor, this.batchSize).then((requestId) => {
+        if (this.active && typeof requestId === "string") this.active.requestId = requestId;
+      });
+      await Promise.all([request, completed]);
     } finally {
       if (timer) clearTimeout(timer);
       this.batchWaiter = null;
@@ -523,6 +561,7 @@ export class HistoryCoordinator {
     if (error instanceof Error && error.message === "history_sync_timeout") {
       return "history_sync_timeout";
     }
+    if (error instanceof Error && error.message === "history_storage_failed") return "history_storage_failed";
     if (error instanceof Error && error.message.includes("not started")) {
       return "transport_unavailable";
     }

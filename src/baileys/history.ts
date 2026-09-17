@@ -21,6 +21,8 @@ export class BaileysHistoryTransport {
   private readonly listeners = new Map<string, Set<Listener>>();
   /** Chat of the in-flight `requestHistory` call, used to match `chats[]`. */
   private requestedChat: string | null = null;
+  private requestedId: string | null = null;
+  private pending: TransportHistorySyncEvent[] = [];
 
   on(
     event: "connected",
@@ -46,11 +48,17 @@ export class BaileysHistoryTransport {
       if (event.syncType !== proto.HistorySync.HistorySyncType.ON_DEMAND) {
         return;
       }
+      const chatJids = [...new Set(event.messages.map((message) => message.key.remoteJid).filter((jid): jid is string => Boolean(jid)))];
+      if (chatJids.length > 1) return;
+      const chatJid = chatJids[0] ?? (event.chats.length === 1 ? event.chats[0]?.id : event.chats.length === 0 && event.messages.length === 0 ? this.requestedChat : undefined);
+      if (!chatJid || !this.requestedChat || jidNormalizedUser(chatJid) !== jidNormalizedUser(this.requestedChat)) return;
       const endOfHistoryTransferType = this.resolveEndOfHistoryTransferType(
         event.chats,
       );
-      this.emit("history_sync", {
+      const batch: TransportHistorySyncEvent = {
         type: "ON_DEMAND",
+        chatJid,
+        ...(event.peerDataRequestSessionId ? { requestId: event.peerDataRequestSessionId } : {}),
         messageCount: event.messages.length,
         ...(event.progress === null || event.progress === undefined
           ? {}
@@ -61,13 +69,9 @@ export class BaileysHistoryTransport {
         ...(endOfHistoryTransferType === undefined
           ? {}
           : { endOfHistoryTransferType }),
-      });
-    });
-    socket.ev.on("messaging-history.status", (event) => {
-      if (event.syncType !== proto.HistorySync.HistorySyncType.ON_DEMAND) {
-        return;
-      }
-      this.emit("history_sync", { type: "ON_DEMAND" });
+      };
+      if (batch.requestId && !this.requestedId) this.pending.push(batch);
+      else if (!batch.requestId || batch.requestId === this.requestedId) this.emit("history_sync", batch);
     });
   }
 
@@ -80,36 +84,37 @@ export class BaileysHistoryTransport {
     this.emit("disconnected");
   }
 
-  async requestHistory(anchor: HistoryAnchor, count: number): Promise<void> {
+  async requestHistory(anchor: HistoryAnchor, count: number): Promise<string> {
     const socket = this.socket;
     if (!socket?.user?.id) throw new Error("transport not started");
     const selfJid = jidNormalizedUser(socket.user.id);
-    const fromMe = jidNormalizedUser(anchor.sender) === selfJid;
+    const fromMe = anchor.fromMe ?? (anchor.sender ? jidNormalizedUser(anchor.sender) === selfJid : false);
     this.requestedChat = anchor.chat;
-    await socket.fetchMessageHistory(
+    this.requestedId = null;
+    this.pending = [];
+    const requestId = await socket.fetchMessageHistory(
       count,
       {
         remoteJid: anchor.chat,
         fromMe,
-        ...(!fromMe && isGroupJid(anchor.chat)
+        ...(!fromMe && anchor.sender && isGroupJid(anchor.chat)
           ? { participant: anchor.sender }
           : {}),
         id: anchor.id,
       },
       anchor.timestamp * 1000,
     );
+    this.requestedId = requestId;
+    for (const batch of this.pending) if (batch.requestId === requestId) this.emit("history_sync", batch);
+    this.pending = [];
+    return requestId;
   }
 
   /**
    * Match the requested chat against `messaging-history.set`'s `chats[]` by
-   * normalized JID, never by array index. A single chat entry is trusted
-   * outright: WhatsApp only ever returns the requested chat's own entry in
-   * that case.
+   * normalized JID, never by array index or array length.
    */
   private resolveEndOfHistoryTransferType(chats: Chat[]): number | undefined {
-    if (chats.length === 1) {
-      return chats[0]?.endOfHistoryTransferType ?? undefined;
-    }
     const target = this.requestedChat
       ? jidNormalizedUser(this.requestedChat)
       : null;

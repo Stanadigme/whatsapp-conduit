@@ -84,6 +84,36 @@ class FakeEventSocket {
 }
 
 describe("ingestMessage persistence", () => {
+  it.each([
+    proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP,
+    proto.HistorySync.HistorySyncType.FULL,
+  ])(
+    "stores pairing history as history without implicit media (%s)",
+    (syncType) => {
+      const d = deps(baseConfig);
+      const socket = new FakeEventSocket();
+      registerIngestion(socket as unknown as WASocket, d);
+
+      socket.emit("messaging-history.set", {
+        chats: [],
+        contacts: [],
+        messages: [
+          msg({
+            message: { audioMessage: { url: "https://example.invalid/audio" } },
+          }),
+        ],
+        syncType,
+      });
+
+      expect(
+        getMessage(d.db, "personal", "c@s.whatsapp.net", "M1")
+          ?.ingestion_source,
+      ).toBe("history");
+      expect(baileysMock.downloadMediaMessage).not.toHaveBeenCalled();
+      d.db.close();
+    },
+  );
+
   it("persists an allowed reconnect message delivered in a recent-history batch", () => {
     const d = deps(
       resolveConfig(

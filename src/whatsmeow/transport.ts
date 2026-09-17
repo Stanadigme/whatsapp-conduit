@@ -138,10 +138,12 @@ export class WhatsmeowTransport
   /** Request one bounded batch of older messages from the primary device. */
   async requestHistory(anchor: HistoryAnchor, count: number): Promise<void> {
     if (!this.started) throw new Error("whatsmeow transport is not started");
+    const sender = anchor.sender;
+    if (!sender) throw new Error("history anchor sender is unknown");
     if (!Number.isInteger(count) || count < 1 || count > 50) {
       throw new Error("history batch count must be between 1 and 50");
     }
-    const request = await this.client.buildHistorySyncRequest(anchor, count);
+    const request = await this.client.buildHistorySyncRequest({ ...anchor, sender }, count);
     await this.client.sendPeerMessage(request);
   }
 

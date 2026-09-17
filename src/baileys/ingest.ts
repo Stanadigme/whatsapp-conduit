@@ -61,7 +61,8 @@ export interface IngestionEventClassification {
  * marks anything.
  */
 export interface BaileysIngestionOptions {
-  classify?: (message: WAMessage) => IngestionEventClassification;
+  classify?: (message: WAMessage, requestId?: string) => IngestionEventClassification;
+  onError?: () => void;
   onStored?: (
     message: WAMessage,
     stored: boolean,
@@ -77,12 +78,15 @@ export function registerIngestion(
   const ingestMessages = (
     messages: readonly WAMessage[],
     useClassifier: boolean,
+    defaultSource: IngestionSource = "live",
+    requestId?: string,
   ): void => {
     for (const msg of messages) {
+      let classification: IngestionEventClassification | undefined;
       try {
-        const classification =
-          (useClassifier ? options.classify?.(msg) : undefined) ??
-          ({ source: "live", store: true } as const);
+        classification = (useClassifier
+          ? options.classify?.(msg, requestId)
+          : undefined) ?? { source: defaultSource, store: true };
         if (!classification.store) continue;
         const stored = ingestMessage(deps, msg, classification.source);
         options.onStored?.(msg, stored !== null, classification);
@@ -106,6 +110,7 @@ export function registerIngestion(
           );
         }
       } catch (err) {
+        if (classification?.source === "history") options.onError?.();
         deps.logger.error(
           { err: err instanceof Error ? err.message : String(err) },
           "failed to ingest message",
@@ -166,6 +171,7 @@ export function registerIngestion(
       messages = [],
       lidPnMappings = [],
       syncType,
+      peerDataRequestSessionId,
     }) => {
       // Counts, JIDs and the phone's end-of-transfer flag only: never
       // message text (invariant 6). `endOfHistoryTransferType` is what tells
@@ -197,6 +203,11 @@ export function registerIngestion(
       ingestMessages(
         messages,
         syncType === proto.HistorySync.HistorySyncType.ON_DEMAND,
+        syncType === proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP ||
+          syncType === proto.HistorySync.HistorySyncType.FULL
+          ? "history"
+          : "live",
+        peerDataRequestSessionId ?? undefined,
       );
     },
   );

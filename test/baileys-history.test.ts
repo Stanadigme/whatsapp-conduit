@@ -56,11 +56,13 @@ describe("Baileys on-demand history adapter", () => {
       },
       1_700_000_000_000,
     );
+    await transport.requestHistory({ chat: CHAT, fromMe: true, id: "M2", timestamp: 2 }, 10);
+    expect(fetchMessageHistory).toHaveBeenLastCalledWith(10, { remoteJid: CHAT, fromMe: true, id: "M2" }, 2_000);
     listeners.get("messaging-history.status")?.({
       syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
       status: "complete",
     } as never);
-    expect(events).toEqual(["ON_DEMAND"]);
+    expect(events).toEqual([]);
   });
 
   it("reports messageCount and matches endOfHistoryTransferType by JID, not by array index", async () => {
@@ -92,6 +94,15 @@ describe("Baileys on-demand history adapter", () => {
     // match would pick CHAT_LID's flag (0) instead of CHAT's (2).
     listeners.get("messaging-history.set")?.({
       syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+      peerDataRequestSessionId: "other-request",
+      contacts: [],
+      messages: [],
+      chats: [{ id: CHAT, endOfHistoryTransferType: 0 }],
+    } as never);
+    expect(events).toEqual([]);
+    listeners.get("messaging-history.set")?.({
+      syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+      peerDataRequestSessionId: "request-id",
       contacts: [],
       messages: [{ key: { remoteJid: CHAT, fromMe: false, id: "M2" } }],
       chats: [
@@ -101,11 +112,11 @@ describe("Baileys on-demand history adapter", () => {
     } as never);
 
     expect(events).toEqual([
-      { type: "ON_DEMAND", messageCount: 1, endOfHistoryTransferType: 2 },
+      { type: "ON_DEMAND", chatJid: CHAT, requestId: "request-id", messageCount: 1, endOfHistoryTransferType: 2 },
     ]);
   });
 
-  it("trusts the sole chats[] entry outright when only one is present", async () => {
+  it("ignores a batch for another chat even when it is the sole chats[] entry", async () => {
     const listeners = new Map<string, (event: never) => void>();
     const fetchMessageHistory = vi.fn().mockResolvedValue("request-id");
     const socket = {
@@ -137,9 +148,7 @@ describe("Baileys on-demand history adapter", () => {
       chats: [{ id: "unexpected@lid", endOfHistoryTransferType: 2 }],
     } as never);
 
-    expect(events).toEqual([
-      { type: "ON_DEMAND", messageCount: 0, endOfHistoryTransferType: 2 },
-    ]);
+    expect(events).toEqual([]);
   });
 
   it("launches and follows an on-demand job through Baileys history events", async () => {
@@ -224,8 +233,8 @@ describe("Baileys on-demand history adapter", () => {
             message.key.remoteJid ?? "",
             Number(message.messageTimestamp),
           ),
-        onStored: (_message, stored, classification) =>
-          coordinator.onStoredResult(stored, classification),
+        onStored: (message, stored, classification) =>
+          coordinator.onStoredResult(stored, classification, message.key.remoteJid ?? undefined, message.key.id ?? undefined),
       },
     );
     transport.connected(SELF);
@@ -248,7 +257,7 @@ describe("Baileys on-demand history adapter", () => {
       // ADR-0037 §1: the phone delivered M70 even though it precedes `since`;
       // it is written, never discarded, since the phone will not resend it.
       messages_inserted: 2,
-      coverage_complete: 1,
+      coverage_complete: 0,
       completion_reason: "boundary_reached",
     });
     expect(getMessage(db, ACCOUNT, CHAT, "M90")?.ingestion_source).toBe(

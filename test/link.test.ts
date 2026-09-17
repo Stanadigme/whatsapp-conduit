@@ -2,11 +2,27 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { WASocket } from "baileys";
+import { proto, type WASocket } from "baileys";
 import type { ConnectionDeps } from "../src/baileys/connect.js";
 import { requestPairingCode, runLink } from "../src/commands/link.js";
 import { runInit } from "../src/commands/init.js";
 import { buildStatusReport } from "../src/commands/status.js";
+import { loadConfig } from "../src/config.js";
+import { openDb } from "../src/db/index.js";
+import {
+  countMessages,
+  getChat,
+  getMessage,
+  setChatAllowed,
+  upsertAccount,
+  upsertChat,
+  upsertMessage,
+} from "../src/db/queries.js";
+import {
+  getDirectoryEntityByJid,
+  upsertDirectoryContact,
+} from "../src/db/directory.js";
+import { prepareBaileysRelink } from "../src/baileys/relink.js";
 
 let dir: string;
 
@@ -21,6 +37,147 @@ afterEach(() => {
 });
 
 describe("pairing-code readiness", () => {
+  it("preserves existing messages, names, aliases and permissions through a relink", async () => {
+    const configPath = join(dir, "config.yaml");
+    runInit({ configPath, dataDir: join(dir, "data") });
+    const config = loadConfig(configPath);
+    const chatJid = "491234@s.whatsapp.net";
+    const lid = "opaque@lid";
+    const db = openDb(config.paths.sqlite, { migrate: true });
+    upsertAccount(db, {
+      id: config.account.name,
+      selfJid: "49123@s.whatsapp.net",
+    });
+    upsertChat(db, {
+      accountId: config.account.name,
+      jid: chatJid,
+      name: "Nom conservé",
+    });
+    setChatAllowed(db, config.account.name, chatJid, true);
+    upsertDirectoryContact(db, {
+      accountId: config.account.name,
+      jid: chatJid,
+      lid,
+      displayName: "Nom conservé",
+    });
+    upsertMessage(db, {
+      accountId: config.account.name,
+      chatJid,
+      messageId: "OLD",
+      timestamp: 1700,
+      text: "ancien",
+    });
+    db.close();
+
+    writeFileSync(join(config.paths.authDir, "old-marker"), "former-session");
+    expect(prepareBaileysRelink(config.paths.authDir)).not.toBeNull();
+    const listeners = new Map<string, (value: unknown) => void>();
+    const socket = {
+      ev: {
+        on: (event: string, listener: (value: unknown) => void) =>
+          listeners.set(event, listener),
+      },
+    } as unknown as WASocket;
+    await runLink(
+      { configPath, qr: true },
+      {
+        connectionFactory: ({ handlers }) => ({
+          async start(): Promise<void> {
+            handlers.registerSocket?.(socket);
+            listeners.get("messaging-history.set")?.({
+              syncType: proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP,
+              chats: [{ id: chatJid }],
+              contacts: [],
+              messages: [
+                {
+                  key: { remoteJid: chatJid, id: "OLD" },
+                  messageTimestamp: 1700,
+                  message: { conversation: "ancien" },
+                },
+                {
+                  key: { remoteJid: chatJid, id: "NEW" },
+                  messageTimestamp: 1800,
+                  message: { conversation: "nouveau" },
+                },
+              ],
+            });
+            handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+            handlers.onCredsUpdate?.({ myAppStateKeyId: "app-state-key" });
+          },
+          stop(): void {},
+        }),
+      },
+    );
+
+    const after = openDb(config.paths.sqlite);
+    expect(countMessages(after, config.account.name)).toBe(2);
+    expect(getMessage(after, config.account.name, chatJid, "OLD")?.text).toBe(
+      "ancien",
+    );
+    expect(
+      getMessage(after, config.account.name, chatJid, "NEW")?.ingestion_source,
+    ).toBe("history");
+    expect(getChat(after, config.account.name, chatJid)).toMatchObject({
+      name: "Nom conservé",
+      is_allowed: 1,
+      is_blocked: 0,
+    });
+    expect(
+      getDirectoryEntityByJid(after, config.account.name, lid),
+    ).toMatchObject({
+      canonical_jid: chatJid,
+      display_name: "Nom conservé",
+    });
+    after.close();
+  });
+
+  it("ingests the initial batch before credentials are ready and preserves its metadata", async () => {
+    const configPath = join(dir, "config.yaml");
+    runInit({ configPath, dataDir: join(dir, "data") });
+    const listeners = new Map<string, (value: unknown) => void>();
+    const socket = {
+      ev: {
+        on: (event: string, listener: (value: unknown) => void) =>
+          listeners.set(event, listener),
+      },
+    } as unknown as WASocket;
+    let stopped = false;
+    const connectionFactory = ({ handlers }: ConnectionDeps) => ({
+      async start(): Promise<void> {
+        handlers.registerSocket?.(socket);
+        listeners.get("messaging-history.set")?.({
+          syncType: proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP,
+          chats: [{ id: "c@s.whatsapp.net", name: "Pairing name" }],
+          contacts: [],
+          messages: [
+            {
+              key: { remoteJid: "c@s.whatsapp.net", id: "BEFORE" },
+              messageTimestamp: 1700,
+              message: { conversation: "before" },
+            },
+          ],
+        });
+        handlers.onOpen?.({ selfJid: "49123@s.whatsapp.net" });
+        handlers.onCredsUpdate?.({ myAppStateKeyId: "app-state-key" });
+      },
+      stop(): void {
+        stopped = true;
+      },
+    });
+
+    await runLink({ configPath, qr: true }, { connectionFactory });
+    const db = openDb(loadConfig(configPath).paths.sqlite);
+    expect(
+      getMessage(db, "personal", "c@s.whatsapp.net", "BEFORE")
+        ?.ingestion_source,
+    ).toBe("history");
+    expect(getChat(db, "personal", "c@s.whatsapp.net")?.name).toBe(
+      "Pairing name",
+    );
+    expect(stopped).toBe(true);
+    db.close();
+  });
+
   it("writes a headless QR without retaining it after a successful link", async () => {
     const configPath = join(dir, "config.yaml");
     const dataDir = join(dir, "data");
