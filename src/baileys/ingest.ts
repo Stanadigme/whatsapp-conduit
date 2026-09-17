@@ -176,6 +176,21 @@ export function registerIngestion(
       lidPnMappings = [],
       syncType,
     }) => {
+      // Counts, JIDs and the phone's end-of-transfer flag only: never
+      // message text (invariant 6). `endOfHistoryTransferType` is what tells
+      // an empty ON_DEMAND batch apart from a refused one.
+      deps.logger.info(
+        {
+          syncType,
+          messages: messages.length,
+          chatJids: [...new Set(messages.map((m) => m.key.remoteJid))],
+          chats: chats.map((c) => ({
+            id: c.id,
+            endOfHistoryTransferType: c.endOfHistoryTransferType ?? null,
+          })),
+        },
+        "history batch received",
+      );
       for (const mapping of lidPnMappings) {
         if (mapping.pn && mapping.lid) {
           persistLidMapping(deps, mapping.pn, mapping.lid);
