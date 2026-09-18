@@ -363,6 +363,9 @@ describe("MediaBackfillCoordinator", () => {
     expect(second.reused).toBe(true);
     expect(second.job.id).toBe(first.job.id);
 
+    // The scratch directory is created before the download is requested, so
+    // the mock may not have been reached yet when `start` resolves.
+    await waitFor(() => releaseDownload !== undefined);
     releaseDownload?.();
     await waitFor(() => {
       const current = getMediaBackfillJob(deps.db, ACCOUNT, first.job.id);

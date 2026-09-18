@@ -358,6 +358,43 @@ describe("downloadAudioIfEnabled reuploadRequest (ADR-0039)", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("asks the phone to reupload on a 404/410 Boom and downloads again (ADR-0039)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
+    const { deps, stored } = setup(root, { privacy: { store_media: true } });
+    const refreshed = {
+      key: { remoteJid: CHAT, fromMe: false, id: "AUDIO1" },
+      message: { audioMessage: { seconds: 3, url: "refreshed" } },
+    } as unknown as WAMessage;
+    const sock = {
+      updateMediaMessage: vi.fn(async () => refreshed),
+    } as unknown as WASocket;
+    // Baileys throws a Boom whose status lives in `output.statusCode`; its
+    // own retry reads `error.status` and therefore never fires.
+    const expired = Object.assign(
+      new Error("Failed to fetch stream from https://mmg.whatsapp.net/v/x?oh=SECRET"),
+      { output: { statusCode: 404 } },
+    );
+    baileysMock.downloadMediaMessage
+      .mockRejectedValueOnce(expired)
+      .mockResolvedValueOnce(Readable.from([Buffer.from("audio bytes")]));
+
+    await downloadAudioIfEnabled(
+      { key: { remoteJid: CHAT, fromMe: false, id: "AUDIO1" }, message: { audioMessage: { seconds: 3 } } } as WAMessage,
+      stored,
+      deps,
+      sock,
+    );
+
+    expect(sock.updateMediaMessage).toHaveBeenCalledTimes(1);
+    expect(baileysMock.downloadMediaMessage).toHaveBeenCalledTimes(2);
+    expect(baileysMock.downloadMediaMessage.mock.calls[1]?.[0]).toBe(refreshed);
+    const attachment = getAttachment(deps.db, "personal", CHAT, "AUDIO1");
+    expect(attachment?.downloaded_at).not.toBeNull();
+
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("omits the reupload context entirely when no socket is given", async () => {
     const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
     const { deps, stored } = setup(root, { privacy: { store_media: true } });

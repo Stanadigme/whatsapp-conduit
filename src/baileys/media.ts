@@ -101,6 +101,56 @@ export function stringField(
     : null;
 }
 
+/** HTTP statuses for which WhatsApp's CDN has dropped the media and only the
+ * phone can bring it back (Baileys' own `REUPLOAD_REQUIRED_STATUS`). */
+const REUPLOAD_REQUIRED_STATUS = new Set([404, 410]);
+
+/**
+ * One bounded media download, with the ADR-0039 media-retry round trip when
+ * `sock` is given. Shared by the live path and the backfill so both behave
+ * identically.
+ *
+ * Baileys' `downloadMediaMessage` accepts a `reuploadRequest` context and is
+ * passed one here, but its retry condition reads `error.status`, which the
+ * Boom it throws never sets (`error.output.statusCode` does) — so upstream
+ * never actually retries. The catch below does what upstream intends: on a
+ * 404/410, ask the phone (`sock.updateMediaMessage`, which refreshes the
+ * message's media keys and URL) and download once more. Keep the `ctx`
+ * argument anyway so an upstream fix simply short-circuits ours.
+ */
+export async function fetchMediaStream(
+  msg: WAMessage,
+  deps: IngestDeps,
+  sock?: WASocket,
+): Promise<Awaited<ReturnType<typeof downloadMediaMessage>>> {
+  const options = { options: { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) } };
+  const ctx = sock
+    ? {
+        logger: deps.logger,
+        reuploadRequest: (message: WAMessage) => sock.updateMediaMessage(message),
+      }
+    : undefined;
+  const attempt = async (): Promise<Awaited<ReturnType<typeof downloadMediaMessage>>> => {
+    try {
+      return await downloadMediaMessage(msg, "stream", options, ctx);
+    } catch (error: unknown) {
+      const status = (error as { output?: { statusCode?: unknown } }).output?.statusCode;
+      if (!sock || typeof status !== "number" || !REUPLOAD_REQUIRED_STATUS.has(status)) {
+        throw error;
+      }
+      deps.logger.info({ status }, "media expired server-side, requesting reupload");
+      const refreshed = await sock.updateMediaMessage(msg);
+      return downloadMediaMessage(refreshed, "stream", options);
+    }
+  };
+  return withOverallTimeout(
+    attempt(),
+    sock ? DOWNLOAD_TIMEOUT_MS + REUPLOAD_TIMEOUT_MS : DOWNLOAD_TIMEOUT_MS,
+  ).catch((error: unknown) => {
+    throw sanitizeMediaError(error);
+  });
+}
+
 /**
  * Download an audio attachment after its message row is committed.
  *
@@ -137,35 +187,19 @@ export async function downloadAudioIfEnabled(
     return;
   }
 
-  const ctx = sock
-    ? {
-        logger: deps.logger,
-        reuploadRequest: (message: WAMessage) => sock.updateMediaMessage(message),
-      }
-    : undefined;
-  const timeoutMs = ctx
-    ? DOWNLOAD_TIMEOUT_MS + REUPLOAD_TIMEOUT_MS
-    : DOWNLOAD_TIMEOUT_MS;
-
   const source: AudioSource = {
     mediaType: media.mediaType,
     mimeType: stringField(node, "mimetype"),
     fileName: stringField(node, "fileName"),
     expectedBytes: toByteCount(node.fileLength),
     fetch: async () => {
-      const stream = await withOverallTimeout(
-        downloadMediaMessage(
-          msg,
-          "stream",
-          { options: { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) } },
-          ctx,
-        ),
-        timeoutMs,
-      ).catch((error: unknown) => {
-        throw sanitizeMediaError(error);
-      });
+      // The directory first: Baileys hands back a Transform that is already
+      // being piped into, so any `await` between receiving it and `pipeline`
+      // leaves a window where a short body reaches `final()` and emits
+      // 'error' with no listener — which takes the whole daemon down.
       await mkdir(deps.config.paths.mediaDir, { recursive: true });
       const scratch = join(deps.config.paths.mediaDir, `.${randomUUID()}.part`);
+      const stream = await fetchMediaStream(msg, deps, sock);
       await pipeline(stream, createWriteStream(scratch));
       return scratch;
     },

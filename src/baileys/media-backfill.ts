@@ -3,17 +3,14 @@ import { createWriteStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
-import { downloadMediaMessage, proto, type WASocket, type WAMessage } from "baileys";
+import { proto, type WASocket, type WAMessage } from "baileys";
 import type { MessageRow } from "../db/queries.js";
 import type { NormalizedMessage } from "../ingest/types.js";
 import { persistAudioIfEnabled, toByteCount, type AudioSource } from "../ingest/audio.js";
 import {
-  DOWNLOAD_TIMEOUT_MS,
-  REUPLOAD_TIMEOUT_MS,
   mediaNode,
-  sanitizeMediaError,
   stringField,
-  withOverallTimeout,
+  fetchMediaStream,
 } from "./media.js";
 import type { IngestDeps } from "./ingest.js";
 
@@ -104,35 +101,19 @@ export async function downloadStoredMedia(
   const { node } = media;
   if (node.viewOnce === true) return false;
 
-  const ctx = sock
-    ? {
-        logger: deps.logger,
-        reuploadRequest: (message: WAMessage) => sock.updateMediaMessage(message),
-      }
-    : undefined;
-  const timeoutMs = ctx
-    ? DOWNLOAD_TIMEOUT_MS + REUPLOAD_TIMEOUT_MS
-    : DOWNLOAD_TIMEOUT_MS;
-
   const source: AudioSource = {
     mediaType: media.mediaType,
     mimeType: stringField(node, "mimetype"),
     fileName: stringField(node, "fileName"),
     expectedBytes: toByteCount(node.fileLength),
     fetch: async () => {
-      const stream = await withOverallTimeout(
-        downloadMediaMessage(
-          msg,
-          "stream",
-          { options: { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) } },
-          ctx,
-        ),
-        timeoutMs,
-      ).catch((error: unknown) => {
-        throw sanitizeMediaError(error);
-      });
+      // The directory first: Baileys hands back a Transform that is already
+      // being piped into, so any `await` between receiving it and `pipeline`
+      // leaves a window where a short body reaches `final()` and emits
+      // 'error' with no listener — which takes the whole daemon down.
       await mkdir(deps.config.paths.mediaDir, { recursive: true });
       const scratch = join(deps.config.paths.mediaDir, `.${randomUUID()}.part`);
+      const stream = await fetchMediaStream(msg, deps, sock);
       await pipeline(stream, createWriteStream(scratch));
       return scratch;
     },
