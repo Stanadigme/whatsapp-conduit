@@ -3,6 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
+import { upsertDirectoryContact } from "../src/db/directory.js";
 import {
   insertTranscription,
   setChatAllowed,
@@ -181,6 +182,81 @@ describe("MCP server", () => {
     expect([...first.items, ...second.items].map((c) => c.jid))
       .toEqual(["120@g.us", "33600000000@s.whatsapp.net"]);
     expect(JSON.stringify(await items({ query: "Hidden" }))).not.toContain("Hidden");
+    await client.close();
+    await server.close();
+    db.close();
+  });
+
+  it("lists a contact split across a LID and a phone-JID chat row once (ST2)", async () => {
+    // Same split as the ST1 constat (backlog/phases/2026-09-18-identite-unique-par-conversation.md):
+    // history delivered under the phone JID of a contact already allowed
+    // under their LID must not surface as a second conversation.
+    const { client, server, db } = await connectedClient();
+    upsertChat(db, {
+      accountId: "personal",
+      jid: "9001@lid",
+      lastMessageTs: 1_700_000_010,
+    });
+    upsertChat(db, {
+      accountId: "personal",
+      jid: "33698765432@s.whatsapp.net",
+      lastMessageTs: 1_700_000_020,
+    });
+    upsertDirectoryContact(db, {
+      accountId: "personal",
+      jid: "33698765432@s.whatsapp.net",
+      lid: "9001@lid",
+      displayName: "Mathilde",
+    });
+    setChatAllowed(db, "personal", "9001@lid", true);
+    upsertMessage(db, {
+      accountId: "personal", chatJid: "9001@lid",
+      messageId: "live-1", senderJid: "9001@lid",
+      timestamp: 1_700_000_010, messageType: "text", text: "live",
+    });
+    upsertMessage(db, {
+      accountId: "personal", chatJid: "33698765432@s.whatsapp.net",
+      messageId: "history-1", senderJid: "33698765432@s.whatsapp.net",
+      timestamp: 1_700_000_020, messageType: "text", text: "history",
+    });
+
+    const result = await client.callTool({ name: "wa_chats_list", arguments: {} });
+    const { items } = JSON.parse(
+      ((result as { content: Array<{ text: string }> }).content[0]!).text,
+    ) as { items: Array<{ jid: string; name: string; lastMessageTs: number }> };
+    const mathilde = items.filter((c) => c.name === "Mathilde");
+    expect(mathilde).toHaveLength(1);
+    // The canonical alias is the phone JID (upsertDirectoryContact prefers
+    // it), and the timestamp reflects the most recent alias, not just the
+    // canonical row's own.
+    expect(mathilde[0]?.jid).toBe("33698765432@s.whatsapp.net");
+    expect(mathilde[0]?.lastMessageTs).toBe(1_700_000_020);
+
+    const first = await client.callTool({
+      name: "wa_chats_list", arguments: { limit: 1 },
+    });
+    const firstPage = JSON.parse(
+      ((first as { content: Array<{ text: string }> }).content[0]!).text,
+    ) as { items: Array<{ jid: string }>; nextCursor: string | null };
+    const second = await client.callTool({
+      name: "wa_chats_list", arguments: { limit: 10, cursor: firstPage.nextCursor },
+    });
+    const secondPage = JSON.parse(
+      ((second as { content: Array<{ text: string }> }).content[0]!).text,
+    ) as { items: Array<{ jid: string }> };
+    // Mathilde must not appear twice across pages, nor drop out entirely.
+    const allJids = [...firstPage.items, ...secondPage.items].map((c) => c.jid);
+    expect(allJids.filter((jid) => jid === "33698765432@s.whatsapp.net")).toHaveLength(1);
+
+    // wa_chat_stats counts both aliases, whichever jid is asked for.
+    for (const jid of ["9001@lid", "33698765432@s.whatsapp.net"]) {
+      const stats = await client.callTool({ name: "wa_chat_stats", arguments: { chat: jid } });
+      const parsed = JSON.parse(
+        ((stats as { content: Array<{ text: string }> }).content[0]!).text,
+      ) as { messages: number; lastMessageTs: number };
+      expect(parsed.messages).toBe(2);
+      expect(parsed.lastMessageTs).toBe(1_700_000_020);
+    }
     await client.close();
     await server.close();
     db.close();

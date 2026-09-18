@@ -268,4 +268,146 @@ describe("Baileys on-demand history adapter", () => {
     );
     db.close();
   });
+
+  it("does not fail a job in flight on an ingestion error from another chat or a live message", async () => {
+    const listeners = new Map<string, Array<(event: never) => void>>();
+    const emit = (event: string, value: unknown): void => {
+      for (const listener of listeners.get(event) ?? []) listener(value as never);
+    };
+    let resolveFetch: ((requestId: string) => void) | undefined;
+    // Pending until resolved: keeps the batch "in flight" while we probe
+    // onStorageError with contexts that must not belong to it.
+    const fetchMessageHistory = vi.fn(
+      () => new Promise<string>((resolve) => { resolveFetch = resolve; }),
+    );
+    const socket = {
+      user: { id: `${SELF.split("@")[0]}:1@s.whatsapp.net` },
+      fetchMessageHistory,
+      ev: {
+        on: (event: string, listener: (value: never) => void) => {
+          const group = listeners.get(event) ?? [];
+          group.push(listener);
+          listeners.set(event, group);
+        },
+      },
+    } as unknown as WASocket;
+    const db = openDb(":memory:", { migrate: true });
+    const logger = createLogger({ level: "error" });
+    upsertAccount(db, { id: ACCOUNT, selfJid: SELF });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT_LID });
+    upsertDirectoryContact(db, {
+      accountId: ACCOUNT,
+      jid: CHAT,
+      lid: CHAT_LID,
+    });
+    upsertMessage(db, {
+      accountId: ACCOUNT,
+      chatJid: CHAT_LID,
+      messageId: "M100",
+      senderJid: CHAT_LID,
+      fromMe: false,
+      timestamp: 100,
+      messageType: "text",
+    });
+
+    const transport = new BaileysHistoryTransport();
+    const coordinator = new HistoryCoordinator({
+      db,
+      accountId: ACCOUNT,
+      transport,
+      logger,
+    });
+    transport.attach(socket);
+    transport.connected(SELF);
+
+    const started = await coordinator.start(CHAT_LID, 80, 100);
+    await vi.waitFor(() => expect(fetchMessageHistory).toHaveBeenCalledOnce());
+
+    // Neither belongs to the batch in flight: an unrelated chat's history
+    // error, and a live message on the job's own chat.
+    coordinator.onStorageError({
+      chatJid: "99999999@s.whatsapp.net",
+      source: "history",
+    });
+    coordinator.onStorageError({ chatJid: CHAT, source: "live" });
+
+    resolveFetch?.("request-id");
+    emit("messaging-history.set", {
+      chats: [],
+      contacts: [],
+      syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+      messages: [
+        {
+          key: { remoteJid: CHAT, fromMe: false, id: "M90" },
+          messageTimestamp: 90,
+          message: { conversation: "inside-window" },
+        },
+      ],
+    } as never);
+
+    await vi.waitFor(() => {
+      expect(getHistoryJob(db, ACCOUNT, started.job.id)?.status).toBe(
+        "completed",
+      );
+    });
+    db.close();
+  });
+
+  it("still fails the job on a real storage error inside the batch in flight", async () => {
+    const fetchMessageHistory = vi.fn(
+      () => new Promise<string>(() => {
+        // Never resolves: only the storage error below should settle the batch.
+      }),
+    );
+    const socket = {
+      user: { id: `${SELF.split("@")[0]}:1@s.whatsapp.net` },
+      fetchMessageHistory,
+      ev: { on: () => undefined },
+    } as unknown as WASocket;
+    const db = openDb(":memory:", { migrate: true });
+    const logger = createLogger({ level: "error" });
+    upsertAccount(db, { id: ACCOUNT, selfJid: SELF });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT });
+    upsertChat(db, { accountId: ACCOUNT, jid: CHAT_LID });
+    upsertDirectoryContact(db, {
+      accountId: ACCOUNT,
+      jid: CHAT,
+      lid: CHAT_LID,
+    });
+    upsertMessage(db, {
+      accountId: ACCOUNT,
+      chatJid: CHAT_LID,
+      messageId: "M100",
+      senderJid: CHAT_LID,
+      fromMe: false,
+      timestamp: 100,
+      messageType: "text",
+    });
+
+    const transport = new BaileysHistoryTransport();
+    const coordinator = new HistoryCoordinator({
+      db,
+      accountId: ACCOUNT,
+      transport,
+      logger,
+    });
+    transport.attach(socket);
+    transport.connected(SELF);
+
+    const started = await coordinator.start(CHAT_LID, 80, 100);
+    await vi.waitFor(() => expect(fetchMessageHistory).toHaveBeenCalledOnce());
+
+    // Same chat as the job (via its LID alias), source "history": a genuine
+    // storage failure for the batch in flight must still fail the job.
+    coordinator.onStorageError({ chatJid: CHAT_LID, source: "history" });
+
+    await vi.waitFor(() => {
+      expect(getHistoryJob(db, ACCOUNT, started.job.id)).toMatchObject({
+        status: "failed",
+        error_code: "history_storage_failed",
+      });
+    });
+    db.close();
+  });
 });

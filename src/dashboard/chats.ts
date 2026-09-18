@@ -117,19 +117,56 @@ export function listDashboardChats(
     );
   }
 
+  // A contact split across a LID and a phone-JID chat row (ST1 constat,
+  // backlog/phases/2026-09-18-identite-unique-par-conversation.md) must show
+  // as one conversation, not two. `group_key` collapses every alias row of
+  // the same directory entity; `is_canonical` picks the alias marked
+  // `canonical` in `directory_aliases` as the row whose jid/name/kind is
+  // displayed, falling back to the most recently active alias when no
+  // canonical row is known yet. `last_message_ts` still reflects the max
+  // across every alias, so the group cannot appear staler than its most
+  // active identity. Grouping happens before `limit`, so a page never carries
+  // a duplicate entity or drops one for lack of room.
+  const groupKey = directory ? "coalesce(a.entity_id, c.jid)" : "c.jid";
+  const isCanonical = directory
+    ? "case when a.alias_type = 'canonical' then 1 else 0 end"
+    : "1";
+
   const rows = db
     .prepare(
-      `select c.*,
-              ${dirName} as dir_name,
-              ${dirPushName} as dir_push_name,
-              ${dirSyncedAt} as dir_last_synced_at
-       from chats c
-       ${joins}
-       where ${where.join(" and ")}
-       order by coalesce(c.last_message_ts, 0) desc, c.jid asc
+      `with visible as (
+         select c.*,
+                ${dirName} as dir_name,
+                ${dirPushName} as dir_push_name,
+                ${dirSyncedAt} as dir_last_synced_at,
+                ${groupKey} as group_key,
+                ${isCanonical} as is_canonical
+         from chats c
+         ${joins}
+         where ${where.join(" and ")}
+       ),
+       grouped as (
+         -- max() ignores nulls and returns null only if every alias row is
+         -- null, matching the ungrouped column's nullability.
+         select group_key, max(last_message_ts) as group_last_ts
+         from visible
+         group by group_key
+       ),
+       ranked as (
+         select v.*, row_number() over (
+           partition by v.group_key
+           order by v.is_canonical desc, coalesce(v.last_message_ts, 0) desc, v.jid asc
+         ) as rn
+         from visible v
+       )
+       select r.*, g.group_last_ts
+       from ranked r
+       join grouped g on g.group_key = r.group_key
+       where r.rn = 1
+       order by coalesce(g.group_last_ts, 0) desc, r.jid asc
        limit @limit`,
     )
-    .all(params) as ResolvedChatRow[];
+    .all(params) as Array<ResolvedChatRow & { group_last_ts: number }>;
   return rows.map((row) => ({
     jid: row.jid,
     name: row.dir_name || row.name || row.push_name || row.jid,
@@ -138,7 +175,7 @@ export function listDashboardChats(
       row.is_status === 1 ? "status" : row.is_group === 1 ? "group" : "contact",
     allowed: row.is_allowed === 1,
     blocked: row.is_blocked === 1,
-    lastMessageTs: row.last_message_ts,
+    lastMessageTs: row.group_last_ts,
     lastSyncedAt: row.dir_last_synced_at,
   }));
 }

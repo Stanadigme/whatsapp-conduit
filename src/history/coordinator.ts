@@ -13,6 +13,7 @@ import {
   type HistoryJobRow,
 } from "../db/queries.js";
 import type { IngestionEventClassification } from "../baileys/ingest.js";
+import type { IngestionSource } from "../db/queries.js";
 import type {
   HistoryAnchor,
   HistoryTransport,
@@ -240,13 +241,15 @@ export class HistoryCoordinator {
   ): void {
     if (classification.source !== "history" || !this.active) return;
     if (!stored || !chat || !id) {
-      this.onStorageError();
+      // No chat to compare against: assume it belongs to the batch in flight
+      // rather than silently dropping a real storage failure.
+      this.onStorageError({ chatJid: chat ?? this.active.chatJid, source: classification.source });
       return;
     }
     const row = getMessage(this.options.db, this.options.accountId, chat, id)
       ?? (normalizeJid(chat) === chat ? undefined : getMessage(this.options.db, this.options.accountId, normalizeJid(chat), id));
     if (!row) {
-      this.onStorageError();
+      this.onStorageError({ chatJid: chat, source: classification.source });
       return;
     }
     if (row.timestamp !== null) {
@@ -270,8 +273,26 @@ export class HistoryCoordinator {
     });
   }
 
-  onStorageError(): void {
-    if (this.active?.requestInFlight) this.batchWaiter?.reject(new Error("history_storage_failed"));
+  /**
+   * A caller without chat context (e.g. the experimental whatsmeow transport)
+   * omits `ctx`: keep the old fail-closed behavior for it. A caller that knows
+   * the failing message's chat and source (Baileys' ingestion `onError`, and
+   * this coordinator's own storage checks) must match the batch in flight —
+   * an ingestion error on another chat, or a live message, never belongs to
+   * this job and must not fail it.
+   */
+  onStorageError(ctx?: { chatJid: string; source: IngestionSource }): void {
+    if (!this.active?.requestInFlight) return;
+    if (ctx) {
+      if (ctx.source !== "history") return;
+      if (
+        resolveDirectoryJid(this.options.db, this.options.accountId, ctx.chatJid) !==
+        resolveDirectoryJid(this.options.db, this.options.accountId, this.active.chatJid)
+      ) {
+        return;
+      }
+    }
+    this.batchWaiter?.reject(new Error("history_storage_failed"));
   }
 
   private recordReceived(timestamp: number): void {

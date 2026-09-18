@@ -9,8 +9,10 @@ import {
 import {
   buildExposureSqlFragment,
   directoryTablesAvailable,
+  listEquivalentJids,
   markDirectoryMissingMembersInactive,
   resolveDirectoryJid,
+  syncChatPolicyAcrossAliases,
   upsertDirectoryContact,
   upsertDirectoryGroupMember,
 } from "./directory.js";
@@ -159,6 +161,20 @@ export interface ChatRow {
  */
 export function upsertChat(db: Database, input: ChatInput): void {
   const now = nowSec();
+  // A pre-check read, not `.run().changes`: better-sqlite3 reports one
+  // changed row for both the insert and the conflict-update branch of this
+  // upsert, so `changes` cannot tell them apart. This is called once per
+  // ingested message (the hot path), so the extra alias resolution below
+  // must stay opt-in: only a genuinely new `chats` row can be the second
+  // half of a split identity (e.g. history delivered under the phone JID of
+  // an already-allowed LID) that needs its policy backfilled immediately.
+  const isNewChat =
+    directoryTablesAvailable(db) &&
+    db
+      .prepare<[string, string], { found: number }>(
+        "select 1 as found from chats where account_id = ? and jid = ?",
+      )
+      .get(input.accountId, input.jid) === undefined;
   db.prepare(
     `insert into chats (
        account_id, jid, name, push_name, is_group, is_status,
@@ -194,6 +210,9 @@ export function upsertChat(db: Database, input: ChatInput): void {
     now,
   });
   projectChat(db, input.accountId, input.jid);
+  if (isNewChat) {
+    syncChatPolicyAcrossAliases(db, input.accountId, input.jid);
+  }
 }
 
 /**
@@ -211,17 +230,41 @@ export function setChatAllowed(
   jid: string,
   allowed: boolean,
 ): void {
+  // The clicked jid is one alias of a conversation that may have a sibling
+  // `chats` row under the other identifier (LID vs phone JID). The command is
+  // authoritative for the whole identity, so it is written to every alias row
+  // directly — not merged with whatever a sibling row currently holds (that
+  // `max()` alignment belongs to `syncChatPolicyAcrossAliases`, used where a
+  // row is reconciled into an *already-decided* policy, e.g. a new `chats`
+  // row appearing for a known identity). Re-scheduling every alias's chat
+  // and, when allowing, every alias's already-stored messages is what makes
+  // the other row's history show up immediately instead of waiting for a new
+  // event (ADR-0037 §3).
+  const aliases = listEquivalentJids(db, accountId, jid);
+  const now = nowSec();
+  const placeholders = aliases.map((_, index) => `@alias${index}`);
   db.prepare(
     `update chats
        set is_allowed = @allowed,
            is_blocked = case when @allowed = 1 then 0 else is_blocked end,
            updated_at = @now
-     where account_id = @accountId and jid = @jid`,
-  ).run({ accountId, jid, allowed: allowed ? 1 : 0, now: nowSec() });
-  projectChat(db, accountId, jid);
+     where account_id = @accountId and jid in (${placeholders.join(", ")})`,
+  ).run({
+    accountId,
+    allowed: allowed ? 1 : 0,
+    now,
+    ...Object.fromEntries(
+      aliases.map((alias, index) => [`alias${index}`, alias]),
+    ),
+  });
+  for (const alias of aliases) {
+    projectChat(db, accountId, alias);
+  }
   if (allowed) {
-    for (const messageId of listMessageIdsForChat(db, accountId, jid)) {
-      projectMessage(db, accountId, jid, messageId);
+    for (const alias of aliases) {
+      for (const messageId of listMessageIdsForChat(db, accountId, alias)) {
+        projectMessage(db, accountId, alias, messageId);
+      }
     }
   }
 }
@@ -249,14 +292,29 @@ export function setChatBlocked(
   jid: string,
   blocked: boolean,
 ): void {
+  // Same "command is authoritative for the whole identity" reasoning as
+  // setChatAllowed: written directly to every alias row, not merged with a
+  // sibling's current value.
+  const aliases = listEquivalentJids(db, accountId, jid);
+  const now = nowSec();
+  const placeholders = aliases.map((_, index) => `@alias${index}`);
   db.prepare(
     `update chats
        set is_blocked = @blocked,
            is_allowed = case when @blocked = 1 then 0 else is_allowed end,
            updated_at = @now
-     where account_id = @accountId and jid = @jid`,
-  ).run({ accountId, jid, blocked: blocked ? 1 : 0, now: nowSec() });
-  projectChat(db, accountId, jid);
+     where account_id = @accountId and jid in (${placeholders.join(", ")})`,
+  ).run({
+    accountId,
+    blocked: blocked ? 1 : 0,
+    now,
+    ...Object.fromEntries(
+      aliases.map((alias, index) => [`alias${index}`, alias]),
+    ),
+  });
+  for (const alias of aliases) {
+    projectChat(db, accountId, alias);
+  }
 }
 
 export function getChat(

@@ -816,4 +816,38 @@ describe("audio download honors exposedForSideEffects", () => {
     );
     d.db.close();
   });
+
+  it("passes reuploadRequest bound to the live socket's updateMediaMessage (ADR-0039)", async () => {
+    const d = deps(
+      resolveConfig({ privacy: { store_media: true } }, { dataDir: "/data" }),
+    );
+    upsertChat(d.db, {
+      accountId: "personal",
+      jid: "c@s.whatsapp.net",
+      isGroup: false,
+      isStatus: false,
+    });
+    setChatAllowed(d.db, "personal", "c@s.whatsapp.net", true);
+    const socket = new FakeEventSocket();
+    const updateMediaMessage = vi.fn(async (message: WAMessage) => message);
+    (socket as unknown as WASocket).updateMediaMessage = updateMediaMessage;
+    registerIngestion(socket as unknown as WASocket, d);
+
+    socket.emit("messages.upsert", {
+      type: "notify",
+      messages: [audio("AUDIO_REUPLOAD", "c@s.whatsapp.net")],
+    });
+
+    await vi.waitFor(() =>
+      expect(baileysMock.downloadMediaMessage).toHaveBeenCalled(),
+    );
+    const ctx = baileysMock.downloadMediaMessage.mock.calls[0]?.[3] as
+      | { reuploadRequest: (m: WAMessage) => unknown }
+      | undefined;
+    expect(ctx).toBeDefined();
+    const dummy = { key: { id: "X" } } as unknown as WAMessage;
+    await ctx?.reuploadRequest(dummy);
+    expect(updateMediaMessage).toHaveBeenCalledWith(dummy);
+    d.db.close();
+  });
 });

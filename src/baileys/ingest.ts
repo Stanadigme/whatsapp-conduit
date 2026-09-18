@@ -62,7 +62,9 @@ export interface IngestionEventClassification {
  */
 export interface BaileysIngestionOptions {
   classify?: (message: WAMessage, requestId?: string) => IngestionEventClassification;
-  onError?: () => void;
+  /** Chat and source of the message whose ingestion threw, so a listener can
+   * tell an unrelated failure apart from one hitting its own in-flight batch. */
+  onError?: (ctx: { chatJid: string; source: IngestionSource }) => void;
   onStored?: (
     message: WAMessage,
     stored: boolean,
@@ -100,7 +102,7 @@ export function registerIngestion(
             isStatus: stored.isStatus,
           })
         ) {
-          void downloadAudioIfEnabled(msg, stored, deps).catch(
+          void downloadAudioIfEnabled(msg, stored, deps, sock).catch(
             (err: unknown) => {
               deps.logger.error(
                 { err: err instanceof Error ? err.message : String(err) },
@@ -110,7 +112,12 @@ export function registerIngestion(
           );
         }
       } catch (err) {
-        if (classification?.source === "history") options.onError?.();
+        if (classification?.source === "history") {
+          options.onError?.({
+            chatJid: msg.key.remoteJid ?? "",
+            source: classification.source,
+          });
+        }
         deps.logger.error(
           { err: err instanceof Error ? err.message : String(err) },
           "failed to ingest message",

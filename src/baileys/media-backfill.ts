@@ -3,14 +3,19 @@ import { createWriteStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
-import { downloadMediaMessage, proto, type WAMessage } from "baileys";
+import { downloadMediaMessage, proto, type WASocket, type WAMessage } from "baileys";
 import type { MessageRow } from "../db/queries.js";
 import type { NormalizedMessage } from "../ingest/types.js";
 import { persistAudioIfEnabled, toByteCount, type AudioSource } from "../ingest/audio.js";
-import { mediaNode, stringField } from "./media.js";
+import {
+  DOWNLOAD_TIMEOUT_MS,
+  REUPLOAD_TIMEOUT_MS,
+  mediaNode,
+  sanitizeMediaError,
+  stringField,
+  withOverallTimeout,
+} from "./media.js";
 import type { IngestDeps } from "./ingest.js";
-
-const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 const MEDIA_MESSAGE_TYPES: ReadonlySet<string> = new Set([
   "audio",
@@ -79,10 +84,16 @@ function normalizedMessageFromRow(row: MessageRow): NormalizedMessage | null {
  * WhatsApp connection is needed or used (see ADR-0035). Returns false
  * without treating it as a failure when there is nothing to attempt: no
  * `raw_json`, no media node, or a message type backfill does not cover.
+ *
+ * `sock`, when given, wires the same `reuploadRequest` as `media.ts`
+ * (ADR-0039): a backfilled voice note whose server-side copy has since
+ * expired — exactly the 91 RHSS history vocals this was written for — gets
+ * one media-retry round trip before the fetch is given up on.
  */
 export async function downloadStoredMedia(
   row: MessageRow,
   deps: IngestDeps,
+  sock?: WASocket,
 ): Promise<boolean> {
   const normalized = normalizedMessageFromRow(row);
   if (!normalized) return false;
@@ -93,14 +104,32 @@ export async function downloadStoredMedia(
   const { node } = media;
   if (node.viewOnce === true) return false;
 
+  const ctx = sock
+    ? {
+        logger: deps.logger,
+        reuploadRequest: (message: WAMessage) => sock.updateMediaMessage(message),
+      }
+    : undefined;
+  const timeoutMs = ctx
+    ? DOWNLOAD_TIMEOUT_MS + REUPLOAD_TIMEOUT_MS
+    : DOWNLOAD_TIMEOUT_MS;
+
   const source: AudioSource = {
     mediaType: media.mediaType,
     mimeType: stringField(node, "mimetype"),
     fileName: stringField(node, "fileName"),
     expectedBytes: toByteCount(node.fileLength),
     fetch: async () => {
-      const stream = await downloadMediaMessage(msg, "stream", {
-        options: { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) },
+      const stream = await withOverallTimeout(
+        downloadMediaMessage(
+          msg,
+          "stream",
+          { options: { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) } },
+          ctx,
+        ),
+        timeoutMs,
+      ).catch((error: unknown) => {
+        throw sanitizeMediaError(error);
       });
       await mkdir(deps.config.paths.mediaDir, { recursive: true });
       const scratch = join(deps.config.paths.mediaDir, `.${randomUUID()}.part`);

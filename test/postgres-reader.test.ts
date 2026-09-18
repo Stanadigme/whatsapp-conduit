@@ -5,7 +5,10 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { resolveConfig } from "../src/config.js";
 import { openDb, type Database } from "../src/db/index.js";
-import { upsertDirectoryGroupMember } from "../src/db/directory.js";
+import {
+  upsertDirectoryContact,
+  upsertDirectoryGroupMember,
+} from "../src/db/directory.js";
 import {
   createHistoryJob,
   insertTranscription,
@@ -204,6 +207,50 @@ async function seed(mediaDir: string): Promise<{
   };
 }
 
+/**
+ * Minimal fixture for ST2 (backlog/phases/2026-09-18-identite-unique-par-conversation.md):
+ * a contact split across a LID chat row (live messages) and a phone-JID chat
+ * row (history), same shape as {@link seed}'s directory entities but kept
+ * separate so the broader parity tests above are not perturbed by an extra
+ * chat.
+ */
+async function seedAliasedChat(): Promise<{
+  sqlite: ClientDataReader;
+  postgres: ClientDataReader;
+}> {
+  await shutdownPostgresProjection();
+  const db = openDb(":memory:", { migrate: true });
+  open.push(db);
+  startPostgresProjection(
+    { connect: () => pool!.connect(), end: async () => undefined },
+    logger,
+  );
+  upsertAccount(db, { id: "personal", selfJid: "33700000000@s.whatsapp.net" });
+  upsertChat(db, {
+    accountId: "personal",
+    jid: "9001@lid",
+    lastMessageTs: 100,
+  });
+  upsertChat(db, {
+    accountId: "personal",
+    jid: "491234@s.whatsapp.net",
+    lastMessageTs: 200,
+  });
+  upsertDirectoryContact(db, {
+    accountId: "personal",
+    jid: "491234@s.whatsapp.net",
+    lid: "9001@lid",
+    displayName: "Mathilde",
+  });
+  setChatAllowed(db, "personal", "9001@lid", true);
+  await flushPostgresProjection();
+  const config = resolveConfig({}, { dataDir: "/data" });
+  return {
+    sqlite: createSqliteReader(db, config, "personal"),
+    postgres: createPostgresReader(pool!, config, "personal"),
+  };
+}
+
 describe.skipIf(!url)("PostgresReader parity with SqliteReader", () => {
   beforeEach(resetSchema);
 
@@ -258,6 +305,29 @@ describe.skipIf(!url)("PostgresReader parity with SqliteReader", () => {
     expect(pg.map((c) => ({ ...c, lastSyncedAt: null }))).toEqual(
       sq.map((c) => ({ ...c, lastSyncedAt: null })),
     );
+  });
+
+  it("agrees on deduplicating a LID/phone-JID alias pair into one chat (ST2)", async () => {
+    const { sqlite, postgres } = await seedAliasedChat();
+    const [sqChats, pgChats] = await Promise.all([
+      sqlite.listChats({}),
+      postgres.listChats({}),
+    ]);
+    expect(pgChats).toEqual(sqChats);
+    expect(sqChats.items.map((c) => c.jid)).toEqual([
+      "491234@s.whatsapp.net",
+    ]);
+    expect(sqChats.items[0]?.lastMessageTs).toBe(200);
+
+    const [sqDash, pgDash] = await Promise.all([
+      sqlite.listDashboardChats(),
+      postgres.listDashboardChats(),
+    ]);
+    expect(pgDash.map((c) => ({ ...c, lastSyncedAt: null }))).toEqual(
+      sqDash.map((c) => ({ ...c, lastSyncedAt: null })),
+    );
+    expect(sqDash.map((c) => c.jid)).toEqual(["491234@s.whatsapp.net"]);
+    expect(sqDash[0]?.lastMessageTs).toBe(200);
   });
 
   it("agrees on group participants", async () => {

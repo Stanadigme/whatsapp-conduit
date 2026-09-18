@@ -205,6 +205,55 @@ export function chatPolicyForAliases(
 }
 
 /**
+ * Reconcile `chats.is_allowed`/`chats.is_blocked` for a row that just joined
+ * an existing directory identity — a new `chats` row inserted for a jid whose
+ * alias is already known (`upsertChat`), or a LID/phone JID pair the
+ * directory just linked (`upsertDirectoryContact`) — so it inherits the
+ * policy already decided for its sibling instead of sitting at the
+ * discovered default (ST1, phase
+ * `backlog/phases/2026-09-18-identite-unique-par-conversation.md`).
+ *
+ * Not for `setChatAllowed`/`setChatBlocked`: those commands are authoritative
+ * for the whole identity and write their exact value to every alias row
+ * directly. Merging them through this `max()` would let a still-allowed
+ * sibling silently undo an explicit "disallow" on the other alias.
+ *
+ * {@link chatExposureAllowed} and its SQL twin already resolve aliases at
+ * read time, but the persisted flags on the `chats` rows themselves used to
+ * diverge: history delivered under a contact's phone JID landed in a row
+ * that never inherited the LID chat's already-granted policy, so anything
+ * reading the flag directly — `listChats(allowedOnly)`, media backfill, the
+ * postgres projection — still saw it as unauthorized. Same `max()` semantics
+ * as {@link chatPolicyForAliases}: blocked wins. Only rows whose flags
+ * actually change get a new `updated_at`.
+ */
+export function syncChatPolicyAcrossAliases(
+  db: Database,
+  accountId: string,
+  jid: string,
+): void {
+  const aliases = listEquivalentJids(db, accountId, jid);
+  if (aliases.length < 2) return;
+  const policy = chatPolicyForAliases(db, accountId, aliases);
+  const allowed = policy.blocked ? 0 : policy.allowed ? 1 : 0;
+  const blocked = policy.blocked ? 1 : 0;
+  const placeholders = aliases.map((_, index) => `@alias${index}`);
+  db.prepare(
+    `update chats set is_allowed = @allowed, is_blocked = @blocked, updated_at = @now
+     where account_id = @accountId and jid in (${placeholders.join(", ")})
+       and (is_allowed != @allowed or is_blocked != @blocked)`,
+  ).run({
+    accountId,
+    allowed,
+    blocked,
+    now: nowSec(),
+    ...Object.fromEntries(
+      aliases.map((alias, index) => [`alias${index}`, alias]),
+    ),
+  });
+}
+
+/**
  * Runtime privacy scope that gates exposure alongside the persisted
  * `chats.is_allowed` / `chats.is_blocked` flags (ADR-0037 §1-2). Comes from the
  * in-memory `Config` — these are process settings (ADR-0036), never a
@@ -364,8 +413,11 @@ export function upsertDirectoryContact(
     const aliases = [jid, lid].filter(
       (value): value is string => value !== null,
     );
-    const mapped = aliases
-      .map((alias) =>
+    // Keyed by alias so the reconciliation check below can tell, per alias,
+    // whether it already pointed at the entity this call resolves to.
+    const existingByAlias = new Map(
+      aliases.map((alias) => [
+        alias,
         db
           .prepare<[string, string], { id: number; canonical_jid: string }>(
             `select e.id, e.canonical_jid
@@ -374,11 +426,12 @@ export function upsertDirectoryContact(
              where a.account_id = ? and a.alias_jid = ?`,
           )
           .get(input.accountId, alias),
-      )
-      .filter(
-        (value): value is { id: number; canonical_jid: string } =>
-          value !== undefined,
-      );
+      ]),
+    );
+    const mapped = [...existingByAlias.values()].filter(
+      (value): value is { id: number; canonical_jid: string } =>
+        value !== undefined,
+    );
     const canonicalJid =
       phoneJid ??
       mapped.find((value) => !value.canonical_jid.endsWith("@lid"))
@@ -440,6 +493,21 @@ export function upsertDirectoryContact(
     upsertDirectoryAlias(db, input.accountId, canonical.id, canonicalJid, now);
     for (const alias of aliases) {
       upsertDirectoryAlias(db, input.accountId, canonical.id, alias, now);
+    }
+    // A LID just got tied to a phone JID (or vice versa) whenever an alias
+    // didn't already point at this entity — a genuine merge (`oldIds` above)
+    // or a brand-new alias on an already-known entity. Either can reconnect
+    // two `chats` rows that grew independent allow/block flags before the
+    // directory learned they are the same conversation. Gated on this
+    // per-alias comparison (already computed above, no extra query) rather
+    // than run on every call: `upsertDirectoryContact` fires once per
+    // message, and the steady-state case — aliases already pointing at this
+    // same entity — must stay a no-op.
+    const linksIntroduced = aliases.some(
+      (alias) => existingByAlias.get(alias)?.id !== canonical.id,
+    );
+    if (linksIntroduced) {
+      syncChatPolicyAcrossAliases(db, input.accountId, canonicalJid);
     }
     projectContact(db, input.accountId, canonical.id, input.phone, lid, now);
     const result = getEntityById(db, canonical.id);

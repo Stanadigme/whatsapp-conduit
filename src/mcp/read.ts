@@ -16,6 +16,7 @@ import {
   getDirectoryEntityByJid,
   listDirectoryAliases,
   listDirectoryGroupMembers,
+  listEquivalentJids,
   type DirectoryEntityRow,
 } from "../db/directory.js";
 import {
@@ -128,40 +129,82 @@ export function listChats(
   if (filters.kind === "status") where.push("c.is_status = 1");
   else if (filters.kind === "group") where.push("c.is_group = 1 and c.is_status = 0");
   else if (filters.kind === "contact") where.push("c.is_group = 0 and c.is_status = 0");
-  if (filters.hasAudio !== undefined) where.push(`${audio} = @hasAudio`);
   const query = filters.query?.trim().toLocaleLowerCase();
   if (query) {
     const columns = ["c.name", "c.push_name", "c.jid", directoryName, directoryPushName];
     where.push(`(${columns.map((column) => `lower_u(${column}) like @query`).join(" or ")})`);
   }
-  where.push(`(@cursorTs is null or
-    coalesce(c.last_message_ts, 0) < @cursorTs or
-    (coalesce(c.last_message_ts, 0) = @cursorTs and c.jid > @cursorJid))`);
+
+  // Same one-entity-per-conversation collapse as dashboard/chats.ts's
+  // listDashboardChats (ST2, backlog/phases/2026-09-18-identite-unique-par-conversation.md):
+  // a contact split across a LID and a phone-JID chat row must not surface
+  // twice. Grouping runs inside the query, before the cursor comparison and
+  // `limit`, so a page can never contain the same entity twice or drop it for
+  // lack of room — `hasAudio` is filtered on the grouped, alias-summed value
+  // for the same reason: either alias carrying a voice note makes it true for
+  // the whole conversation.
+  const groupKey = directory ? "coalesce(da.entity_id, c.jid)" : "c.jid";
+  const isCanonical = directory
+    ? "case when da.alias_type = 'canonical' then 1 else 0 end"
+    : "1";
   const rows = ctx.db
     .prepare(
-      `select c.*,
-         ${audio} as has_audio
-       from chats c
-       ${joins}
-       where ${where.join(" and ")}
-       order by coalesce(c.last_message_ts, 0) desc, c.jid asc
+      `with visible as (
+         select c.*,
+                ${audio} as has_audio_row,
+                ${groupKey} as group_key,
+                ${isCanonical} as is_canonical
+         from chats c
+         ${joins}
+         where ${where.join(" and ")}
+       ),
+       grouped as (
+         select group_key,
+                max(last_message_ts) as group_last_ts,
+                max(has_audio_row) as group_has_audio
+         from visible
+         group by group_key
+       ),
+       ranked as (
+         select v.*, row_number() over (
+           partition by v.group_key
+           order by v.is_canonical desc, coalesce(v.last_message_ts, 0) desc, v.jid asc
+         ) as rn
+         from visible v
+       )
+       select r.*, g.group_last_ts, g.group_has_audio
+       from ranked r
+       join grouped g on g.group_key = r.group_key
+       where r.rn = 1
+         and (@hasAudio is null or g.group_has_audio = @hasAudio)
+         and (@cursorTs is null or
+           coalesce(g.group_last_ts, 0) < @cursorTs or
+           (coalesce(g.group_last_ts, 0) = @cursorTs and r.jid > @cursorJid))
+       order by coalesce(g.group_last_ts, 0) desc, r.jid asc
        limit @limit`,
     )
     .all({
       accountId: ctx.accountId,
       cursorTs: cursor ? cursor.ts : null,
       cursorJid: cursor?.jid ?? "",
-      hasAudio: filters.hasAudio ? 1 : 0,
+      hasAudio: filters.hasAudio === undefined ? null : filters.hasAudio ? 1 : 0,
       query: query ? `%${query}%` : "",
       limit: limit + 1,
       ...fragment.params,
-    }) as Array<ChatRow & { has_audio: number }>;
+    }) as Array<
+      ChatRow & {
+        group_key: string;
+        is_canonical: number;
+        group_last_ts: number | null;
+        group_has_audio: number;
+      }
+    >;
   const last = rows[limit - 1];
   return page(
     rows.map((row) =>
       chatView(
-        row,
-        row.has_audio === 1,
+        { ...row, last_message_ts: row.group_last_ts },
+        row.group_has_audio === 1,
         directory
           ? getDirectoryEntityByJid(ctx.db, ctx.accountId, row.jid)
           : undefined,
@@ -169,7 +212,7 @@ export function listChats(
     ),
     limit,
     last
-      ? encodeCursor({ ts: last.last_message_ts ?? 0, jid: last.jid })
+      ? encodeCursor({ ts: last.group_last_ts ?? 0, jid: last.jid })
       : null,
   );
 }
@@ -598,17 +641,22 @@ export function chatStats(
   const entity = directoryTablesAvailable(ctx.db)
     ? getDirectoryEntityByJid(ctx.db, ctx.accountId, chat.jid)
     : undefined;
+  // One contact may hold messages under both its LID and phone JID
+  // (history arrives under one, live traffic under the other): count them
+  // together, as the dashboard's chatMessageStats already does.
+  const aliases = listEquivalentJids(ctx.db, ctx.accountId, chat.jid);
   const row =
     ctx.db
-      .prepare<[string, string], Record<string, number | null>>(
+      .prepare<string[], Record<string, number | null>>(
         `select count(*) as messages,
           sum(case when message_type = 'audio' then 1 else 0 end) as audio,
           sum(case when has_media = 1 then 1 else 0 end) as media,
           min(timestamp) as first_message_ts,
           max(timestamp) as last_message_ts
-       from messages where account_id = ? and chat_jid = ?`,
+       from messages where account_id = ?
+         and chat_jid in (${aliases.map(() => "?").join(", ")})`,
       )
-      .get(ctx.accountId, chat.jid) ?? {};
+      .get(ctx.accountId, ...aliases) ?? {};
   return {
     chatJid: chat.jid,
     name:

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { WAMessage } from "baileys";
+import type { WASocket, WAMessage } from "baileys";
 import type * as BaileysNS from "baileys";
 import { ingestMessage, type IngestDeps } from "../src/baileys/ingest.js";
 import {
@@ -176,6 +176,79 @@ describe("downloadStoredMedia", () => {
   });
 });
 
+describe("downloadStoredMedia reuploadRequest (ADR-0039)", () => {
+  function fakeSocket(): WASocket {
+    return {
+      updateMediaMessage: vi.fn(async (message: WAMessage) => message),
+    } as unknown as WASocket;
+  }
+
+  it("wires reuploadRequest to sock.updateMediaMessage when a socket is given — the RHSS expired-media case", async () => {
+    const deps = setupDeps({ privacy: { store_media: true } });
+    upsertChat(deps.db, { accountId: ACCOUNT, jid: CHAT_A });
+    setChatAllowed(deps.db, ACCOUNT, CHAT_A, true);
+    ingestMessage(deps, audioMessage("M1", CHAT_A, Uint8Array.from([9, 9])));
+    const row = getMessage(deps.db, ACCOUNT, CHAT_A, "M1");
+    if (!row) throw new Error("expected message row");
+    const sock = fakeSocket();
+    baileysMock.downloadMediaMessage.mockResolvedValue(
+      Readable.from([Buffer.from("audio bytes")]),
+    );
+
+    const attempted = await downloadStoredMedia(row, deps, sock);
+    expect(attempted).toBe(true);
+
+    const ctx = baileysMock.downloadMediaMessage.mock.calls[0]?.[3] as
+      | { reuploadRequest: (m: WAMessage) => unknown }
+      | undefined;
+    expect(ctx).toBeDefined();
+    const dummy = { key: { id: "X" } } as unknown as WAMessage;
+    await ctx?.reuploadRequest(dummy);
+    expect(sock.updateMediaMessage).toHaveBeenCalledWith(dummy);
+  });
+
+  it("omits the reupload context when no socket is given, same as before ADR-0039", async () => {
+    const deps = setupDeps({ privacy: { store_media: true } });
+    upsertChat(deps.db, { accountId: ACCOUNT, jid: CHAT_A });
+    setChatAllowed(deps.db, ACCOUNT, CHAT_A, true);
+    ingestMessage(deps, audioMessage("M1", CHAT_A, Uint8Array.from([1])));
+    const row = getMessage(deps.db, ACCOUNT, CHAT_A, "M1");
+    if (!row) throw new Error("expected message row");
+    baileysMock.downloadMediaMessage.mockResolvedValue(
+      Readable.from([Buffer.from("audio bytes")]),
+    );
+
+    await downloadStoredMedia(row, deps);
+
+    expect(baileysMock.downloadMediaMessage.mock.calls[0]?.[3]).toBeUndefined();
+  });
+
+  it("strips the mmg.whatsapp.net access token from a failed retry before it is stored", async () => {
+    const deps = setupDeps({
+      privacy: { store_media: true },
+      media: { max_attempts: 1 },
+    });
+    upsertChat(deps.db, { accountId: ACCOUNT, jid: CHAT_A });
+    setChatAllowed(deps.db, ACCOUNT, CHAT_A, true);
+    ingestMessage(deps, audioMessage("M1", CHAT_A, Uint8Array.from([1])));
+    const row = getMessage(deps.db, ACCOUNT, CHAT_A, "M1");
+    if (!row) throw new Error("expected message row");
+    baileysMock.downloadMediaMessage.mockRejectedValue(
+      new Error(
+        "Failed to fetch stream from https://mmg.whatsapp.net/v/t62/abc?ccb=9-4&oh=SECRET_TOKEN&oe=6720",
+      ),
+    );
+
+    await downloadStoredMedia(row, deps, fakeSocket());
+
+    const attachment = getAttachment(deps.db, ACCOUNT, CHAT_A, "M1");
+    expect(attachment?.download_last_error).toBe(
+      "Failed to fetch stream from https://mmg.whatsapp.net/v/t62/abc",
+    );
+    expect(attachment?.download_last_error).not.toContain("SECRET_TOKEN");
+  });
+});
+
 async function waitFor(
   predicate: () => boolean,
   timeoutMs = 1_000,
@@ -211,6 +284,37 @@ describe("MediaBackfillCoordinator", () => {
     expect(finished?.attachments_found).toBe(2);
     expect(finished?.attachments_downloaded).toBe(2);
     expect(finished?.attachments_failed).toBe(0);
+  });
+
+  it("forwards reuploadRequest from the socket accessor during a backfill run (ADR-0039)", async () => {
+    const deps = setupDeps({ privacy: { store_media: true } });
+    upsertChat(deps.db, { accountId: ACCOUNT, jid: CHAT_A });
+    setChatAllowed(deps.db, ACCOUNT, CHAT_A, true);
+    ingestMessage(deps, audioMessage("M1", CHAT_A, Uint8Array.from([1])));
+    baileysMock.downloadMediaMessage.mockResolvedValue(
+      Readable.from([Buffer.from("audio bytes")]),
+    );
+    const updateMediaMessage = vi.fn(async (message: WAMessage) => message);
+    const fakeSock = { updateMediaMessage } as unknown as WASocket;
+
+    // Accessor, not a captured value (ADR-0039): the coordinator must read it
+    // at download time, not at construction time.
+    const coordinator = new MediaBackfillCoordinator(deps, {
+      socket: () => fakeSock,
+    });
+    const { job } = await coordinator.start(CHAT_A);
+    await waitFor(() => {
+      const current = getMediaBackfillJob(deps.db, ACCOUNT, job.id);
+      return current?.status === "completed";
+    });
+
+    const ctx = baileysMock.downloadMediaMessage.mock.calls[0]?.[3] as
+      | { reuploadRequest: (m: WAMessage) => unknown }
+      | undefined;
+    expect(ctx).toBeDefined();
+    const dummy = { key: { id: "X" } } as unknown as WAMessage;
+    await ctx?.reuploadRequest(dummy);
+    expect(updateMediaMessage).toHaveBeenCalledWith(dummy);
   });
 
   it("processes every allowed chat one at a time on a bulk run", async () => {

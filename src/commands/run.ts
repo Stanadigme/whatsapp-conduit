@@ -170,7 +170,9 @@ export async function runRun(
     transport: historyTransport,
     logger: log,
   });
-  const mediaBackfill = new MediaBackfillCoordinator(ingestDeps);
+  // Constructed after `connection` below so its socket accessor can see the
+  // live Baileys socket, including across reconnects (ADR-0039).
+  let mediaBackfill: MediaBackfillCoordinator;
 
   log.info(
     {
@@ -498,7 +500,7 @@ export async function runRun(
           ),
         onStored: (message, stored, classification) =>
           history.onStoredResult(stored, classification, message.key.remoteJid ?? undefined, message.key.id ?? undefined),
-        onError: () => history.onStorageError(),
+        onError: (ctx) => history.onStorageError(ctx),
       });
     };
     if (handoff?.ingestionOptions) {
@@ -510,7 +512,7 @@ export async function runRun(
         );
       handoff.ingestionOptions.onStored = (message, stored, classification) =>
         history.onStoredResult(stored, classification, message.key.remoteJid ?? undefined, message.key.id ?? undefined);
-      handoff.ingestionOptions.onError = () => history.onStorageError();
+      handoff.ingestionOptions.onError = (ctx) => history.onStorageError(ctx);
     }
     const handlers: ConnectionHandlers = {
       onConnecting() {
@@ -588,6 +590,9 @@ export async function runRun(
         fetchVersion: createVersionResolver(config, log),
         handlers,
       });
+    mediaBackfill = new MediaBackfillCoordinator(ingestDeps, {
+      socket: () => connection.socket(),
+    });
     if (handoff) {
       connection.promote(handlers);
       const sock = connection.socket();

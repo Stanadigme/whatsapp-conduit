@@ -319,10 +319,6 @@ export function createPostgresReader(
       else if (filters.kind === "contact") where.push("not c.is_group and not c.is_status");
       const audio = `exists(select 1 from messages m
         where m.account_id = c.account_id and m.chat_jid = c.jid and m.message_type = 'audio')`;
-      if (filters.hasAudio !== undefined) {
-        values.push(filters.hasAudio);
-        where.push(`${audio} = $${String(values.length)}`);
-      }
       const query = filters.query?.trim();
       if (query) {
         values.push(`%${query}%`);
@@ -332,30 +328,69 @@ export function createPostgresReader(
         where.push(`(${["c.name", "c.push_name", "c.jid", DIRECTORY_NAME_COALESCE,
           "coalesce(ec.push_name, ea.push_name)"].map(like).join(" or ")})`);
       }
+
+      // Same one-entity-per-conversation collapse as the SQLite reader
+      // (mcp/read.ts's listChats) and dashboard/chats.ts's listDashboardChats
+      // (ST2, backlog/phases/2026-09-18-identite-unique-par-conversation.md):
+      // grouping by the entity behind `directory_aliases.canonical_jid` runs
+      // inside the query, before the cursor comparison and `limit`, so a page
+      // can never contain the same entity twice or drop it for lack of room.
+      // `hasAudio` filters on the grouped, alias-summed value for the same
+      // reason.
+      values.push(filters.hasAudio ?? null);
+      const hasAudioParam = `$${String(values.length)}`;
       values.push(cursor?.ts ?? null, cursor?.jid ?? "");
       const cursorTsParam = `$${String(values.length - 1)}`;
       const cursorJidParam = `$${String(values.length)}`;
-      where.push(`(${cursorTsParam}::bigint is null or
-        coalesce(c.last_message_ts, 0) < ${cursorTsParam} or
-        (coalesce(c.last_message_ts, 0) = ${cursorTsParam} and c.jid > ${cursorJidParam}))`);
       values.push(limit + 1);
       const limitParam = `$${String(values.length)}`;
       const rows = await many<
-        PgChatRow & { has_audio: boolean; dir_name: string | null; dir_push_name: string | null }
+        PgChatRow & {
+          group_last_ts: string | null;
+          group_has_audio: boolean;
+          dir_name: string | null;
+          dir_push_name: string | null;
+        }
       >(
-        `select c.*,
-           ${audio} as has_audio,
-           ${DIRECTORY_NAME_COALESCE} as dir_name,
-           coalesce(ec.push_name, ea.push_name) as dir_push_name
-         from chats c
-         left join directory_entities ec
-                on ec.account_id = c.account_id and ec.canonical_jid = c.jid
-         left join directory_aliases da
-                on da.account_id = c.account_id and da.alias_jid = c.jid
-         left join directory_entities ea
-                on ea.account_id = da.account_id and ea.canonical_jid = da.canonical_jid
-         where ${where.join(" and ")}
-         order by coalesce(c.last_message_ts, 0) desc, c.jid asc
+        `with visible as (
+           select c.*,
+             ${audio} as has_audio_row,
+             coalesce(da.canonical_jid, c.jid) as group_key,
+             case when da.alias_type = 'canonical' then 1 else 0 end as is_canonical,
+             ${DIRECTORY_NAME_COALESCE} as dir_name,
+             coalesce(ec.push_name, ea.push_name) as dir_push_name
+           from chats c
+           left join directory_entities ec
+                  on ec.account_id = c.account_id and ec.canonical_jid = c.jid
+           left join directory_aliases da
+                  on da.account_id = c.account_id and da.alias_jid = c.jid
+           left join directory_entities ea
+                  on ea.account_id = da.account_id and ea.canonical_jid = da.canonical_jid
+           where ${where.join(" and ")}
+         ),
+         grouped as (
+           select group_key,
+                  max(last_message_ts) as group_last_ts,
+                  bool_or(has_audio_row) as group_has_audio
+           from visible
+           group by group_key
+         ),
+         ranked as (
+           select v.*, row_number() over (
+             partition by v.group_key
+             order by v.is_canonical desc, coalesce(v.last_message_ts, 0) desc, v.jid asc
+           ) as rn
+           from visible v
+         )
+         select r.*, g.group_last_ts, g.group_has_audio
+         from ranked r
+         join grouped g on g.group_key = r.group_key
+         where r.rn = 1
+           and (${hasAudioParam}::boolean is null or g.group_has_audio = ${hasAudioParam})
+           and (${cursorTsParam}::bigint is null or
+             coalesce(g.group_last_ts, 0) < ${cursorTsParam} or
+             (coalesce(g.group_last_ts, 0) = ${cursorTsParam} and r.jid > ${cursorJidParam}))
+         order by coalesce(g.group_last_ts, 0) desc, r.jid asc
          limit ${limitParam}`,
         values,
       );
@@ -367,13 +402,13 @@ export function createPostgresReader(
         pushName: row.dir_push_name ?? row.push_name,
         isGroup: row.is_group,
         isStatus: row.is_status,
-        lastMessageTs: row.last_message_ts === null ? null : Number(row.last_message_ts),
-        hasAudio: row.has_audio,
+        lastMessageTs: row.group_last_ts === null ? null : Number(row.group_last_ts),
+        hasAudio: row.group_has_audio,
       }));
       return page(
         items,
         limit,
-        last ? encodeCursor({ ts: Number(last.last_message_ts ?? 0), jid: last.jid }) : null,
+        last ? encodeCursor({ ts: Number(last.group_last_ts ?? 0), jid: last.jid }) : null,
       );
     },
 
@@ -413,24 +448,55 @@ export function createPostgresReader(
       const limit = Math.min(filter.limit ?? 200, 200);
       values.push(limit);
       const limitParam = `$${values.length}`;
+      // Same one-entity-per-conversation collapse as listChats above: group
+      // by the entity behind `directory_aliases.canonical_jid` before
+      // `limit`, so a contact split across a LID and a phone-JID chat row
+      // does not consume two of the 200 slots or appear twice.
       const rows = await many<
-        PgChatRow & { dir_name: string | null; dir_push_name: string | null }
+        PgChatRow & {
+          group_last_ts: string | null;
+          dir_name: string | null;
+          dir_push_name: string | null;
+        }
       >(
-        `select c.*, ${DIRECTORY_NAME_COALESCE} as dir_name,
-           coalesce(ec.push_name, ea.push_name) as dir_push_name
-         from chats c
-         left join directory_entities ec
-                on ec.account_id = c.account_id and ec.canonical_jid = c.jid
-         left join directory_aliases da
-                on da.account_id = c.account_id and da.alias_jid = c.jid
-         left join directory_entities ea
-                on ea.account_id = da.account_id and ea.canonical_jid = da.canonical_jid
-         where ${where.join(" and ")}
-         order by coalesce(c.last_message_ts, 0) desc, c.jid asc
+        `with visible as (
+           select c.*,
+             coalesce(da.canonical_jid, c.jid) as group_key,
+             case when da.alias_type = 'canonical' then 1 else 0 end as is_canonical,
+             ${DIRECTORY_NAME_COALESCE} as dir_name,
+             coalesce(ec.push_name, ea.push_name) as dir_push_name
+           from chats c
+           left join directory_entities ec
+                  on ec.account_id = c.account_id and ec.canonical_jid = c.jid
+           left join directory_aliases da
+                  on da.account_id = c.account_id and da.alias_jid = c.jid
+           left join directory_entities ea
+                  on ea.account_id = da.account_id and ea.canonical_jid = da.canonical_jid
+           where ${where.join(" and ")}
+         ),
+         grouped as (
+           select group_key, max(last_message_ts) as group_last_ts
+           from visible
+           group by group_key
+         ),
+         ranked as (
+           select v.*, row_number() over (
+             partition by v.group_key
+             order by v.is_canonical desc, coalesce(v.last_message_ts, 0) desc, v.jid asc
+           ) as rn
+           from visible v
+         )
+         select r.*, g.group_last_ts
+         from ranked r
+         join grouped g on g.group_key = r.group_key
+         where r.rn = 1
+         order by coalesce(g.group_last_ts, 0) desc, r.jid asc
          limit ${limitParam}`,
         values,
       );
-      return rows.map(toDashboardChat);
+      return rows.map((row) =>
+        toDashboardChat({ ...row, last_message_ts: row.group_last_ts }),
+      );
     },
 
     async searchContacts(query, limitInput) {

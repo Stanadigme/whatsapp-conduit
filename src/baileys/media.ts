@@ -6,6 +6,7 @@ import { pipeline } from "node:stream/promises";
 import {
   downloadMediaMessage,
   normalizeMessageContent,
+  type WASocket,
   type WAMessage,
 } from "baileys";
 import type { NormalizedMessage } from "../ingest/types.js";
@@ -17,7 +18,57 @@ import {
 import type { IngestDeps } from "./ingest.js";
 
 /** Give up on a stalled media fetch rather than hold the slot forever. */
-const DOWNLOAD_TIMEOUT_MS = 60_000;
+export const DOWNLOAD_TIMEOUT_MS = 60_000;
+
+/**
+ * Extra budget granted only when a media-retry round trip (ADR-0039) is on
+ * the table: Baileys' `sock.updateMediaMessage` waits on a
+ * `messages.media-update` event through `bindWaitForEvent`/`promiseTimeout`
+ * called with no `ms` argument (baileys/lib/Utils/generics.js) — that wait
+ * has no timeout of its own. `AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)` only
+ * bounds the initial stream fetch; without this second bound a phone that
+ * never answers the retry would hang the fetch forever.
+ */
+export const REUPLOAD_TIMEOUT_MS = 60_000;
+
+/**
+ * Bounds the whole `downloadMediaMessage` call — initial attempt plus any
+ * media-retry round trip — so it can never hang past `ms` regardless of what
+ * Baileys itself does or does not time out internally. Exported so
+ * `media-backfill.ts` shares the same bound instead of a second copy.
+ */
+export async function withOverallTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`media download timed out after ${String(ms)}ms`)),
+      ms,
+    );
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * `downloadMediaMessage` folds the full mmg.whatsapp.net URL — query string
+ * included — straight into its error message (Baileys,
+ * `messages-media.js`: `` `Failed to fetch stream from ${url}` ``), and that
+ * URL carries a live `oh=` access token. The message-reupload retry can
+ * throw its own Boom with a device-reported reason, no URL involved, but is
+ * sanitized the same way for uniformity. Both eventually reach
+ * `download_last_error` (`src/ingest/audio.ts`), which the dashboard reads
+ * back — strip the query string and keep only the first line before that
+ * happens.
+ */
+export function sanitizeMediaError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const firstLine = message.split("\n")[0] ?? message;
+  const withoutQuery = firstLine.split("?")[0] ?? firstLine;
+  return new Error(withoutQuery);
+}
 
 export function mediaNode(msg: WAMessage): {
   mediaType: "audio" | "image" | "video" | "document" | "sticker";
@@ -56,13 +107,15 @@ export function stringField(
  * `downloadMediaMessage` is a read: it decrypts the media stream the message
  * already points at.
  *
- * No `reuploadRequest` is wired in on purpose. Baileys would use it to recover
- * media that has expired server-side, but doing so puts a media-retry node on
- * the wire. That is not one of the calls the observe-only invariants forbid,
- * and it is invisible to the conversation, but it is still an outbound action
- * on the client's account — so it stays off until someone decides otherwise.
- * The cost is that media expired on WhatsApp's servers is simply not
- * recovered; a voice note ingested live is unaffected.
+ * `sock`, when given, wires Baileys' `reuploadRequest` (ADR-0039): a media
+ * whose server-side copy has expired triggers a media-retry node asking the
+ * phone to reupload it, then retries the download once. It is an outbound
+ * action on the client's account, but it sends nothing to any interlocutor,
+ * marks nothing read, and sets no presence — see ADR-0039 for why this does
+ * not touch invariants 1-3. `sock` is optional because it is not part of
+ * `IngestDeps` (the socket is reconnect-scoped, obtained by the caller); a
+ * caller with no live socket in scope still gets a plain download, exactly
+ * today's behaviour.
  *
  * Streamed to a scratch file rather than buffered: a reconnection delivers a
  * burst of offline messages at once, and holding every payload in memory to
@@ -72,6 +125,7 @@ export async function downloadAudioIfEnabled(
   msg: WAMessage,
   normalized: NormalizedMessage,
   deps: IngestDeps,
+  sock?: WASocket,
 ): Promise<void> {
   const media = mediaNode(msg);
   if (!media) return;
@@ -83,14 +137,32 @@ export async function downloadAudioIfEnabled(
     return;
   }
 
+  const ctx = sock
+    ? {
+        logger: deps.logger,
+        reuploadRequest: (message: WAMessage) => sock.updateMediaMessage(message),
+      }
+    : undefined;
+  const timeoutMs = ctx
+    ? DOWNLOAD_TIMEOUT_MS + REUPLOAD_TIMEOUT_MS
+    : DOWNLOAD_TIMEOUT_MS;
+
   const source: AudioSource = {
     mediaType: media.mediaType,
     mimeType: stringField(node, "mimetype"),
     fileName: stringField(node, "fileName"),
     expectedBytes: toByteCount(node.fileLength),
     fetch: async () => {
-      const stream = await downloadMediaMessage(msg, "stream", {
-        options: { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) },
+      const stream = await withOverallTimeout(
+        downloadMediaMessage(
+          msg,
+          "stream",
+          { options: { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) } },
+          ctx,
+        ),
+        timeoutMs,
+      ).catch((error: unknown) => {
+        throw sanitizeMediaError(error);
       });
       await mkdir(deps.config.paths.mediaDir, { recursive: true });
       const scratch = join(deps.config.paths.mediaDir, `.${randomUUID()}.part`);

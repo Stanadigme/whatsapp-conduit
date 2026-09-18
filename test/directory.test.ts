@@ -113,6 +113,62 @@ describe("DirectorySync", () => {
     db.close();
   });
 
+  it("repairs a chat policy already split across aliases (migration 0014)", () => {
+    // Same shape as the ST1 constat: a LID chat already authorized, a phone
+    // JID chat left at its discovered default, and the directory already
+    // knowing both aliases belong to the same entity — the state a database
+    // could be in before this migration existed.
+    const db = openDb(":memory:", { migrate: false });
+    const migrations = loadMigrations();
+    db.exec(
+      "create table if not exists schema_migrations (name text primary key, applied_at integer not null)",
+    );
+    for (const migration of migrations.slice(0, 6)) {
+      db.exec(migration.sql);
+      db.prepare(
+        "insert into schema_migrations (name, applied_at) values (?, ?)",
+      ).run(migration.name, 1);
+    }
+    db.prepare(
+      "insert into accounts (id, created_at, updated_at) values ('acct', 1, 1)",
+    ).run();
+    db.prepare(
+      `insert into chats
+         (account_id, jid, is_allowed, is_blocked, discovered_at, updated_at)
+       values ('acct', '9001@lid', 1, 0, 1, 1),
+              ('acct', '491234@s.whatsapp.net', 0, 0, 1, 1)`,
+    ).run();
+    db.prepare(
+      `insert into directory_entities
+         (account_id, entity_type, canonical_jid, first_seen_at, updated_at)
+       values ('acct', 'contact', '491234@s.whatsapp.net', 1, 1)`,
+    ).run();
+    const entity = db
+      .prepare<[string], { id: number }>(
+        "select id from directory_entities where canonical_jid = ?",
+      )
+      .get("491234@s.whatsapp.net");
+    if (!entity) throw new Error("fixture entity is missing");
+    db.prepare(
+      `insert into directory_aliases
+         (account_id, alias_jid, entity_id, alias_type, first_seen_at, updated_at)
+       values ('acct', '491234@s.whatsapp.net', @id, 'canonical', 1, 1),
+              ('acct', '9001@lid', @id, 'lid', 1, 1)`,
+    ).run({ id: entity.id });
+
+    runMigrations(db);
+
+    expect(
+      db
+        .prepare("select jid, is_allowed, is_blocked from chats order by jid")
+        .all(),
+    ).toEqual([
+      { jid: "491234@s.whatsapp.net", is_allowed: 1, is_blocked: 0 },
+      { jid: "9001@lid", is_allowed: 1, is_blocked: 0 },
+    ]);
+    db.close();
+  });
+
   it("persists group names, members, roles, and known contact metadata", async () => {
     const { db, transport, directory } = setup();
     const report = await directory.syncJoinedGroups();

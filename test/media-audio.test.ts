@@ -1,9 +1,12 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
-import type { WAMessage } from "baileys";
+import { Readable } from "node:stream";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { WASocket, WAMessage } from "baileys";
+import type * as BaileysNS from "baileys";
 import { ingestMessage, type IngestDeps } from "../src/baileys/ingest.js";
+import { downloadAudioIfEnabled } from "../src/baileys/media.js";
 import { resolveConfig, type Config } from "../src/config.js";
 import { openDb } from "../src/db/index.js";
 import {
@@ -24,6 +27,12 @@ const gcsMock = vi.hoisted(() => ({
   ),
 }));
 vi.mock("../src/db/gcs.js", () => gcsMock);
+
+const baileysMock = vi.hoisted(() => ({ downloadMediaMessage: vi.fn() }));
+vi.mock("baileys", async (importOriginal) => {
+  const actual = await importOriginal<typeof BaileysNS>();
+  return { ...actual, downloadMediaMessage: baileysMock.downloadMediaMessage };
+});
 
 const CHAT = "c@s.whatsapp.net";
 
@@ -87,6 +96,10 @@ function source(root: string, payload = "audio payload") {
     },
   };
 }
+
+beforeEach(() => {
+  baileysMock.downloadMediaMessage.mockReset();
+});
 
 describe("shared audio persistence", () => {
   it("downloads once, content-addresses the file, and records the row", async () => {
@@ -305,6 +318,90 @@ describe("GCS upload (phase 3, ADR-0033)", () => {
     expect(attachment?.gcs_uploaded_at).toBeNull();
     // The local, already-downloaded copy is unaffected by a failed upload.
     expect(attachment?.downloaded_at).toEqual(expect.any(Number));
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+});
+
+describe("downloadAudioIfEnabled reuploadRequest (ADR-0039)", () => {
+  function fakeSocket(): WASocket {
+    return {
+      updateMediaMessage: vi.fn(async (message: WAMessage) => message),
+    } as unknown as WASocket;
+  }
+
+  it("passes a reuploadRequest bound to sock.updateMediaMessage when a socket is given", async () => {
+    const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
+    const { deps, stored } = setup(root, { privacy: { store_media: true } });
+    const sock = fakeSocket();
+    baileysMock.downloadMediaMessage.mockResolvedValue(
+      Readable.from([Buffer.from("audio bytes")]),
+    );
+
+    await downloadAudioIfEnabled(
+      { key: { remoteJid: CHAT, fromMe: false, id: "AUDIO1" }, message: { audioMessage: { seconds: 3 } } } as WAMessage,
+      stored,
+      deps,
+      sock,
+    );
+
+    expect(baileysMock.downloadMediaMessage).toHaveBeenCalledTimes(1);
+    const ctx = baileysMock.downloadMediaMessage.mock.calls[0]?.[3] as
+      | { reuploadRequest: (m: WAMessage) => unknown; logger: unknown }
+      | undefined;
+    expect(ctx).toBeDefined();
+    const dummy = { key: { id: "X" } } as unknown as WAMessage;
+    await ctx?.reuploadRequest(dummy);
+    expect(sock.updateMediaMessage).toHaveBeenCalledWith(dummy);
+
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("omits the reupload context entirely when no socket is given", async () => {
+    const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
+    const { deps, stored } = setup(root, { privacy: { store_media: true } });
+    baileysMock.downloadMediaMessage.mockResolvedValue(
+      Readable.from([Buffer.from("audio bytes")]),
+    );
+
+    await downloadAudioIfEnabled(
+      { key: { remoteJid: CHAT, fromMe: false, id: "AUDIO1" }, message: { audioMessage: { seconds: 3 } } } as WAMessage,
+      stored,
+      deps,
+    );
+
+    expect(baileysMock.downloadMediaMessage).toHaveBeenCalledTimes(1);
+    expect(baileysMock.downloadMediaMessage.mock.calls[0]?.[3]).toBeUndefined();
+
+    deps.db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("strips the mmg.whatsapp.net access token from a failed download before it is stored", async () => {
+    const root = await mkdtemp(join(tmpdir(), "conduit-audio-"));
+    const { deps, stored } = setup(root, {
+      privacy: { store_media: true },
+      media: { max_attempts: 1 },
+    });
+    baileysMock.downloadMediaMessage.mockRejectedValue(
+      new Error(
+        "Failed to fetch stream from https://mmg.whatsapp.net/v/t62/abc?ccb=9-4&oh=SECRET_TOKEN&oe=6720",
+      ),
+    );
+
+    await downloadAudioIfEnabled(
+      { key: { remoteJid: CHAT, fromMe: false, id: "AUDIO1" }, message: { audioMessage: { seconds: 3 } } } as WAMessage,
+      stored,
+      deps,
+    );
+
+    const attachment = getAttachment(deps.db, "personal", CHAT, "AUDIO1");
+    expect(attachment?.download_last_error).toBe(
+      "Failed to fetch stream from https://mmg.whatsapp.net/v/t62/abc",
+    );
+    expect(attachment?.download_last_error).not.toContain("SECRET_TOKEN");
+
     deps.db.close();
     await rm(root, { recursive: true, force: true });
   });

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { WASocket } from "baileys";
 import { downloadStoredMedia } from "../baileys/media-backfill.js";
 import type { IngestDeps } from "../baileys/ingest.js";
 import { chatExposureAllowed, exposureScopeFromConfig } from "../db/directory.js";
@@ -19,6 +20,15 @@ import { nowSec } from "../util/time.js";
 export interface MediaBackfillStartResult {
   job: MediaBackfillJobRow;
   reused: boolean;
+}
+
+export interface MediaBackfillCoordinatorOptions {
+  /** Accessor, not a captured value: the daemon's Baileys socket is
+   * reconnect-scoped and may not exist yet when the coordinator is built
+   * (ADR-0039). Absent or returning `undefined` on the whatsmeow transport,
+   * where no Baileys socket exists — behaviour is then unchanged (plain
+   * download, no reupload retry). */
+  socket?: () => WASocket | undefined;
 }
 
 // ponytail: one query per chat, no pagination within a chat. A single
@@ -45,6 +55,7 @@ export class MediaBackfillCoordinator {
 
   constructor(
     private readonly deps: IngestDeps,
+    private readonly options: MediaBackfillCoordinatorOptions = {},
   ) {}
 
   async start(chatJid: string | null): Promise<MediaBackfillStartResult> {
@@ -126,7 +137,7 @@ export class MediaBackfillCoordinator {
         );
         for (const row of candidates) {
           found += 1;
-          await downloadStoredMedia(row, this.deps);
+          await downloadStoredMedia(row, this.deps, this.options.socket?.());
           const attachment = getAttachment(
             db,
             accountId,
