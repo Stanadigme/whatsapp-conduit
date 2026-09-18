@@ -7,6 +7,7 @@ import { timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 
 import type { Config } from "../config.js";
+import { setMcpOAuthPassword } from "../mcp/oauth.js";
 import { dashboardApi, type DashboardContext } from "./api.js";
 import {
   createDashboardSession,
@@ -20,6 +21,7 @@ const INDEX_HTML = `<!doctype html>
 <title>whatsapp-conduit — Configuration</title><link rel="stylesheet" href="/styles.css"></head>
 <body><main><header><h1>whatsapp-conduit</h1><p>Configuration protégée, lecture seule par défaut.</p></header>
 <section class="card" id="access-card"><h2>Accès local</h2><label>Jeton du dashboard <input id="token" type="password" autocomplete="off"></label><button id="connect">Se connecter</button><p id="auth" class="muted"></p></section>
+<!-- oauth-card -->
 <section class="card" id="legacy-pairing-card"><h2>Connexion</h2><p id="pairing-status">Non connecté</p><div id="qr" class="qr" hidden></div><button id="pairing-start">Afficher un QR d’appairage</button><button id="pairing-stop" hidden>Arrêter</button></section>
 <section class="card" id="offline-card"><h2 id="offline-title">Connexion WhatsApp</h2><p id="offline-detail" class="muted">Aucun appareil WhatsApp n’est appairé. Démarrez un appairage pour activer l’ingestion.</p></section>
 <section class="card" id="baileys-link-card"><h2 id="baileys-link-title">Appairage WhatsApp</h2><p id="baileys-link-status" class="muted">Aucune session d’appairage active.</p><button id="baileys-link-start">Démarrer l’appairage</button><img id="baileys-link-qr" class="pairing-qr" alt="QR d’appairage WhatsApp" hidden><p id="baileys-link-description" class="muted">Le QR est éphémère, se renouvelle automatiquement et disparaît dès la fin de la session.</p></section>
@@ -72,6 +74,7 @@ $('refresh').onclick = refresh; $('search').oninput = refresh; $('kind').onchang
 $('dir-refresh').onclick = async () => { const b = $('dir-refresh'); b.disabled = true; $('dir-refresh-status').textContent = 'Rafraîchissement des noms en cours…'; $('dir-refresh-status').className = 'muted'; try { const r = await api('/api/directory/refresh', { method: 'POST' }); $('dir-refresh-status').textContent = 'Noms rafraîchis (' + r.contacts + ' contact(s), ' + r.groups + ' groupe(s)).'; await refresh(); } catch (error) { $('dir-refresh-status').textContent = 'Échec : ' + error.message; $('dir-refresh-status').className = 'error'; } finally { b.disabled = false; } };
 $('stt-save').onclick = saveStt;
 $('privacy-save').onclick = savePrivacy;
+$('oauth-password-save')?.addEventListener('click', async () => { const password = $('oauth-password').value; const confirmation = $('oauth-password-confirmation').value; try { await api('/api/oauth/password', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ password, confirmation }) }); $('oauth-password').value = ''; $('oauth-password-confirmation').value = ''; $('oauth-password-status').textContent = 'Mot de passe mis à jour ; les clients OAuth doivent se reconnecter.'; $('oauth-password-status').className = 'muted'; } catch (error) { $('oauth-password-status').textContent = error.message; $('oauth-password-status').className = 'error'; } });
 $('daemon-restart').onclick = () => { void restartDaemon(); };
 $('stt-check').onclick = async () => { $('stt-check-result').textContent = 'Vérification…'; try { const health = await api('/api/stt/check', { method: 'POST' }); $('stt-check-result').textContent = health.ok ? 'Moteur disponible.' : 'Indisponible : ' + health.detail; $('stt-check-result').className = health.ok ? 'muted' : 'error'; } catch (error) { showError(error); } };
 $('stt-models').onclick = async (event) => { const button = event.target.closest('button[data-model]'); if (!button) return; button.disabled = true; try { await api('/api/stt/models/pull?model=' + encodeURIComponent(button.dataset.model), { method: 'POST' }); await refreshStt(); } catch (error) { button.disabled = false; showError(error); } };
@@ -111,6 +114,16 @@ const DIRECT_INDEX_HTML = INDEX_HTML.replace(
 <div class="conversation-actions"><button id="conversation-older" hidden>Charger les messages plus anciens</button><button id="conversation-refresh">Actualiser</button></div>
 <p id="conversation-status" class="muted"></p></section></main>`,
 );
+
+function directIndexHtml(config: Config): string {
+  if (!config.mcp.http.oauth.enabled) {
+    return DIRECT_INDEX_HTML.replace("<!-- oauth-card -->", "");
+  }
+  return DIRECT_INDEX_HTML.replace(
+    "<!-- oauth-card -->",
+    `<section class="card" id="oauth-card"><h2>Accès MCP OAuth</h2><p class="muted">OAuth activé — issuer : ${config.mcp.http.oauth.issuer}</p><p class="muted">Changer ce mot de passe déconnecte tous les clients OAuth.</p><label>Mot de passe opérateur <input id="oauth-password" type="password" autocomplete="new-password"></label><label>Confirmation <input id="oauth-password-confirmation" type="password" autocomplete="new-password"></label><div class="conversation-actions"><button id="oauth-password-save">Enregistrer</button></div><p id="oauth-password-status" class="muted"></p></section>`,
+  );
+}
 
 /* eslint-disable no-useless-escape -- embedded JavaScript uses escaped HTML quotes. */
 const DIRECT_APP_JS = APP_JS.replace(
@@ -344,7 +357,7 @@ export async function createDashboardServer(
         return send(
           response,
           200,
-          DIRECT_INDEX_HTML,
+          directIndexHtml(config),
           "text/html; charset=utf-8",
           {
             "Set-Cookie": `${DASHBOARD_SESSION_COOKIE}=${createDashboardSession(token)}; Path=/; HttpOnly; SameSite=Strict${config.web.publicOrigin ? "; Secure" : ""}`,
@@ -386,6 +399,70 @@ export async function createDashboardServer(
           response,
           403,
           JSON.stringify({ error: "forbidden" }),
+          "application/json; charset=utf-8",
+        );
+      }
+      if (url.pathname === "/api/oauth/password") {
+        if (request.method !== "POST")
+          return send(
+            response,
+            405,
+            JSON.stringify({ error: "method not allowed" }),
+            "application/json; charset=utf-8",
+          );
+        if (!config.mcp.http.oauth.enabled)
+          return send(
+            response,
+            404,
+            JSON.stringify({ error: "not found" }),
+            "application/json; charset=utf-8",
+          );
+        const form = new URLSearchParams(
+          await (
+            await toRequest(request, origin ?? `http://${config.web.host}`)
+          ).text(),
+        );
+        if (
+          [...form.keys()].some(
+            (key) => key !== "password" && key !== "confirmation",
+          ) ||
+          form.getAll("password").length !== 1 ||
+          form.getAll("confirmation").length !== 1
+        ) {
+          return send(
+            response,
+            400,
+            JSON.stringify({ error: "invalid OAuth password form" }),
+            "application/json; charset=utf-8",
+          );
+        }
+        const password = form.get("password")!;
+        const confirmation = form.get("confirmation")!;
+        if (password.length === 0)
+          return send(
+            response,
+            400,
+            JSON.stringify({ error: "OAuth password must not be empty" }),
+            "application/json; charset=utf-8",
+          );
+        if (password !== confirmation)
+          return send(
+            response,
+            400,
+            JSON.stringify({
+              error: "OAuth password confirmation does not match",
+            }),
+            "application/json; charset=utf-8",
+          );
+        setMcpOAuthPassword(
+          config.mcp.http.tokenFile,
+          password,
+          config.paths.dataDir,
+        );
+        return send(
+          response,
+          200,
+          JSON.stringify({ ok: true }),
           "application/json; charset=utf-8",
         );
       }
