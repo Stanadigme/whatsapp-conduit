@@ -54,6 +54,14 @@ export interface McpHttpConfig {
   port: number;
   /** Owner-only file holding the bearer token; auto-created on first start. */
   tokenFile: string;
+  oauth: McpOAuthConfig;
+}
+
+export interface McpOAuthConfig {
+  /** Enable the built-in OAuth 2.1 authorization server for remote clients. */
+  enabled: boolean;
+  /** Public HTTPS origin of the MCP endpoint, required when OAuth is enabled. */
+  issuer: string | null;
 }
 
 export interface McpConfig {
@@ -443,6 +451,7 @@ export function resolveConfig(
   const mediaRaw = section(raw, "media");
   const mcpRaw = section(raw, "mcp");
   const mcpHttpRaw = section(mcpRaw, "http");
+  const mcpOauthRaw = section(mcpHttpRaw, "oauth");
   const sttRaw = section(raw, "stt");
   const whisperRaw = section(sttRaw, "whisper");
   const webRaw = section(raw, "web");
@@ -599,6 +608,16 @@ export function resolveConfig(
           mcpHttpRaw.token_file,
           join(dataDir, "mcp-http.token"),
         ),
+        oauth: (() => {
+          const enabled = asBool(mcpOauthRaw.enabled, false);
+          const issuer = asHttpsOrigin(mcpOauthRaw.issuer);
+          if (enabled && issuer === null) {
+            throw new Error(
+              "Invalid mcp.http.oauth.issuer: an HTTPS origin is required when OAuth is enabled.",
+            );
+          }
+          return { enabled, issuer };
+        })(),
       },
     },
     stt,
@@ -707,6 +726,10 @@ mcp:
     host: 127.0.0.1
     port: 8766
     token_file: ${join(dataDir, "mcp-http.token")}
+    oauth:
+      enabled: false
+      # Required when enabled; public HTTPS origin without a path.
+      # issuer: https://whatsapp.example.com
 
 stt:
   # Voice-note transcription. Nothing runs until this is explicitly enabled and

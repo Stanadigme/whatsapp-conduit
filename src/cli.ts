@@ -18,7 +18,7 @@ import { runExport } from "./commands/export.js";
 import { runGcsImport } from "./commands/gcs.js";
 import { runInit } from "./commands/init.js";
 import { runLink } from "./commands/link.js";
-import { runMcp } from "./commands/mcp.js";
+import { runMcp, runMcpOAuthSetPassword } from "./commands/mcp.js";
 import { runMessagesList } from "./commands/messages.js";
 import { runOffsetsCommit, runOffsetsShow } from "./commands/offsets.js";
 import { runPostgresImport, runPostgresMigrate } from "./commands/postgres.js";
@@ -172,7 +172,7 @@ export function buildProgram(): Command {
       },
     );
 
-  program
+  const mcp = program
     .command("mcp")
     .description(
       "run the read-only MCP server (stdio by default, or Streamable HTTP with --http)",
@@ -191,6 +191,16 @@ export function buildProgram(): Command {
             ? undefined
             : parsePositiveInt("--port", opts.port),
       });
+    });
+
+  mcp
+    .command("oauth")
+    .description("manage local MCP OAuth")
+    .command("set-password")
+    .description("set the local MCP OAuth operator password from stdin")
+    .action(() => {
+      const globals = program.opts<GlobalOptions>();
+      runMcpOAuthSetPassword({ configPath: globals.config });
     });
 
   program

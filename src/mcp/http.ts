@@ -14,6 +14,7 @@ import { getVersion } from "../version.js";
 import { readRuntimeStatus } from "../runtime-status.js";
 import { createMcpServer } from "./server.js";
 import type { McpContext } from "./types.js";
+import type { McpOAuth } from "./oauth.js";
 
 /**
  * Streamable HTTP transport for the MCP surface (ADR-0002).
@@ -46,6 +47,10 @@ export interface McpHttpServerOptions {
   port: number;
   token: string;
   logger: Logger;
+  /** Built-in OAuth routes and bearer validation; absent keeps bearer-only auth. */
+  oauth?: McpOAuth;
+  /** Public OAuth issuer, used only in the bearer challenge. */
+  oauthIssuer?: string;
 }
 
 export interface RunningMcpHttpServer {
@@ -165,7 +170,7 @@ export function createMcpHttpServer(
   ctx: McpContext,
   options: McpHttpServerOptions,
 ): Server {
-  const { token, logger } = options;
+  const { token, logger, oauth } = options;
   const sessions = new Map<string, Session>();
 
   async function openSession(): Promise<StreamableHTTPServerTransport> {
@@ -216,19 +221,24 @@ export function createMcpHttpServer(
       return;
     }
 
+    if (oauth && await oauth.handle(request, response)) return;
+
     if (url.pathname !== "/mcp") {
       request.resume();
       sendJson(response, 404, { error: "not found" });
       return;
     }
 
-    if (!bearerAccepted(request, token)) {
+    if (!bearerAccepted(request, token) && !oauth?.validAccessToken(request.headers.authorization)) {
       request.resume();
+      const challenge = options.oauthIssuer
+        ? `Bearer resource_metadata="${options.oauthIssuer}/.well-known/oauth-protected-resource"`
+        : "Bearer";
       sendJson(
         response,
         401,
         { error: "unauthorized" },
-        { "WWW-Authenticate": "Bearer" },
+        { "WWW-Authenticate": challenge },
       );
       return;
     }
@@ -283,7 +293,10 @@ export function createMcpHttpServer(
       logger.error(
         {
           err: error instanceof Error ? error.message : "unknown error",
-          path: request.url,
+          path: new URL(
+            request.url ?? "/",
+            `http://${request.headers.host ?? options.host}`,
+          ).pathname,
         },
         "mcp http request failed",
       );

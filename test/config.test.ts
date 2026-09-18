@@ -103,4 +103,33 @@ describe("resolveConfig", () => {
       resolveConfig({ privacy: { observe_only: true, send_enabled: true } }),
     ).toThrow(/mutually|cannot both/i);
   });
+
+  it("requires an HTTPS OAuth issuer when MCP OAuth is enabled", () => {
+    expect(() =>
+      resolveConfig({ mcp: { http: { oauth: { enabled: true } } } }),
+    ).toThrow(/mcp\.http\.oauth\.issuer/i);
+    expect(() =>
+      resolveConfig({
+        mcp: { http: { oauth: { enabled: true, issuer: "http://example.test" } } },
+      }),
+    ).toThrow(/HTTPS origin/i);
+    expect(() =>
+      resolveConfig({
+        mcp: {
+          http: {
+            oauth: { enabled: true, issuer: "https://example.test/not-an-origin" },
+          },
+        },
+      }),
+    ).toThrow(/HTTPS origin/i);
+    expect(
+      resolveConfig({
+        mcp: {
+          http: {
+            oauth: { enabled: true, issuer: "https://whatsapp.example.test" },
+          },
+        },
+      }).mcp.http.oauth,
+    ).toEqual({ enabled: true, issuer: "https://whatsapp.example.test" });
+  });
 });

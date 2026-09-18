@@ -1,4 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { readFileSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { resolveConfigPath, appLogger } from "../runtime.js";
 import {
@@ -7,6 +8,7 @@ import {
   type McpContextHandle,
 } from "../mcp/server.js";
 import { startMcpHttpServer } from "../mcp/http.js";
+import { createMcpOAuth, setMcpOAuthPassword } from "../mcp/oauth.js";
 import { ensureTokenFile } from "../util/token-file.js";
 
 export interface McpOptions {
@@ -17,6 +19,27 @@ export interface McpOptions {
   host?: string | undefined;
   /** HTTP listen port override (defaults to `mcp.http.port`). */
   port?: number | undefined;
+}
+
+export interface McpOAuthSetPasswordOptions {
+  configPath?: string | undefined;
+}
+
+/** Set the local operator password from stdin; never accepts it as an argument. */
+export function runMcpOAuthSetPassword(
+  options: McpOAuthSetPasswordOptions = {},
+): void {
+  const config = loadConfig(resolveConfigPath(options.configPath));
+  if (!config.mcp.http.oauth.enabled) {
+    throw new Error("mcp.http.oauth.enabled must be true before setting its password");
+  }
+  const password = readFileSync(0, "utf8").replace(/\r?\n$/, "");
+  setMcpOAuthPassword(
+    config.mcp.http.tokenFile,
+    password,
+    config.paths.dataDir,
+  );
+  process.stdout.write("MCP OAuth operator password updated.\n");
 }
 
 /** Run the MCP reader and bounded local controls over stdio or HTTP. */
@@ -58,6 +81,14 @@ async function runMcpHttp(
   const port = options.port ?? config.mcp.http.port;
   const logger = appLogger(config);
   const token = ensureTokenFile(config.mcp.http.tokenFile);
+  const oauth = config.mcp.http.oauth.enabled
+    ? createMcpOAuth({
+      issuer: config.mcp.http.oauth.issuer!,
+      dataDir: config.paths.dataDir,
+      tokenFile: config.mcp.http.tokenFile,
+      logger,
+    })
+    : undefined;
 
   if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
     logger.warn(
@@ -71,6 +102,9 @@ async function runMcpHttp(
     port,
     token,
     logger,
+    ...(oauth
+      ? { oauth, oauthIssuer: config.mcp.http.oauth.issuer! }
+      : {}),
   });
   logger.info({ host, port: running.port }, "mcp http server started");
   process.stdout.write(

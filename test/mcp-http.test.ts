@@ -17,6 +17,7 @@ import {
 } from "../src/db/queries.js";
 import { createSqliteReader } from "../src/db/sqlite-reader.js";
 import { createMcpHttpServer } from "../src/mcp/http.js";
+import { createMcpOAuth } from "../src/mcp/oauth.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { McpContext } from "../src/mcp/types.js";
 import { RuntimeStatusWriter } from "../src/runtime-status.js";
@@ -189,6 +190,57 @@ describe("MCP Streamable HTTP transport", () => {
       })
     ).text();
     expect(wrongText).not.toContain(TOKEN);
+  });
+
+  it("publishes OAuth discovery and challenges unauthenticated MCP clients", async () => {
+    const root = mkdtempSync(join(tmpdir(), "wac-mcp-oauth-http-"));
+    const oauth = createMcpOAuth({
+      issuer: "https://whatsapp.example.test",
+      dataDir: root,
+      tokenFile: join(root, "mcp-http.token"),
+      logger: silentLogger(),
+    });
+    const oauthForHttp = {
+      ...oauth,
+      validAccessToken: (authorization: string | undefined) =>
+        authorization === "Bearer oauth-access",
+    };
+    const server = createMcpHttpServer(harness.context, {
+      host: "127.0.0.1",
+      port: 0,
+      token: TOKEN,
+      logger: silentLogger(),
+      oauth: oauthForHttp,
+      oauthIssuer: "https://whatsapp.example.test",
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${port}`;
+    try {
+      const metadata = await fetch(
+        `${baseUrl}/.well-known/oauth-protected-resource`,
+      );
+      expect(metadata.status).toBe(200);
+      expect(await metadata.json()).toMatchObject({
+        resource: "https://whatsapp.example.test/mcp",
+        authorization_servers: ["https://whatsapp.example.test"],
+      });
+      const unauthorized = await fetch(`${baseUrl}/mcp`);
+      expect(unauthorized.headers.get("www-authenticate")).toBe(
+        'Bearer resource_metadata="https://whatsapp.example.test/.well-known/oauth-protected-resource"',
+      );
+      const staticBearer = await fetch(`${baseUrl}/mcp`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(staticBearer.status).toBe(400);
+      const oauthBearer = await fetch(`${baseUrl}/mcp`, {
+        headers: { Authorization: "Bearer oauth-access" },
+      });
+      expect(oauthBearer.status).toBe(400);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("serves a public /health without private data", async () => {
