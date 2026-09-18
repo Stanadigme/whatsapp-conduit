@@ -198,9 +198,9 @@ export function buildProgram(): Command {
     .description("manage local MCP OAuth")
     .command("set-password")
     .description("set the local MCP OAuth operator password from stdin")
-    .action(() => {
+    .action(async () => {
       const globals = program.opts<GlobalOptions>();
-      runMcpOAuthSetPassword({ configPath: globals.config });
+      await runMcpOAuthSetPassword({ configPath: globals.config });
     });
 
   program

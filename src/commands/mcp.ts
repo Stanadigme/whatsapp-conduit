@@ -1,5 +1,4 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { readFileSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { resolveConfigPath, appLogger } from "../runtime.js";
 import {
@@ -25,15 +24,30 @@ export interface McpOAuthSetPasswordOptions {
   configPath?: string | undefined;
 }
 
+/** Read a bounded password stream without assuming file descriptor 0 is blocking. */
+export async function readMcpOAuthPassword(
+  input: AsyncIterable<Buffer | string>,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of input) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > 64 * 1024) throw new Error("OAuth password is too large");
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
+}
+
 /** Set the local operator password from stdin; never accepts it as an argument. */
-export function runMcpOAuthSetPassword(
+export async function runMcpOAuthSetPassword(
   options: McpOAuthSetPasswordOptions = {},
-): void {
+): Promise<void> {
   const config = loadConfig(resolveConfigPath(options.configPath));
   if (!config.mcp.http.oauth.enabled) {
     throw new Error("mcp.http.oauth.enabled must be true before setting its password");
   }
-  const password = readFileSync(0, "utf8").replace(/\r?\n$/, "");
+  const password = await readMcpOAuthPassword(process.stdin);
   setMcpOAuthPassword(
     config.mcp.http.tokenFile,
     password,
