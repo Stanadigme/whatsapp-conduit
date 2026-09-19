@@ -62,7 +62,7 @@ describe("compiled MCP stdio boundary", () => {
         name: "wa_messages_list",
         arguments: {},
       });
-      expect(tools.tools).toHaveLength(13);
+      expect(tools.tools).toHaveLength(23);
       expect(JSON.stringify(result)).toContain("stdio smoke message");
       expect(Buffer.concat(stderr).toString("utf8")).not.toContain(
         "stdio smoke message",

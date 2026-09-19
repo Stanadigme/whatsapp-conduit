@@ -41,19 +41,10 @@ import {
 import { HistoryCoordinator } from "../history/coordinator.js";
 import { MediaBackfillCoordinator } from "../history/media-backfill-coordinator.js";
 import { createVersionResolver } from "../baileys/version.js";
-import { registerWhatsmeowIngestion } from "../whatsmeow/ingest.js";
-import { DirectorySync } from "../whatsmeow/directory.js";
-import { WhatsmeowTransport } from "../whatsmeow/transport.js";
-import { whatsmeowSessionLinked } from "../whatsmeow/session.js";
-import {
-  acquireSessionLock,
-  type SessionLock,
-} from "../whatsmeow/session-lock.js";
 import { RuntimeStatusWriter } from "../runtime-status.js";
 import { runLink, type LinkResult } from "./link.js";
 import { join } from "node:path";
 import {
-  beginMaintenanceOperation,
   completeMaintenanceOperation,
   failMaintenanceOperation,
   maintenanceConfirmation,
@@ -102,6 +93,22 @@ function mediaBackfillStatus(
 }
 
 /**
+ * Resolve the outbox encryption key, or nothing when no snapshot must be
+ * queued: the alpha profile (ADR-0033) writes the client database directly, and
+ * the beta-profile replay queue is opt-in (`persistence.outbox.enabled`) since
+ * no forwarder drains it yet. Returning `undefined` also means no `outbox.key`
+ * file is created. Call after configurePostgresProjection().
+ */
+function resolveOutboxKey(
+  config: ReturnType<typeof loadConfig>,
+): Buffer | undefined {
+  if (!config.persistence.outbox.enabled || postgresProjectionEnabled()) {
+    return undefined;
+  }
+  return ensureOutboxKey(config.paths.outboxKey);
+}
+
+/**
  * Run the foreground observe-only sync daemon: connect, reconnect on transient
  * drops, and stay alive until SIGINT/SIGTERM. Message ingestion handlers are
  * attached to each socket via the connection's `registerSocket` hook.
@@ -120,10 +127,6 @@ export async function runRun(
   const config = loadConfig(configPath);
   const log = appLogger(config);
 
-  if (config.transport === "whatsmeow") {
-    return runWhatsmeow(config, log, options.signal);
-  }
-
   // A fresh auth state cannot connect by itself. Keep a local control socket
   // open so the authenticated dashboard can ask this same ingestion process to
   // own a QR pairing session (ADR-0026), rather than opening Baileys itself.
@@ -134,12 +137,8 @@ export async function runRun(
   let sessionLock =
     handoff?.sessionLock ?? acquireBaileysSessionLock(config.paths.authDir);
 
-  // Alpha profile (ADR-0033): the client database is written directly, so no
-  // outbox snapshot is queued. Without it, the SQLite/outbox path is unchanged.
   configurePostgresProjection(config, log);
-  const outboxKey = postgresProjectionEnabled()
-    ? undefined
-    : ensureOutboxKey(config.paths.outboxKey);
+  const outboxKey = resolveOutboxKey(config);
   const db = handoff?.db ?? openDb(config.paths.sqlite, { migrate: true });
 
   upsertAccount(db, {
@@ -643,9 +642,7 @@ async function runBaileysWaitingForPairing(
   // The dashboard keeps data maintenance available even before the first
   // linked device exists. The dashboard still speaks only to this local daemon.
   configurePostgresProjection(config, log);
-  const outboxKey = postgresProjectionEnabled()
-    ? undefined
-    : ensureOutboxKey(config.paths.outboxKey);
+  const outboxKey = resolveOutboxKey(config);
   const db = openDb(config.paths.sqlite, { migrate: true });
   const ingestionOptions: BaileysIngestionOptions = {};
   upsertAccount(db, {
@@ -807,409 +804,4 @@ async function runBaileysWaitingForPairing(
         ingestionOptions,
       },
     );
-}
-
-/**
- * Block until the whatsmeow store holds a real linked device, re-checking with
- * a bounded backoff. Resolves `true` once linked, or `false` if the process is
- * asked to stop first. A bare store file left by an interrupted `link` is not a
- * session, so `run` must wait rather than exit — an exiting container under
- * `restart: unless-stopped` becomes a tight crash loop.
- */
-async function waitForLinkedSession(
-  storePath: string,
-  log: ReturnType<typeof appLogger>,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  if (whatsmeowSessionLinked(storePath)) return true;
-  log.info(
-    "no linked whatsmeow device yet; waiting. Run `link --qr` off-host and copy whatsmeow.db into the data dir.",
-  );
-  const backoffMs = [10_000, 30_000, 60_000];
-  let attempt = 0;
-  return new Promise<boolean>((resolve) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const done = (linked: boolean): void => {
-      if (timer) clearTimeout(timer);
-      process.off("SIGINT", onSignal);
-      process.off("SIGTERM", onSignal);
-      signal?.removeEventListener("abort", onAbort);
-      resolve(linked);
-    };
-    const onSignal = (): void => done(false);
-    const onAbort = (): void => done(false);
-    const tick = (): void => {
-      if (whatsmeowSessionLinked(storePath)) {
-        log.info("linked whatsmeow device detected; starting");
-        done(true);
-        return;
-      }
-      const delay =
-        backoffMs[Math.min(attempt, backoffMs.length - 1)] ?? 60_000;
-      attempt += 1;
-      timer = setTimeout(tick, delay);
-    };
-    if (signal?.aborted) {
-      done(false);
-      return;
-    }
-    process.once("SIGINT", onSignal);
-    process.once("SIGTERM", onSignal);
-    signal?.addEventListener("abort", onAbort, { once: true });
-    tick();
-  });
-}
-
-async function runWhatsmeow(
-  config: ReturnType<typeof loadConfig>,
-  log: ReturnType<typeof appLogger>,
-  signal?: AbortSignal,
-): Promise<void> {
-  const store = config.paths.whatsmeowStore;
-  if (!(await waitForLinkedSession(store, log, signal))) {
-    return; // asked to stop before a device was linked
-  }
-
-  let lock: SessionLock;
-  try {
-    lock = acquireSessionLock(store);
-  } catch (error) {
-    log.error(
-      { err: error instanceof Error ? error.message : String(error) },
-      "cannot start ingestion",
-    );
-    process.exitCode = 1;
-    return;
-  }
-
-  configurePostgresProjection(config, log);
-  const db = openDb(config.paths.sqlite, { migrate: true });
-  upsertAccount(db, {
-    id: config.account.name,
-    label: config.account.description ?? null,
-  });
-  recoverInterruptedMaintenanceOperations(db, config.account.name);
-  const transport = new WhatsmeowTransport({
-    store: config.paths.whatsmeowStore,
-    config: config.whatsmeow,
-  });
-  const history = new HistoryCoordinator({
-    db,
-    accountId: config.account.name,
-    transport,
-    logger: log,
-  });
-  const directory = new DirectorySync({
-    db,
-    accountId: config.account.name,
-    logger: log,
-    transport,
-  });
-  directory.register();
-  let transportConnected = false;
-  let pendingDirectoryRebuildOperation: string | null = null;
-  let directoryResyncInFlight = false;
-  // The transport exposes directory reads but not a connection-ready getter.
-  // Serialize reads so a group refresh cannot race a destructive reset.
-  let directorySyncQueue: Promise<void> = Promise.resolve();
-  const syncDirectory = async (selection: {
-    groups: boolean;
-    contacts: boolean;
-  }) => {
-    const task = directorySyncQueue
-      .catch(() => undefined)
-      .then(() => directory.sync(selection));
-    directorySyncQueue = task.then(
-      () => undefined,
-      () => undefined,
-    );
-    return task;
-  };
-
-  const finishDirectoryRebuild = async (operationId: string): Promise<void> => {
-    try {
-      const report = await syncDirectory({ groups: true, contacts: true });
-      markDirectoryRebuildResult(db, config.account.name, null);
-      completeMaintenanceOperation(db, config.account.name, operationId);
-      log.info(
-        { contacts: report.contacts, groups: report.groups },
-        "directory rebuilt after maintenance",
-      );
-    } catch (error) {
-      markDirectoryRebuildResult(
-        db,
-        config.account.name,
-        "directory synchronization failed",
-      );
-      failMaintenanceOperation(
-        db,
-        config.account.name,
-        operationId,
-        "directory_rebuild_failed",
-      );
-      log.warn(
-        { err: error instanceof Error ? error.message : String(error) },
-        "directory maintenance rebuild failed",
-      );
-    } finally {
-      if (pendingDirectoryRebuildOperation === operationId) {
-        pendingDirectoryRebuildOperation = null;
-      }
-    }
-  };
-
-  const executeMaintenanceReset = async (
-    scope: MaintenanceScope,
-    operationId: string,
-  ): Promise<void> => {
-    const rebuildDirectory = scope === "directory" || scope === "all";
-    try {
-      await runMaintenanceOperation({
-        db,
-        accountId: config.account.name,
-        scope,
-        mediaDir: config.paths.mediaDir,
-        operationId,
-        deferCompletion: rebuildDirectory,
-      });
-      if (!rebuildDirectory) return;
-      if (!transportConnected) {
-        pendingDirectoryRebuildOperation = operationId;
-        return;
-      }
-      await finishDirectoryRebuild(operationId);
-    } catch (error) {
-      log.warn(
-        { err: error instanceof Error ? error.message : String(error) },
-        "maintenance reset failed",
-      );
-    }
-  };
-
-  const resumeDirectoryRebuildOnConnect = (): void => {
-    if (pendingDirectoryRebuildOperation) {
-      void finishDirectoryRebuild(pendingDirectoryRebuildOperation);
-      return;
-    }
-    const state = maintenanceState(db, config.account.name);
-    if (!state.directoryRebuildRequired || state.active) return;
-    // A prior daemon may have been interrupted after clearing the directory.
-    // Record this new, non-destructive rebuild phase so the dashboard retains
-    // the same exclusion and progress semantics until the snapshot is stored.
-    const operation = startMaintenanceOperation(
-      db,
-      config.account.name,
-      "directory",
-    );
-    beginMaintenanceOperation(db, config.account.name, operation.id);
-    void finishDirectoryRebuild(operation.id);
-  };
-  const control = new HistoryControlServer(
-    config.paths.controlSocket,
-    async (request) => {
-      if (request.op === "media-backfill.status") {
-        throw new Error("media backfill is not available with whatsmeow");
-      }
-      if (request.op === "maintenance.reset") {
-        if (directoryResyncInFlight) {
-          throw new Error("directory resynchronization is already active");
-        }
-        if (request.confirmation !== maintenanceConfirmation(request.scope)) {
-          throw new Error("invalid maintenance confirmation");
-        }
-        history.cancelForMaintenance();
-        const operation = startMaintenanceOperation(
-          db,
-          config.account.name,
-          request.scope,
-        );
-        void executeMaintenanceReset(request.scope, operation.id);
-        return {
-          maintenance: { operationId: operation.id, status: "queued" },
-        };
-      }
-      if (request.op === "daemon.restart") {
-        if (maintenanceIsActive(db, config.account.name)) {
-          throw new Error("a maintenance operation is already active");
-        }
-        // `shutdown` is a local of the Promise executor below, out of reach
-        // here — SIGTERM reaches the same `onSignal -> shutdown(0)` path,
-        // the one already registered there for a real container stop.
-        setTimeout(() => process.kill(process.pid, "SIGTERM"), 100);
-        return { restarting: { status: "restarting" } };
-      }
-      if (request.op === "directory.resync") {
-        if (maintenanceIsActive(db, config.account.name)) {
-          throw new Error("a maintenance operation is already active");
-        }
-        if (directoryResyncInFlight) {
-          throw new Error("directory resynchronization is already active");
-        }
-        directoryResyncInFlight = true;
-        try {
-          const report = await syncDirectory({ groups: true, contacts: true });
-          return {
-            resynced: { contacts: report.contacts, groups: report.groups },
-          };
-        } finally {
-          directoryResyncInFlight = false;
-        }
-      }
-      if (request.op === "media-backfill.start") {
-        throw new Error("media backfill is not available with whatsmeow");
-      }
-      if (request.op !== "history.start") {
-        throw new Error("Baileys pairing is not available with whatsmeow");
-      }
-      if (maintenanceIsActive(db, config.account.name)) {
-        throw new Error("a maintenance operation is already active");
-      }
-      const chatJid = normalizeJid(request.chat);
-      const chat = getChat(db, config.account.name, chatJid);
-      if (!chat || chat.is_blocked === 1 || chat.is_allowed !== 1) {
-        throw new Error("chat is not available");
-      }
-      if (request.since < 0 || request.since > Math.floor(Date.now() / 1000)) {
-        throw new Error("since must not be in the future");
-      }
-      const result = await history.start(
-        chatJid,
-        request.since,
-        undefined,
-        request.fetchMedia,
-        request.anchor,
-      );
-      return {
-        jobId: result.job.id,
-        status: result.job.status,
-        reused: result.reused,
-      };
-    },
-  );
-  try {
-    await control.start();
-  } catch (error) {
-    db.close();
-    throw error;
-  }
-  history.recoverActive();
-  const refreshGroupDirectory = (): void => {
-    void syncDirectory({ groups: true, contacts: false })
-      .then((report) => {
-        log.debug(
-          { groups: report.groups, members: report.members },
-          "refreshed group directory",
-        );
-      })
-      .catch(() => {
-        log.warn("failed to refresh group directory");
-      });
-  };
-  const runtimeStatus = new RuntimeStatusWriter(config.paths.runtimeStatus, {
-    transport: "whatsmeow",
-    connection: "disconnected",
-    authLinked: whatsmeowSessionLinked(store),
-  });
-  void runtimeStatus.update();
-  registerWhatsmeowIngestion(
-    transport,
-    {
-      db,
-      accountId: config.account.name,
-      config,
-      logger: log,
-      ...(postgresProjectionEnabled()
-        ? {}
-        : { outboxKey: ensureOutboxKey(config.paths.outboxKey) }),
-    },
-    {
-      onEvent: () =>
-        void runtimeStatus.update({
-          lastEventAt: Math.floor(Date.now() / 1000),
-        }),
-      classify: (event) => history.classify(event),
-      onStored: (event, stored, classification) =>
-        history.onStored(event, stored, classification),
-      onError: () => history.onStorageError(),
-    },
-  );
-
-  log.info(
-    {
-      account: config.account.name,
-      transport: "whatsmeow",
-      observeOnly: config.privacy.observeOnly,
-      sendEnabled: config.privacy.sendEnabled,
-      markRead: config.privacy.markRead,
-      includeGroups: config.privacy.includeGroups,
-    },
-    "starting observe-only sync",
-  );
-
-  return new Promise<void>((resolve) => {
-    let shuttingDown = false;
-    const heartbeat = setInterval(
-      () => void runtimeStatus.update(),
-      RUNTIME_STATUS_HEARTBEAT_MS,
-    );
-    const shutdown = (code: number): void => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      log.info("shutting down");
-      clearInterval(heartbeat);
-      void runtimeStatus.update({ connection: "disconnected" });
-      void control
-        .close()
-        .finally(() => transport.stop())
-        .finally(() =>
-          closeDbAfterPostgresProjection(db).catch(() => undefined),
-        )
-        .finally(() => {
-          lock.release();
-          if (code !== 0) process.exitCode = code;
-          resolve();
-        });
-      process.off("SIGINT", onSignal);
-      process.off("SIGTERM", onSignal);
-    };
-    const onSignal = (): void => shutdown(0);
-
-    transport.on("connected", ({ jid }) => {
-      transportConnected = true;
-      const selfJid = normalizeJid(jid);
-      upsertAccount(db, { id: config.account.name, selfJid });
-      resumeDirectoryRebuildOnConnect();
-      refreshGroupDirectory();
-      void runtimeStatus.update({
-        connection: "connected",
-        authLinked: true,
-        lastEventAt: Math.floor(Date.now() / 1000),
-      });
-      log.info({ selfJid, transport: "whatsmeow" }, "connected");
-    });
-    transport.on("disconnected", () => {
-      transportConnected = false;
-      void runtimeStatus.update({
-        connection: "disconnected",
-        lastEventAt: Math.floor(Date.now() / 1000),
-      });
-      if (!shuttingDown) log.warn("whatsmeow connection closed");
-    });
-    transport.on("error", (error) => {
-      log.error(
-        { err: error instanceof Error ? error.message : String(error) },
-        "whatsmeow transport error",
-      );
-    });
-    process.on("SIGINT", onSignal);
-    process.on("SIGTERM", onSignal);
-
-    transport.start().catch((error: unknown) => {
-      log.error(
-        { err: error instanceof Error ? error.message : String(error) },
-        "failed to start whatsmeow connection",
-      );
-      shutdown(1);
-    });
-  });
 }

@@ -97,9 +97,6 @@ describe("local dashboard HTTP API", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "disabled", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -199,7 +196,6 @@ describe("local dashboard HTTP API", () => {
       name: "Équipe produit",
       isGroup: true,
     });
-    const pairing = { status: "waiting_qr" as const, qr: null, error: null };
     const dashboard = await createDashboardServer(config, {
       db,
       reader: createSqliteReader(db, config, accountId),
@@ -207,9 +203,6 @@ describe("local dashboard HTTP API", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing,
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -232,6 +225,15 @@ describe("local dashboard HTTP API", () => {
     expect(staticHtml).toContain("Contacts et groupes");
     expect(staticHtml).toContain("data-requires-connection hidden");
     expect(staticHtml).toContain("Appairage WhatsApp");
+    // ADR-0042: the whatsmeow pairing card is gone, and the footer no longer
+    // claims message content is never displayed (the conversation view shows it).
+    expect(staticHtml).not.toContain("legacy-pairing-card");
+    expect(staticHtml).toContain(
+      "Le JID reste la référence technique.</p>",
+    );
+    expect(staticHtml).not.toContain(
+      "Le contenu des messages n’est jamais affiché ici",
+    );
     expect(staticHtml).not.toContain('id="token"');
     const setCookie = staticResponse.headers.get("set-cookie");
     expect(setCookie).toMatch(
@@ -264,12 +266,6 @@ describe("local dashboard HTTP API", () => {
       headers: { Cookie: sessionCookie ?? "" },
     });
     expect(sessionAuthorized.status).toBe(200);
-
-    const pendingQr = await fetch(`${base}/api/pairing/qr`, {
-      headers: { Cookie: sessionCookie ?? "" },
-    });
-    expect(pendingQr.status).toBe(202);
-    expect(await pendingQr.json()).toEqual({ qr: null, pending: true });
 
     const forgedSession = await fetch(`${base}/api/chats`, {
       headers: { Cookie: `${sessionCookie}x` },
@@ -312,9 +308,6 @@ describe("local dashboard HTTP API", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "disabled", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -404,9 +397,6 @@ describe("local dashboard HTTP API", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "idle", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -489,9 +479,6 @@ describe("local dashboard HTTP API", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "idle", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -582,9 +569,6 @@ describe("local dashboard HTTP API", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "idle", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -708,9 +692,6 @@ describe("local dashboard HTTP API", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "idle", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -754,9 +735,6 @@ describe("local dashboard HTTP API", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "idle", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -800,9 +778,6 @@ describe("group ingestion warning", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "disabled", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),

@@ -105,5 +105,3 @@ export function createLogger(
 
   return destination ? pino(options, destination) : pino(options);
 }
-
-export const redactPathsForTest = REDACT_PATHS;

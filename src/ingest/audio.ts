@@ -23,9 +23,8 @@ import type { NormalizedMessage } from "../ingest/types.js";
  * A transport-independent handle on one audio attachment.
  *
  * `fetch` yields a path rather than a payload on purpose: the size cap has to
- * be enforceable without the whole file resident in memory, and both
- * transports already produce a file — whatsmeow shells out to one, Baileys
- * streams to one.
+ * be enforceable without the whole file resident in memory, and Baileys
+ * already streams the download to a file.
  */
 export interface AudioSource {
   /** WhatsApp normalized media kind; defaults to audio for existing callers. */

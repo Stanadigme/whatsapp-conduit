@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DestinationStream } from "pino";
+import { resolveConfig } from "../src/config.js";
+import { baileysLogger } from "../src/runtime.js";
 import { contentSafeLevel, createLogger } from "../src/util/logging.js";
 
 function captureLogger(logMessageText: boolean) {
@@ -112,5 +114,29 @@ describe("contentSafeLevel", () => {
   it("respects the requested level when message text is enabled", () => {
     expect(contentSafeLevel("debug", true)).toBe("debug");
     expect(contentSafeLevel("info", true)).toBe("info");
+  });
+});
+
+describe("baileysLogger", () => {
+  // Invariant n°6: Baileys logs decrypted content below `warn`, so the
+  // configured level must be clamped, not passed through.
+  it("clamps a verbose baileys_level while message text is disabled", () => {
+    const config = resolveConfig(
+      { logging: { baileys_level: "debug" } },
+      { dataDir: "/data" },
+    );
+    expect(config.logging.baileysLevel).toBe("debug");
+    expect(config.logging.baileysLogMessageText).toBe(false);
+    expect(baileysLogger(config).level).toBe("warn");
+  });
+
+  it("honors the configured level once message text is explicitly allowed", () => {
+    const config = resolveConfig(
+      {
+        logging: { baileys_level: "debug", baileys_log_message_text: true },
+      },
+      { dataDir: "/data" },
+    );
+    expect(baileysLogger(config).level).toBe("debug");
   });
 });

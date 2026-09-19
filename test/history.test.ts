@@ -11,14 +11,19 @@ import {
   upsertChat,
   upsertMessage,
 } from "../src/db/queries.js";
-import { registerWhatsmeowIngestion } from "../src/whatsmeow/ingest.js";
+import {
+  ingestNormalizedResult,
+  type IngestDeps,
+  type IngestionEventClassification,
+} from "../src/baileys/ingest.js";
+import { normalizeJid } from "../src/baileys/jid.js";
+import type { NormalizeResult } from "../src/ingest/types.js";
 import {
   HistoryCoordinator,
   type HistoryCapableTransport,
 } from "../src/history/coordinator.js";
 import type {
   HistoryAnchor,
-  ObserveTransport,
   TransportMessageEvent,
 } from "../src/transport/types.js";
 
@@ -49,7 +54,80 @@ class FakeHistoryTransport extends EventEmitter {
   }
 }
 
-function messageEvent(id: string, timestamp: number): TransportMessageEvent {
+/**
+ * Transport payload these tests feed the coordinator. `TransportMessageEvent`
+ * carries only what the coordinator reads; the identity fields below are what
+ * the ingestion glue of a real adapter normalizes.
+ */
+interface FakeMessageEvent extends TransportMessageEvent {
+  info: TransportMessageEvent["info"] & {
+    sender: string;
+    isFromMe: boolean;
+    isGroup: boolean;
+    pushName: string;
+  };
+}
+
+/**
+ * Stand-in for an adapter's ingestion glue: classify the event, write it
+ * through the shared ingestion path, and report the outcome back to the
+ * coordinator. Only text messages are normalized — that is all these tests
+ * emit.
+ */
+function registerFakeIngestion(
+  transport: EventEmitter,
+  deps: IngestDeps,
+  options: {
+    classify: (event: TransportMessageEvent) => IngestionEventClassification;
+    onStored: (
+      event: TransportMessageEvent,
+      stored: boolean,
+      classification: IngestionEventClassification,
+    ) => void;
+    onError?: () => void;
+  },
+): void {
+  transport.on("message", (event: FakeMessageEvent) => {
+    let classification: IngestionEventClassification | undefined;
+    try {
+      classification = options.classify(event);
+      if (!classification.store) return;
+      const result: NormalizeResult = {
+        action: "store",
+        message: {
+          chatJid: normalizeJid(event.info.chat),
+          messageId: event.info.id,
+          senderJid: event.info.sender ? normalizeJid(event.info.sender) : null,
+          fromMe: event.info.isFromMe,
+          timestamp: event.info.timestamp,
+          messageType: "text",
+          text:
+            typeof event.message.conversation === "string"
+              ? event.message.conversation
+              : null,
+          hasMedia: false,
+          durationS: null,
+          quotedMessageId: null,
+          quotedSenderJid: null,
+          isGroup: event.info.isGroup,
+          isStatus: false,
+          pushName: event.info.pushName || null,
+        },
+      };
+      const stored = ingestNormalizedResult(
+        deps,
+        result,
+        null,
+        classification.source,
+      );
+      options.onStored(event, stored, classification);
+    } catch {
+      if (classification?.source === "history") options.onError?.();
+    }
+  });
+}
+
+function messageEvent(id: string, timestamp: number): FakeMessageEvent {
   return {
     info: {
       id,
@@ -64,10 +142,7 @@ function messageEvent(id: string, timestamp: number): TransportMessageEvent {
   };
 }
 
-function groupMessageEvent(
-  id: string,
-  timestamp: number,
-): TransportMessageEvent {
+function groupMessageEvent(id: string, timestamp: number): FakeMessageEvent {
   return {
     info: {
       id,
@@ -175,7 +250,8 @@ describe("history coordinator", () => {
     }
     const transport = new EqualTimestampTransport();
     const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
-    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification) });
+    registerFakeIngestion(
+      transport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp), onStored: (event, stored, classification) => coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id) });
     transport.emit("connected", { jid: CHAT });
     const started = await coordinator.start(CHAT, 80, 100);
     await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed");
@@ -202,7 +278,8 @@ describe("history coordinator", () => {
     }
     const transport = new CyclicTransport();
     const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
-    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification) });
+    registerFakeIngestion(
+      transport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp), onStored: (event, stored, classification) => coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id) });
     transport.emit("connected", { jid: CHAT });
     const started = await coordinator.start(CHAT, 80, 100);
     await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed");
@@ -220,7 +297,8 @@ describe("history coordinator", () => {
     db.exec("create trigger reject_history before insert on messages when new.message_id = 'M90' begin select raise(abort, 'storage failed'); end");
     const transport = new FakeHistoryTransport();
     const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
-    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification), onError: () => coordinator.onStorageError() });
+    registerFakeIngestion(
+      transport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp), onStored: (event, stored, classification) => coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id), onError: () => coordinator.onStorageError() });
     transport.emit("connected", { jid: CHAT });
     const started = await coordinator.start(CHAT, 80, 100);
     await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "failed");
@@ -228,7 +306,7 @@ describe("history coordinator", () => {
     db.close();
   });
 
-  it("counts a stored whatsmeow message whose event chat has a device suffix", async () => {
+  it("counts a stored message whose event chat has a device suffix", async () => {
     const db = openDb(":memory:", { migrate: true });
     const config = resolveConfig({}, { dataDir: "/data" });
     upsertAccount(db, { id: ACCOUNT, selfJid: CHAT });
@@ -246,7 +324,8 @@ describe("history coordinator", () => {
     }
     const transport = new DeviceJidTransport();
     const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
-    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification), onError: () => coordinator.onStorageError() });
+    registerFakeIngestion(
+      transport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp), onStored: (event, stored, classification) => coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id), onError: () => coordinator.onStorageError() });
     transport.emit("connected", { jid: CHAT });
     const started = await coordinator.start(CHAT, 80, 100);
     await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed");
@@ -274,7 +353,8 @@ describe("history coordinator", () => {
     }
     const transport = new UnknownSenderTransport();
     const coordinator = new HistoryCoordinator({ db, accountId: ACCOUNT, transport: transport as unknown as HistoryCapableTransport, logger: pino({ level: "silent" }) });
-    registerWhatsmeowIngestion(transport as unknown as ObserveTransport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classify(event), onStored: (event, stored, classification) => coordinator.onStored(event, stored, classification), onError: () => coordinator.onStorageError() });
+    registerFakeIngestion(
+      transport, { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) }, { classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp), onStored: (event, stored, classification) => coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id), onError: () => coordinator.onStorageError() });
     transport.emit("connected", { jid: CHAT });
     const started = await coordinator.start(CHAT, 50, 100);
     await waitFor(() => getHistoryJob(db, ACCOUNT, started.job.id)?.status === "completed");
@@ -332,8 +412,8 @@ describe("history coordinator", () => {
       transport: transport as unknown as HistoryCapableTransport,
       logger: pino({ level: "silent" }),
     });
-    registerWhatsmeowIngestion(
-      transport as unknown as ObserveTransport,
+    registerFakeIngestion(
+      transport,
       {
         db,
         accountId: ACCOUNT,
@@ -341,9 +421,9 @@ describe("history coordinator", () => {
         logger: pino({ level: "silent" }),
       },
       {
-        classify: (event) => coordinator.classify(event),
+        classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp),
         onStored: (event, stored, classification) =>
-          coordinator.onStored(event, stored, classification),
+          coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id),
       },
     );
     transport.emit("connected", { jid: CHAT });
@@ -403,8 +483,8 @@ describe("history coordinator", () => {
       transport: transport as unknown as HistoryCapableTransport,
       logger: pino({ level: "silent" }),
     });
-    registerWhatsmeowIngestion(
-      transport as unknown as ObserveTransport,
+    registerFakeIngestion(
+      transport,
       {
         db,
         accountId: ACCOUNT,
@@ -412,9 +492,9 @@ describe("history coordinator", () => {
         logger: pino({ level: "silent" }),
       },
       {
-        classify: (event) => coordinator.classify(event),
+        classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp),
         onStored: (event, stored, classification) =>
-          coordinator.onStored(event, stored, classification),
+          coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id),
       },
     );
     transport.emit("connected", { jid: CHAT });
@@ -466,8 +546,8 @@ describe("history coordinator", () => {
       transport: transport as unknown as HistoryCapableTransport,
       logger: pino({ level: "silent" }),
     });
-    registerWhatsmeowIngestion(
-      transport as unknown as ObserveTransport,
+    registerFakeIngestion(
+      transport,
       {
         db,
         accountId: ACCOUNT,
@@ -475,9 +555,9 @@ describe("history coordinator", () => {
         logger: pino({ level: "silent" }),
       },
       {
-        classify: (event) => coordinator.classify(event),
+        classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp),
         onStored: (event, stored, classification) =>
-          coordinator.onStored(event, stored, classification),
+          coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id),
       },
     );
     transport.emit("connected", { jid: CHAT });
@@ -527,8 +607,8 @@ describe("history coordinator", () => {
       transport: transport as unknown as HistoryCapableTransport,
       logger: pino({ level: "silent" }),
     });
-    registerWhatsmeowIngestion(
-      transport as unknown as ObserveTransport,
+    registerFakeIngestion(
+      transport,
       {
         db,
         accountId: ACCOUNT,
@@ -536,9 +616,9 @@ describe("history coordinator", () => {
         logger: pino({ level: "silent" }),
       },
       {
-        classify: (event) => coordinator.classify(event),
+        classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp),
         onStored: (event, stored, classification) =>
-          coordinator.onStored(event, stored, classification),
+          coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id),
       },
     );
     transport.emit("connected", { jid: MEMBER_JID });
@@ -694,13 +774,13 @@ describe("history coordinator", () => {
       transport: transport as unknown as HistoryCapableTransport,
       logger: pino({ level: "silent" }),
     });
-    registerWhatsmeowIngestion(
-      transport as unknown as ObserveTransport,
+    registerFakeIngestion(
+      transport,
       { db, accountId: ACCOUNT, config, logger: pino({ level: "silent" }) },
       {
-        classify: (event) => coordinator.classify(event),
+        classify: (event) => coordinator.classifyMessage(event.info.chat, event.info.timestamp),
         onStored: (event, stored, classification) =>
-          coordinator.onStored(event, stored, classification),
+          coordinator.onStoredResult(stored, classification, event.info.chat, event.info.id),
       },
     );
     transport.emit("connected", { jid: CHAT });

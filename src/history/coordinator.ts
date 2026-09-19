@@ -186,11 +186,7 @@ export class HistoryCoordinator {
     this.fail(active.jobId, "cancelled_for_maintenance");
   }
 
-  classify(event: TransportMessageEvent): IngestionEventClassification {
-    return this.classifyMessage(event.info.chat, event.info.timestamp);
-  }
-
-  /** Transport-neutral classification for adapters that do not use MessageInfo. */
+  /** Classification of one incoming message: part of the batch in flight, or live. */
   classifyMessage(
     chat: string,
     timestamp: number,
@@ -222,14 +218,6 @@ export class HistoryCoordinator {
       store: true,
       ...(active.fetchMedia ? { fetchMedia: true } : {}),
     };
-  }
-
-  onStored(
-    event: TransportMessageEvent,
-    stored: boolean,
-    classification: IngestionEventClassification,
-  ): void {
-    this.onStoredResult(stored, classification, event.info.chat, event.info.id);
   }
 
   /** Record a successful storage operation without retaining transport payloads. */
@@ -274,10 +262,10 @@ export class HistoryCoordinator {
   }
 
   /**
-   * A caller without chat context (e.g. the experimental whatsmeow transport)
-   * omits `ctx`: keep the old fail-closed behavior for it. A caller that knows
-   * the failing message's chat and source (Baileys' ingestion `onError`, and
-   * this coordinator's own storage checks) must match the batch in flight —
+   * A caller without chat context omits `ctx`: keep the fail-closed behavior for
+   * it. A caller that knows the failing message's chat and source (Baileys'
+   * ingestion `onError`, and this coordinator's own storage checks) must match
+   * the batch in flight —
    * an ingestion error on another chat, or a live message, never belongs to
    * this job and must not fail it.
    */

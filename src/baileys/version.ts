@@ -31,6 +31,12 @@ const DEFAULT_TIMEOUT_MS = 10_000;
  *
  * The last good value is cached so a later transient fetch failure keeps the
  * connection on a known-good version rather than dropping back to the stale pin.
+ *
+ * Outbound host: `fetchLatestBaileysVersion()` (inside the `baileys`
+ * dependency) issues a GET to `raw.githubusercontent.com`. That is the only
+ * runtime destination outside WhatsApp, the STT provider and the persistence
+ * targets; it is named and bounded by ADR-0043 — one request per connection
+ * attempt, no account data, disabled entirely by `baileys.pin_version: true`.
  */
 export function createVersionResolver(
   config: Config,

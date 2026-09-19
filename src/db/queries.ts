@@ -1648,33 +1648,6 @@ export function upsertTranscriptionJob(
   projectMessage(db, input.accountId, input.chatJid, input.messageId);
 }
 
-export interface TranscriptionJobRow {
-  id: number;
-  account_id: string;
-  chat_jid: string;
-  message_id: string;
-  status: TranscriptionJobStatus;
-  reason: string | null;
-  attempts: number;
-  target_lexicon_version: number;
-  created_at: number;
-  updated_at: number;
-}
-
-export function getTranscriptionJob(
-  db: Database,
-  accountId: string,
-  chatJid: string,
-  messageId: string,
-): TranscriptionJobRow | undefined {
-  return db
-    .prepare<
-      [string, string, string],
-      TranscriptionJobRow
-    >(`select * from transcription_jobs where account_id = ? and chat_jid = ? and message_id = ?`)
-    .get(accountId, chatJid, messageId);
-}
-
 export interface TranscriptionInput {
   accountId: string;
   chatJid: string;

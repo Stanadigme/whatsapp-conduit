@@ -1,26 +1,20 @@
 # Operations
 
-## Synchroniser l’annuaire
+## Rafraîchir l’annuaire
 
-La synchronisation explicite récupère les noms et membres des groupes joints,
-puis enrichit uniquement les contacts déjà connus par l’ingestion :
+Il n’existe pas de commande CLI `directory sync` : ce chemin a été retiré avec
+le transport whatsmeow (ADR-0042 du dépôt parent). Le rafraîchissement des
+noms de contacts et de groupes joints se déclenche de deux façons : une passe
+bornée automatique à chaque connexion Baileys lorsque
+`baileys.resync_directory_on_connect` reste activé, ou une demande explicite
+adressée à l’unique démon d’ingestion — depuis le dashboard, ou depuis un
+client MCP via le tool `wa_directory_refresh`.
 
-```bash
-whatsapp-conduit directory sync --groups --json
-```
-
-Cette commande ne synchronise pas l’historique et ne lit ni ne persiste le
-contenu des messages. Les groupes restent invisibles dans MCP tant qu’ils ne
-sont pas explicitement autorisés.
-
-`--contacts` limite l’opération aux JID déjà connus ; `--jid <jid>` cible un
-groupe ou un contact connu et peut être combiné avec `--json`. Sans sélecteur,
-les groupes joints et les contacts connus sont traités. Les événements live
-appliquent uniquement les métadonnées reçues et n’appellent aucun
-rafraîchissement réseau par message. Avec Baileys, une passe d'annuaire est
-aussi lancée automatiquement à chaque connexion lorsque
-`baileys.resync_directory_on_connect` reste activé ; le dashboard peut demander
-une nouvelle passe à l'unique démon d'ingestion.
+Ce rafraîchissement ne synchronise pas l’historique et ne lit ni ne persiste
+le contenu des messages. Les groupes restent invisibles dans MCP tant qu’ils
+ne sont pas explicitement autorisés. Les événements live appliquent
+uniquement les métadonnées reçues et n’appellent aucun rafraîchissement
+réseau par message.
 
 Day-to-day running of `whatsapp-conduit`.
 
@@ -53,39 +47,50 @@ All commands accept `--config <path>` (default
 ```bash
 whatsapp-conduit status                 # auth + sync state
 whatsapp-conduit mcp                    # local read-only MCP server over stdio
+whatsapp-conduit mcp --http             # Streamable HTTP MCP server (ADR-0019)
+whatsapp-conduit mcp oauth set-password # set/rotate the local OAuth operator password
 whatsapp-conduit chats list --json
 whatsapp-conduit chats show <jid>
 whatsapp-conduit messages list --chat <jid> --limit 50
 whatsapp-conduit messages list --since 24h --json
+whatsapp-conduit transcribe             # run the local transcription worker pass
+whatsapp-conduit web                    # local configuration dashboard
+whatsapp-conduit postgres migrate       # apply the client PostgreSQL migrations
+whatsapp-conduit postgres import        # one-shot backfill of existing SQLite rows
+whatsapp-conduit gcs import             # backfill locally downloaded media to GCS
 ```
 
 ## Export
 
 Exports emit one JSON object per line (JSONL) on stdout, ordered by a stable
-per-message `cursor` (the SQLite rowid).
+per-message `cursor` (the SQLite rowid). **Allowed chats only is the default**
+since `--allowed-only` was deprecated to a no-op; `--all` is the explicit
+opt-out that also includes non-allowed chats.
 
 ```bash
-# Everything (be careful — includes non-allowed chats):
+# Only chats you have allowed (default, no flag needed):
 whatsapp-conduit export
 
-# Only chats you have allowed:
-whatsapp-conduit export --allowed-only
+# Explicit opt-out — be careful, includes non-allowed chats:
+whatsapp-conduit export --all
 
 # Time-bounded:
-whatsapp-conduit export --since 24h --allowed-only
+whatsapp-conduit export --since 24h
 
 # Resumable, two-phase for a named consumer:
-whatsapp-conduit export --since-last hermes --allowed-only > /tmp/new.jsonl
+whatsapp-conduit export --since-last hermes > /tmp/new.jsonl
 whatsapp-conduit offsets commit hermes --through <cursor>   # cursor printed by export
 
 # Or advance the offset atomically with the export:
-whatsapp-conduit export --since-last hermes --allowed-only --commit > /tmp/new.jsonl
+whatsapp-conduit export --since-last hermes --commit > /tmp/new.jsonl
 ```
 
 `--since-last` resumes after the consumer's stored cursor. Without `--commit`
 the offset is left unchanged (two-phase), so a failed downstream step can be
 retried safely. `--redact-phone-numbers` replaces phone JIDs with a stable,
 non-reversible token; `--include-raw-json` adds the raw Baileys payload.
+`--since-last` is a CLI-only capability: the MCP tool `wa_export` exposes only
+`after`/`before`/`limit`/`cursor`, not a named consumer offset.
 
 ## Service mode (systemd user unit)
 
@@ -104,8 +109,10 @@ gracefully on SIGINT/SIGTERM (closes the socket and the database).
 ## Database maintenance
 
 ```bash
-whatsapp-conduit db migrate   # apply pending migrations
-whatsapp-conduit db check     # integrity + foreign-key + migration check
+whatsapp-conduit db migrate           # apply pending migrations
+whatsapp-conduit db check             # integrity + foreign-key + migration check
+whatsapp-conduit db backup            # online SQLite backup to a given path
+whatsapp-conduit db backfill-sender   # one-shot repair of sender identity on older rows
 ```
 
 ## Backup

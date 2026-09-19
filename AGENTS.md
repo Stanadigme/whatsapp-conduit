@@ -1,8 +1,13 @@
 # AGENTS.md - Coding Agent Guidelines for whatsapp-conduit
 
 `whatsapp-conduit` is a passive, observe-only WhatsApp linked-device bridge:
-Baileys (primary) or whatsmeow in, SQLite out, with a read-only local MCP
-interface (stdio or Streamable HTTP).
+Baileys in, SQLite out, with a local MCP interface (stdio or Streamable HTTP)
+that reads conversations and exposes a small, named and bounded set of local
+control tools (parent repository's ADR-0038) — never a tool that sends or
+modifies a WhatsApp message. The `whatsmeow` transport that used to be
+available alongside Baileys has been removed (parent repository's ADR-0042):
+its bundled protocol version could not be refreshed and it could no longer
+connect.
 Treat this repository as a private personal-inbox ingestion layer, not an AI
 agent, chatbot framework, messaging gateway, or WhatsApp Business Cloud API
 client.
@@ -48,12 +53,14 @@ whatsapp-conduit must not:
 
 - Node.js + TypeScript (strict) as the runtime and language.
 - `pnpm` as the package manager unless project policy says otherwise.
-- Baileys as the primary WhatsApp transport, resolving the WA Web protocol
-  version live at connect (`src/baileys/version.ts`) so it never rots into a
-  `405` (ADR-0020). `whatsmeow-node` is retained as an experimental transport
-  (`transport: whatsmeow`): its bundled protocol version cannot be refreshed.
-  Baileys and whatsmeow both support directory refresh and MCP-driven bounded
-  history download; Baileys is the maintained operational path.
+- Baileys as the sole WhatsApp transport, resolving the WA Web protocol
+  version live at connect (`src/baileys/version.ts`) against
+  `raw.githubusercontent.com` so it never rots into a `405` (ADR-0020) — the
+  one outbound host this resolution is allowed to reach (parent repository's
+  ADR-0043). The `whatsmeow-node` experimental transport has been removed
+  (parent repository's ADR-0042): its bundled protocol version could not be
+  refreshed. Baileys supports directory refresh and MCP-driven bounded
+  history download.
 - SQLite for durable local persistence; prefer `better-sqlite3` for simple
   synchronous writes.
 - A single CLI framework (e.g. `commander`, `cac`, or `clipanion`).

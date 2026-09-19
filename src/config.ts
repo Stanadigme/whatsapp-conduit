@@ -5,7 +5,7 @@ import { defaultDataDir } from "./paths.js";
 import { LOG_LEVELS, type LogLevel } from "./util/logging.js";
 
 export type BaileysVersion = [number, number, number];
-export type TransportName = "whatsmeow" | "baileys";
+export type TransportName = "baileys";
 
 /**
  * Offline fallback only. At startup the WhatsApp Web protocol version is
@@ -28,14 +28,8 @@ export interface PathsConfig {
   outboxKey: string;
   authDir: string;
   mediaDir: string;
-  whatsmeowStore: string;
   runtimeStatus: string;
   controlSocket: string;
-}
-
-export interface WhatsmeowConfig {
-  binaryPath?: string;
-  commandTimeoutMs: number;
 }
 
 export interface MediaConfig {
@@ -134,8 +128,6 @@ export interface PrivacyConfig {
 export interface FiltersConfig {
   allowedChats: string[];
   blockedChats: string[];
-  allowedSenders: string[];
-  blockedSenders: string[];
 }
 
 export interface ExportsConfig {
@@ -175,6 +167,10 @@ export interface GcsPersistenceConfig {
   credentialsFile: string;
 }
 
+export interface OutboxPersistenceConfig {
+  enabled: boolean;
+}
+
 export interface PersistenceConfig {
   /**
    * `null` keeps the pre-alpha SQLite/outbox behavior. When set, ingestion
@@ -188,6 +184,13 @@ export interface PersistenceConfig {
    * (MCP/dashboard) stream attachment bytes from there instead of local disk.
    */
   gcs: GcsPersistenceConfig | null;
+  /**
+   * Beta-profile replay queue (ADR-0028): one encrypted snapshot per exposed
+   * message, meant for a forwarder that is not shipped yet. Nothing drains the
+   * table today, so writing is opt-in — left `false`, ingestion queues nothing
+   * and no `outbox.key` is created.
+   */
+  outbox: OutboxPersistenceConfig;
 }
 
 export interface Config {
@@ -195,7 +198,6 @@ export interface Config {
   account: AccountConfig;
   paths: PathsConfig;
   persistence: PersistenceConfig;
-  whatsmeow: WhatsmeowConfig;
   baileys: BaileysConfig;
   privacy: PrivacyConfig;
   media: MediaConfig;
@@ -305,10 +307,31 @@ function asSttEngine(value: unknown): SttEngineName {
 }
 
 function asTransport(value: unknown): TransportName {
-  // Baileys is the default: it resolves the WA Web version live and is the
-  // proven path on hosted servers (ADR-0020). whatsmeow stays available but is
-  // experimental — its bundled protocol version cannot be refreshed.
-  return value === "whatsmeow" ? "whatsmeow" : "baileys";
+  // Baileys is the only transport: it resolves the WA Web version live and is
+  // the proven path on hosted servers (ADR-0020). whatsmeow was removed by
+  // ADR-0042 — refuse a config that still selects it rather than silently
+  // running a different transport than the file asks for.
+  if (value === "whatsmeow") {
+    throw new Error(
+      "Invalid transport.name: the whatsmeow transport was removed (ADR-0042). Set transport.name: baileys.",
+    );
+  }
+  return "baileys";
+}
+
+/**
+ * Invariant n°3 of CLAUDE.md: the client account must never show a phantom
+ * online presence because of us. `config set` already refuses the key by name;
+ * refusing it here covers a hand-edited YAML too, rather than forwarding `true`
+ * to Baileys.
+ */
+function asMarkOnlineOnConnect(value: unknown): boolean {
+  if (value === true) {
+    throw new Error(
+      "Invalid baileys.mark_online_on_connect: must stay false (invariant n°3 of CLAUDE.md, no phantom online presence).",
+    );
+  }
+  return false;
 }
 
 function asBaileysVersion(
@@ -445,7 +468,6 @@ export function resolveConfig(
   const transportRaw = section(raw, "transport");
   const accountRaw = section(raw, "account");
   const pathsRaw = section(raw, "paths");
-  const whatsmeowRaw = section(raw, "whatsmeow");
   const baileysRaw = section(raw, "baileys");
   const privacyRaw = section(raw, "privacy");
   const mediaRaw = section(raw, "media");
@@ -461,6 +483,7 @@ export function resolveConfig(
   const persistenceSectionRaw = section(raw, "persistence");
   const persistenceRaw = section(persistenceSectionRaw, "postgres");
   const gcsRaw = section(persistenceSectionRaw, "gcs");
+  const outboxRaw = section(persistenceSectionRaw, "outbox");
 
   // Resolve to an absolute path so paths derived from it are stable regardless
   // of the cwd a later command (e.g. a systemd service) runs from.
@@ -482,11 +505,6 @@ export function resolveConfig(
     ),
     authDir: resolvePath(dataDir, pathsRaw.auth_dir, join(dataDir, "auth")),
     mediaDir: resolvePath(dataDir, pathsRaw.media_dir, join(dataDir, "media")),
-    whatsmeowStore: resolvePath(
-      dataDir,
-      pathsRaw.whatsmeow_store,
-      join(dataDir, "whatsmeow.db"),
-    ),
     runtimeStatus: resolvePath(
       dataDir,
       pathsRaw.runtime_status,
@@ -518,16 +536,6 @@ export function resolveConfig(
     throw new Error(
       "Invalid config: privacy.observe_only and privacy.send_enabled cannot both be true.",
     );
-  }
-
-  const whatsmeow: WhatsmeowConfig = {
-    commandTimeoutMs: asPositiveInt(whatsmeowRaw.command_timeout_ms, 60_000),
-  };
-  if (
-    typeof whatsmeowRaw.binary_path === "string" &&
-    whatsmeowRaw.binary_path.length > 0
-  ) {
-    whatsmeow.binaryPath = whatsmeowRaw.binary_path;
   }
 
   const account: AccountConfig = {
@@ -575,8 +583,8 @@ export function resolveConfig(
     persistence: {
       postgres: asPostgresPersistence(persistenceRaw, dataDir),
       gcs: asGcsPersistence(gcsRaw, dataDir),
+      outbox: { enabled: asBool(outboxRaw.enabled, false) },
     },
-    whatsmeow,
     baileys: {
       version: asBaileysVersion(baileysRaw.version, DEFAULT_BAILEYS_VERSION),
       pinVersion: asBool(baileysRaw.pin_version, false),
@@ -586,7 +594,9 @@ export function resolveConfig(
       ),
       printQrInTerminal: asBool(baileysRaw.print_qr_in_terminal, true),
       syncFullHistory: asBool(baileysRaw.sync_full_history, false),
-      markOnlineOnConnect: asBool(baileysRaw.mark_online_on_connect, false),
+      markOnlineOnConnect: asMarkOnlineOnConnect(
+        baileysRaw.mark_online_on_connect,
+      ),
       browserName: asString(baileysRaw.browser_name, "whatsapp-conduit"),
     },
     privacy,
@@ -625,8 +635,6 @@ export function resolveConfig(
     filters: {
       allowedChats: asStringArray(filtersRaw.allowed_chats),
       blockedChats: asStringArray(filtersRaw.blocked_chats),
-      allowedSenders: asStringArray(filtersRaw.allowed_senders),
-      blockedSenders: asStringArray(filtersRaw.blocked_senders),
     },
     exports: {
       redactPhoneNumbers: asBool(exportsRaw.redact_phone_numbers, false),
@@ -665,10 +673,8 @@ export function defaultConfigYaml(dataDir: string): string {
 # Observe-only personal WhatsApp linked-device sync. Defaults are privacy-safe.
 
 transport:
-  # baileys: WA Web version resolved live at startup, proven on hosted servers.
-  # whatsmeow: experimental — bundled protocol version cannot be refreshed
-  # (blocked on an @whatsmeow-node release); enables directory sync and
-  # MCP-driven history download.
+  # baileys is the only transport: the WA Web version is resolved live at
+  # startup (ADR-0042 removed the whatsmeow alternative).
   name: baileys
 
 account:
@@ -681,13 +687,8 @@ paths:
   outbox_key: ${join(dataDir, "outbox.key")}
   auth_dir: ${join(dataDir, "auth")}
   media_dir: ${join(dataDir, "media")}
-  whatsmeow_store: ${join(dataDir, "whatsmeow.db")}
   runtime_status: ${join(dataDir, "runtime-status.json")}
   control_socket: ${join(dataDir, process.platform === "win32" ? "control.pipe" : "control.sock")}
-
-whatsmeow:
-  # binary_path: /usr/local/bin/whatsmeow-node
-  command_timeout_ms: 60000
 
 baileys:
   # Offline fallback only. The live WA Web version is fetched at startup;
@@ -759,6 +760,11 @@ persistence:
   gcs:
     bucket: ""
     # credentials_file: ${join(dataDir, "secrets", "gcs-credentials.json")}
+  # Beta-profile replay queue: one encrypted snapshot per exposed message,
+  # kept for the forwarder of the beta profile (ADR-0028). Nothing consumes the
+  # table today, so writing is disabled by default.
+  outbox:
+    enabled: false
 
 web:
   # The dashboard is local-only by default. Set public_origin only behind an
@@ -772,8 +778,6 @@ filters:
   # Empty allowlist: discover chats, but do not expose all chats to exports.
   allowed_chats: []
   blocked_chats: []
-  allowed_senders: []
-  blocked_senders: []
 
 exports:
   redact_phone_numbers: false

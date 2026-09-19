@@ -1,18 +1,25 @@
 # whatsapp-conduit
 
+> **Document status — read this first.** Everything below the next section is
+> the original product exploration, brainstorm and milestone checklist,
+> preserved as a historical design record. **Neither the checked nor the
+> unchecked items reflect the current implementation.** Some describe things
+> that shipped differently than sketched here (the `directory sync` and
+> `media fetch`/`messages export` commands named below do not exist in
+> `src/cli.ts`); some describe a second transport, `whatsmeow`, that has since
+> been removed. For the maintained, accurate references, use
+> [operations](docs/operations.md), [security](docs/security.md), and the
+> [database schema](docs/schema.md). The parent repository's numbered
+> decisions (ADR-0035 through ADR-0043) live in `grh_whatsapp`, not here.
+
 > **A passive, observe-only WhatsApp conduit for personal agents: Baileys in, SQLite out — without turning your account into a bot.**
 
 `whatsapp-conduit` is a small, channel-specific bridge for one job: connect to
 a WhatsApp account through the linked-device protocol, listen to message events
 through [Baileys](https://github.com/WhiskeySockets/Baileys), and persist a
-normalized local copy into SQLite. `whatsmeow` remains available as an
-experimental transport whose bundled protocol version cannot be refreshed.
-
-> **Document status.** This README retains the original product exploration,
-> sketches and milestone checklist as a historical design record. Unchecked
-> items below are not the current implementation status. Use
-> [operations](docs/operations.md), [security](docs/security.md), and the
-> [database schema](docs/schema.md) as the maintained references.
+normalized local copy into SQLite. Baileys is the only transport; a second
+transport, `whatsmeow`, was removed (see the parent repository's ADR-0042)
+because its bundled protocol version could not be refreshed.
 
 It is **not** an AI agent.  
 It is **not** an open-loop tracker.  
@@ -22,10 +29,10 @@ It is **not** a browser automation harness.
 
 It is the boring, auditable ingestion layer that other tools can safely build on top of.
 
-Directory metadata can be synchronized by the explicit read-only command
-`whatsapp-conduit directory sync [--groups] [--contacts] [--jid <jid>]
-[--json]`. Baileys also performs a bounded refresh when it connects by default;
-the dashboard can request the same refresh from the sole ingestion daemon.
+Directory metadata refresh runs on a bounded pass whenever Baileys connects by
+default; the dashboard, or the MCP tool `wa_directory_refresh`, can request
+the same refresh from the sole ingestion daemon. The `directory sync` CLI
+command mentioned further down this historical record has been removed.
 
 ---
 
@@ -74,7 +81,8 @@ Suggested package/binary naming:
 whatsapp-conduit link
 whatsapp-conduit run
 whatsapp-conduit chats list
-whatsapp-conduit messages export --since 24h --format jsonl
+whatsapp-conduit export --since 24h   # sketched here as "messages export"; the real
+                                       # command is the top-level `export` in src/cli.ts
 ```
 
 ---
@@ -986,7 +994,10 @@ Possible decision:
 MVP should probably not download media by default. Store metadata only, maybe with an explicit command:
 
 ```bash
-whatsapp-conduit media fetch <message-id>
+whatsapp-conduit media fetch <message-id>   # sketched here; never implemented as a
+                                              # CLI command — the shipped equivalent is
+                                              # the MCP tool wa_media_backfill_start
+                                              # and the dashboard's media backfill button
 ```
 
 ### Should status/stories be ignored?
@@ -1168,10 +1179,14 @@ whatsapp-conduit run
 See [`docs/operations.md`](docs/operations.md),
 [`docs/security.md`](docs/security.md), and [`docs/schema.md`](docs/schema.md).
 
-Implemented commands: `doctor`, `init`, `link`, `run`, `transcribe`,
-`directory sync`, `mcp`, `web`, `status`, `chats list|show|allow|block`,
-`messages list`, `export`, `offsets commit|show`, `config show|set`,
-`db migrate|check`, and `service install|status|logs|restart|stop`.
+Implemented commands (`src/cli.ts`): `doctor`, `init`, `link`, `run`,
+`transcribe`, `mcp`, `mcp oauth set-password`, `web`, `status`,
+`chats list|show|allow|block`, `messages list`, `export`,
+`offsets commit|show`, `config show|set`,
+`db migrate|check|backup|backfill-sender`, `postgres migrate|import`,
+`gcs import`, and `service install|status|logs|restart|stop`. There is no
+`directory` command: directory refresh runs automatically on Baileys connect,
+or on request from the dashboard / the MCP tool `wa_directory_refresh`.
 
 Current working name:
 

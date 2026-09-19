@@ -338,28 +338,6 @@ describe("pairing-code readiness", () => {
   });
 });
 
-describe("whatsmeow link session lock", () => {
-  it("refuses to link while the ingestion daemon holds the store", async () => {
-    const configPath = join(dir, "config.yaml");
-    runInit({ configPath, dataDir: join(dir, "data") });
-    const { runConfigSet } = await import("../src/commands/config.js");
-    runConfigSet("transport.name", "whatsmeow", { configPath });
-    const { paths } = (await import("../src/config.js")).loadConfig(configPath);
-    writeFileSync(
-      `${paths.whatsmeowStore}.lock`,
-      `${JSON.stringify({
-        pid: process.pid,
-        host: hostname(),
-        startedAt: 1,
-      })}\n`,
-    );
-
-    await expect(runLink({ configPath, qr: true })).rejects.toThrow(
-      /ingestion|store/i,
-    );
-  });
-});
-
 describe("Baileys link session lock", () => {
   it("refuses to link while the ingestion daemon holds the auth directory", async () => {
     const configPath = join(dir, "config.yaml");

@@ -12,7 +12,6 @@ vi.mock("../src/util/exec.js", () => ({
 import { resolveConfig, type Config } from "../src/config.js";
 import { openDb, type Database } from "../src/db/index.js";
 import {
-  getTranscriptionJob,
   insertTranscription,
   setChatAllowed,
   upsertAccount,
@@ -114,6 +113,15 @@ function transcriptionRow(db: Database): Record<string, unknown> | undefined {
     .get() as Record<string, unknown> | undefined;
 }
 
+/** Job row read straight from SQLite: no runtime code reads a single job. */
+function jobRow(db: Database): Record<string, unknown> | undefined {
+  return db
+    .prepare(
+      "select * from transcription_jobs where account_id = ? and chat_jid = ? and message_id = 'A1'",
+    )
+    .get(ACCOUNT, CHAT) as Record<string, unknown> | undefined;
+}
+
 describe("transcription worker", () => {
   it("transcribes a downloaded voice note and marks the job done", async () => {
     const { db, config } = fixture();
@@ -128,7 +136,7 @@ describe("transcription worker", () => {
     expect(row?.audio_sha256).toBe("abc");
     // No lexicon layer yet: the corrected column stays empty on purpose.
     expect(row?.text_corrected).toBeNull();
-    expect(getTranscriptionJob(db, ACCOUNT, CHAT, "A1")?.status).toBe("done");
+    expect(jobRow(db)?.status).toBe("done");
     db.close();
   });
 
@@ -174,7 +182,7 @@ describe("transcription worker", () => {
       const pass = await transcribeOnce(deps(db, config, failing));
       expect(pass.failed).toBe(1);
     }
-    const job = getTranscriptionJob(db, ACCOUNT, CHAT, "A1");
+    const job = jobRow(db);
     expect(job?.status).toBe("failed");
     expect(job?.attempts).toBe(config.stt.maxAttempts);
     expect(job?.reason).toBe("engine exploded");
@@ -192,9 +200,7 @@ describe("transcription worker", () => {
     );
 
     expect(pass).toEqual({ done: 0, failed: 0, skipped: 1 });
-    expect(getTranscriptionJob(db, ACCOUNT, CHAT, "A1")?.reason).toBe(
-      "audio too long",
-    );
+    expect(jobRow(db)?.reason).toBe("audio too long");
     expect(transcriptionRow(db)).toBeUndefined();
     db.close();
   });
@@ -206,9 +212,7 @@ describe("transcription worker", () => {
     );
 
     expect(pass.skipped).toBe(1);
-    expect(getTranscriptionJob(db, ACCOUNT, CHAT, "A1")?.reason).toBe(
-      "audio too short",
-    );
+    expect(jobRow(db)?.reason).toBe("audio too short");
     db.close();
   });
 
@@ -332,7 +336,7 @@ describe("engine availability", () => {
     // No job row at all: burning attempts against a missing model would mark
     // the message failed for good, and installing the model later would not
     // bring it back.
-    expect(getTranscriptionJob(db, ACCOUNT, CHAT, "A1")).toBeUndefined();
+    expect(jobRow(db)).toBeUndefined();
     expect(transcriptionRow(db)).toBeUndefined();
     db.close();
   });

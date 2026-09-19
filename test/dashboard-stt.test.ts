@@ -45,9 +45,6 @@ async function harness(): Promise<Harness> {
     configPath,
     models: new ModelDownloader(modelsDir(config)),
     accountId,
-    pairing: { status: "disabled", qr: null, error: null },
-    startPairing: async () => undefined,
-    stopPairing: async () => undefined,
   });
   await new Promise<void>((resolve) =>
     dashboard.server.listen(0, "127.0.0.1", resolve),

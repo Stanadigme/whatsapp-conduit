@@ -4,7 +4,6 @@ import { Readable } from "node:stream";
 import type { Config } from "../config.js";
 import type { ClientDataReader } from "../db/reader.js";
 import { flushPostgresProjection } from "../db/postgres-projection.js";
-import { maskSecrets } from "../commands/config.js";
 import {
   requestBaileysPairingStart,
   requestDaemonRestart,
@@ -37,12 +36,6 @@ import {
   type MaintenanceScope,
 } from "../db/maintenance.js";
 
-export interface DashboardPairing {
-  status: "disabled" | "idle" | "waiting_qr" | "connected" | "error";
-  qr: string | null;
-  error: string | null;
-}
-
 export interface DashboardContext {
   /** Writes only (allow/block, correction, STT settings, maintenance). */
   db: Database;
@@ -53,9 +46,6 @@ export interface DashboardContext {
   configPath: string;
   models: ModelDownloader;
   accountId: string;
-  pairing: DashboardPairing;
-  startPairing: () => Promise<void>;
-  stopPairing: () => Promise<void>;
 }
 
 function json(data: unknown, status = 200): Response {
@@ -231,21 +221,12 @@ export async function dashboardApi(
   context: DashboardContext,
 ): Promise<Response | null> {
   const url = new URL(request.url);
-  if (url.pathname === "/api/health" && request.method === "GET") {
-    return json({
-      service: "whatsapp-conduit",
-      pairing: context.pairing.status,
-    });
-  }
   if (url.pathname === "/api/runtime" && request.method === "GET") {
     const runtime = await readRuntimeStatus(context.config.paths.runtimeStatus);
     return json({
       connection: runtime?.connection ?? "disconnected",
       authLinked: runtime?.authLinked ?? false,
     });
-  }
-  if (url.pathname === "/api/config" && request.method === "GET") {
-    return json(maskSecrets(context.config));
   }
   if (url.pathname === "/api/stt" && request.method === "GET") {
     return json(
@@ -663,32 +644,6 @@ export async function dashboardApi(
     if (!match?.[1]) return json({ error: "not found" }, 404);
     const job = getMediaBackfillJob(context.db, context.accountId, match[1]);
     return job ? json(mediaBackfillView(job)) : json({ error: "not found" }, 404);
-  }
-  if (url.pathname === "/api/pairing/status" && request.method === "GET") {
-    return json({
-      status: context.pairing.status,
-      error: context.pairing.error,
-    });
-  }
-  if (url.pathname === "/api/pairing/qr" && request.method === "GET") {
-    if (context.pairing.status === "waiting_qr" && !context.pairing.qr) {
-      return json({ qr: null, pending: true }, 202);
-    }
-    return context.pairing.qr
-      ? json({ qr: context.pairing.qr })
-      : json({ error: "QR code is not available" }, 404);
-  }
-  if (url.pathname === "/api/pairing/start" && request.method === "POST") {
-    try {
-      await context.startPairing();
-      return json({ status: context.pairing.status });
-    } catch (error) {
-      return errorResponse(error, 409);
-    }
-  }
-  if (url.pathname === "/api/pairing/stop" && request.method === "POST") {
-    await context.stopPairing();
-    return json({ status: context.pairing.status });
   }
   return null;
 }

@@ -26,9 +26,12 @@ Cette table conserve les membres actifs et leur rôle (`member`, `admin` ou
 `superadmin`) avec les timestamps. Les anciennes tables d'annuaire restent
 des projections compatibles pour l'ingestion et les consommateurs existants.
 Les événements live appliquent uniquement les métadonnées reçues. Les
-rafraîchissements réseau restent bornés à une passe à chaque connexion Baileys,
-à une commande explicite `directory sync` ou à une demande du dashboard
-déléguée à l'unique démon d'ingestion.
+rafraîchissements réseau restent bornés à une passe à chaque connexion Baileys
+ou à une demande explicite du dashboard ou du tool MCP `wa_directory_refresh`,
+déléguée à l'unique démon d'ingestion (ADR-0027 du dépôt parent). La commande
+CLI `directory sync` a été retirée avec le transport whatsmeow (ADR-0042 du
+dépôt parent) : les décisions numérotées de ce projet vivent dans le dépôt
+`grh_whatsapp`, pas dans ce sous-module.
 
 ### `accounts`
 One row per linked account. `id` is the configured `account.name`.
@@ -98,6 +101,12 @@ default. When `privacy.store_media` is enabled, supported audio is downloaded
 asynchronously and the same row receives its local path and digest; other
 media remains metadata-only.
 
+Migration `0013_media_backfill.sql` adds `download_attempts`,
+`download_last_error` and `download_attempted_at` (on-demand backfill
+attempts, ADR-0012 as amended by ADR-0035). Migration `0012_gcs_media.sql`
+adds `gcs_uploaded_at`: null means the attachment is served from the local
+cache, set means a read can trust GCS instead (ADR-0033 phase 3).
+
 ### `events`
 Append-only audit log (`id` autoincrement). Used for `ignored` markers
 (filtered chat/sender + reason — never message text).
@@ -110,9 +119,33 @@ independently on a partial advance so `--since-last` can resume.
 ### `history_jobs`
 
 Durable, one-at-a-time bounded history requests. The row stores the requested
-time range, current anchor, batch/message counters, coverage result and terminal
-reason. For a reconciled JID/LID identity, the coordinator finds the oldest
-local anchor across aliases and sends the canonical JID to Baileys.
+time range, current anchor, batch/message counters, coverage result, terminal
+reason and `fetch_media` (migration `0013_media_backfill.sql`, opt-in per job,
+never the default — ADR-0035): whether this job's history-sourced messages
+should also fetch media. For a reconciled JID/LID identity, the coordinator
+finds the oldest local anchor across aliases and sends the canonical JID to
+Baileys.
+
+### `media_backfill_jobs`
+
+Durable backfill jobs added by migration `0013_media_backfill.sql`. Unlike
+`history_jobs`, there is no anchor or batch protocol: a plain scan of
+already-persisted messages followed by a sequential download attempt per
+candidate attachment. One active job per account (`queued` or `running`);
+`chat_jid` null means every allowed chat (explicit `allChats` opt-in). Not
+projected to or read from PostgreSQL today (mirror migration
+`postgres-migrations/0007_media_backfill.sql`): the PostgreSQL profile's
+backfill goes through the daemon's IPC control channel instead.
+
+### `outbox`
+
+Local queue for the robust persistence profile (ADR-0028 of the parent
+repo). Since 2026-09-19, writes are off by default
+(`persistence.outbox.enabled: false`, migration `0011_outbox.sql`) regardless
+of which persistence profile is active; the code path stays for the beta
+profile. When enabled, ingestion writes an encrypted `message.upsert`
+snapshot in the same SQLite transaction as each message create, edit or
+revoke, for a forwarder to lease and ship to PostgreSQL/GCS.
 
 ### `transcriptions` and `transcription_jobs`
 

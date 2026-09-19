@@ -16,8 +16,6 @@ import { normalizeJid, phoneFromJid } from "../baileys/jid.js";
 import { openDb } from "../db/index.js";
 import { upsertAccount } from "../db/queries.js";
 import { appLogger, baileysLogger, resolveConfigPath } from "../runtime.js";
-import { WhatsmeowTransport } from "../whatsmeow/transport.js";
-import { acquireSessionLock } from "../whatsmeow/session-lock.js";
 import { createVersionResolver } from "../baileys/version.js";
 import { acquireBaileysSessionLock } from "../baileys/session-lock.js";
 import type { BaileysSessionLock } from "../baileys/session-lock.js";
@@ -85,12 +83,6 @@ export async function runLink(
   dependencies: LinkDependencies = {},
 ): Promise<LinkResult> {
   const config = loadConfig(resolveConfigPath(options.configPath));
-  if (
-    config.transport === "whatsmeow" &&
-    dependencies.connectionFactory === undefined
-  ) {
-    return runWhatsmeowLink(config, options.timeoutSec ?? 120);
-  }
   const timeoutSec = options.timeoutSec ?? 120;
   const useQr = options.qr ?? false;
   const phoneNumber = useQr
@@ -328,68 +320,6 @@ export async function runLink(
   } finally {
     if (!retained) sessionLock.release();
   }
-}
-
-async function runWhatsmeowLink(
-  config: Config,
-  timeoutSec: number,
-): Promise<LinkResult> {
-  const log = appLogger(config);
-  // A running ingestion daemon must not share the store with an interactive
-  // pairing (ADR-0009). Take the lock before touching whatsmeow at all.
-  const lock = acquireSessionLock(config.paths.whatsmeowStore);
-  const transport = new WhatsmeowTransport({
-    store: config.paths.whatsmeowStore,
-    config: config.whatsmeow,
-  });
-  return new Promise<LinkResult>((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      fail(new Error(`Linking timed out after ${timeoutSec}s.`));
-    }, timeoutSec * 1000);
-
-    transport.on("connected", ({ jid }) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const accountId = persistAccount(config, jid);
-      process.stdout.write(
-        `\nLinked successfully as ${jid}.\n` +
-          "Auth state saved. You can now run `whatsapp-conduit run`.\n",
-      );
-      void transport.stop();
-      lock.release();
-      resolve({ selfJid: jid, accountId, directoryRebuildReady: true });
-    });
-    transport.on("error", (error) => {
-      if (!settled) fail(error);
-      else log.error({ err: error.message }, "whatsmeow pairing error");
-    });
-    transport.on("disconnected", () => {
-      if (!settled) fail(new Error("Linking failed: whatsmeow disconnected."));
-    });
-
-    transport
-      .startPairing((code) => {
-        process.stdout.write(
-          "\nScan this QR code in WhatsApp → Settings → Linked Devices → Link a device:\n\n",
-        );
-        qrcode.generate(code, { small: true });
-      })
-      .catch((error: unknown) => {
-        fail(error instanceof Error ? error : new Error(String(error)));
-      });
-
-    function fail(error: Error): void {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      void transport.stop().finally(() => {
-        lock.release();
-        reject(error);
-      });
-    }
-  });
 }
 
 /** Request the normal directory resync without deleting pairing metadata. */

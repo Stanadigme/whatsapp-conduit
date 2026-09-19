@@ -96,9 +96,6 @@ export type ControlRequest =
   | MaintenanceResetRequest
   | DaemonRestartRequest;
 
-/** @deprecated use {@link HistoryStartRequest} */
-export type HistoryControlRequest = HistoryStartRequest;
-
 export interface ControlResponse {
   ok: boolean;
   requestId: string;
@@ -119,9 +116,6 @@ export interface ControlResponse {
   error?: string;
 }
 
-/** @deprecated use {@link ControlResponse} */
-export type HistoryControlResponse = ControlResponse;
-
 export type ControlResult =
   | { jobId: string; status: string; reused: boolean }
   | { mediaBackfill: MediaBackfillStatus | null }
@@ -133,9 +127,6 @@ export type ControlResult =
 export interface ControlHandler {
   (request: ControlRequest): Promise<ControlResult>;
 }
-
-/** @deprecated use {@link ControlHandler} */
-export type HistoryControlHandler = ControlHandler;
 
 const MAX_FRAME_BYTES = 64 * 1024;
 

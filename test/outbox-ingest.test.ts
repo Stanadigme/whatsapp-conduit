@@ -105,6 +105,34 @@ describe("ingestion outbox", () => {
     }
   });
 
+  it("enqueues nothing when the outbox queue is not opted in", () => {
+    // Without persistence.outbox.enabled, run.ts hands ingestion no key at all
+    // (see test/run.test.ts) and nothing reaches the table.
+    const db = openDb(":memory:", { migrate: true });
+    const deps = {
+      db,
+      accountId: "personal",
+      config: resolveConfig({}, { dataDir: "/data" }),
+      logger: createLogger({ level: "error" }),
+    };
+    upsertAccount(db, { id: "personal" });
+    upsertChat(db, {
+      accountId: "personal",
+      jid: "c@s.whatsapp.net",
+      isGroup: false,
+      isStatus: false,
+    });
+    setChatAllowed(db, "personal", "c@s.whatsapp.net", true);
+
+    try {
+      ingestMessage(deps, message("bonjour"));
+      expect(countMessages(db)).toBe(1);
+      expect(countOutbox(db).pending).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
   it("rolls back the local message if the encrypted operation cannot be written", () => {
     const db = openDb(":memory:", { migrate: true });
     const deps = {

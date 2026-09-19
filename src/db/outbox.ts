@@ -1,3 +1,8 @@
+/**
+ * Encrypted replay queue of the beta profile (ADR-0028). Writing is opt-in
+ * (`persistence.outbox.enabled`, off by default) because no forwarder drains
+ * the table yet; see the open decision in backlog/global.md.
+ */
 import {
   createCipheriv,
   createDecipheriv,

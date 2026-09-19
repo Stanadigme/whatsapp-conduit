@@ -25,9 +25,8 @@ export interface MediaBackfillStartResult {
 export interface MediaBackfillCoordinatorOptions {
   /** Accessor, not a captured value: the daemon's Baileys socket is
    * reconnect-scoped and may not exist yet when the coordinator is built
-   * (ADR-0039). Absent or returning `undefined` on the whatsmeow transport,
-   * where no Baileys socket exists — behaviour is then unchanged (plain
-   * download, no reupload retry). */
+   * (ADR-0039). Absent or returning `undefined` before the first connection —
+   * behaviour is then unchanged (plain download, no reupload retry). */
   socket?: () => WASocket | undefined;
 }
 

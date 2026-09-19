@@ -56,6 +56,51 @@ describe("resolveConfig", () => {
     expect(cfg.paths.dataDir).toBe("/from/flag");
   });
 
+  // Beta-profile replay queue: opt-in only, nothing drains the table today.
+  it("keeps the outbox queue disabled unless it is asked for", () => {
+    expect(resolveConfig({}, { dataDir: "/data" }).persistence.outbox).toEqual({
+      enabled: false,
+    });
+    expect(
+      resolveConfig(
+        { persistence: { outbox: { enabled: true } } },
+        { dataDir: "/data" },
+      ).persistence.outbox.enabled,
+    ).toBe(true);
+  });
+
+  it("refuses the whatsmeow transport, removed by ADR-0042", () => {
+    expect(() => resolveConfig({ transport: { name: "whatsmeow" } })).toThrow(
+      /ADR-0042/,
+    );
+  });
+
+  // Invariant n°3 of CLAUDE.md: no phantom online presence on the client
+  // account. A hand-edited YAML must not be able to flip it.
+  it("refuses baileys.mark_online_on_connect: true", () => {
+    expect(() =>
+      resolveConfig({ baileys: { mark_online_on_connect: true } }),
+    ).toThrow(/invariant n°3/);
+    expect(
+      resolveConfig({ baileys: { mark_online_on_connect: false } }).baileys
+        .markOnlineOnConnect,
+    ).toBe(false);
+  });
+
+  it("still loads a config carrying the retired sender filter keys", () => {
+    const cfg = resolveConfig({
+      filters: {
+        allowed_chats: ["a@s.whatsapp.net"],
+        allowed_senders: ["c@s.whatsapp.net"],
+        blocked_senders: ["d@s.whatsapp.net"],
+      },
+    });
+    expect(cfg.filters).toEqual({
+      allowedChats: ["a@s.whatsapp.net"],
+      blockedChats: [],
+    });
+  });
+
   it("reads filters and logging overrides", () => {
     const cfg = resolveConfig({
       filters: {

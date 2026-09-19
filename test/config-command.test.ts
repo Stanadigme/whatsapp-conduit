@@ -94,6 +94,22 @@ describe("config set", () => {
     ).toThrow(/not editable/);
   });
 
+  // ADR-0042: whatsmeow is gone and baileys is the only transport resolveConfig
+  // accepts, so a config set here would write an unloadable file.
+  it("rejects the removed transport and whatsmeow keys", () => {
+    const before = readFileSync(configPath, "utf8");
+    for (const key of [
+      "transport.name",
+      "whatsmeow.binary_path",
+      "whatsmeow.command_timeout_ms",
+    ]) {
+      expect(() => runConfigSet(key, "whatsmeow", { configPath })).toThrow(
+        /not editable/,
+      );
+    }
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
   it("rejects setting a section", () => {
     expect(() => runConfigSet("privacy", "x", { configPath })).toThrow(
       /not editable/,

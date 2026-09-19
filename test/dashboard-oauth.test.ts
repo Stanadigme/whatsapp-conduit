@@ -55,9 +55,6 @@ async function harness(oauth = true): Promise<{
     configPath: join(dataDir, "config.yaml"),
     models: new ModelDownloader(modelsDir(config)),
     accountId: "personal",
-    pairing: { status: "disabled", qr: null, error: null },
-    startPairing: async () => undefined,
-    stopPairing: async () => undefined,
   });
   await new Promise<void>((resolve) =>
     dashboard.server.listen(0, "127.0.0.1", resolve),

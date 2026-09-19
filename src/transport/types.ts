@@ -1,9 +1,14 @@
-import type {
-  GroupInfo,
-  GroupInfoEvent,
-  MessageInfo,
-  UserInfo,
-} from "@whatsmeow-node/whatsmeow-node";
+/**
+ * Minimal shape of an ingested message an adapter hands to the history
+ * coordinator. Redefined here since ADR-0042 removed the whatsmeow dependency
+ * that used to provide it: only the three fields the coordinator reads are
+ * carried.
+ */
+export interface TransportMessageInfo {
+  id: string;
+  chat: string;
+  timestamp: number;
+}
 
 export interface HistoryAnchor {
   chat: string;
@@ -24,13 +29,12 @@ export interface TransportHistorySyncEvent {
   /**
    * Baileys' `proto.Conversation.EndOfHistoryTransferType` for the chat this
    * batch belongs to, when the transport exposes chat-level history state.
-   * Absent on transports (whatsmeow) that do not surface it.
    */
   endOfHistoryTransferType?: number;
 }
 
 export interface TransportMessageEvent {
-  info: MessageInfo;
+  info: TransportMessageInfo;
   message: Record<string, unknown>;
 }
 
@@ -38,36 +42,6 @@ export interface TransportConnectedEvent {
   jid: string;
 }
 
-export type TransportGroupInfoEvent = GroupInfoEvent;
-export type TransportGroupJoinedEvent = { jid: string; name: string };
-
-export interface DirectoryReadTransport {
-  on(event: "message", listener: (data: TransportMessageEvent) => void): this;
-  on(
-    event: "group:info",
-    listener: (data: TransportGroupInfoEvent) => void,
-  ): this;
-  on(
-    event: "group:joined",
-    listener: (data: TransportGroupJoinedEvent) => void,
-  ): this;
-  getJoinedGroups(): Promise<GroupInfo[]>;
-  getGroupInfo(jid: string): Promise<GroupInfo>;
-  getUserInfo(jids: string[]): Promise<Record<string, UserInfo>>;
-}
-
 export interface HistoryTransport {
   requestHistory(anchor: HistoryAnchor, count: number): Promise<string | void>;
-}
-
-export interface ObserveTransport {
-  on(
-    event: "connected",
-    listener: (data: TransportConnectedEvent) => void,
-  ): this;
-  on(event: "disconnected", listener: () => void): this;
-  on(event: "message", listener: (data: TransportMessageEvent) => void): this;
-  on(event: "error", listener: (error: Error) => void): this;
-  start(): Promise<void>;
-  stop(): Promise<void>;
 }

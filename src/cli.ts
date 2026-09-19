@@ -10,7 +10,6 @@ import {
 } from "./commands/chats.js";
 import { runConfigSet, runConfigShow } from "./commands/config.js";
 import { runWeb } from "./commands/web.js";
-import { runDirectorySync } from "./commands/directory.js";
 import { runDbBackfillSender } from "./commands/db-backfill-sender.js";
 import { runDbBackup, runDbCheck, runDbMigrate } from "./commands/db.js";
 import { runDoctor } from "./commands/doctor.js";
@@ -52,7 +51,7 @@ export function buildProgram(): Command {
   program
     .name("whatsapp-conduit")
     .description(
-      "Passive, observe-only WhatsApp linked-device bridge: whatsmeow in, SQLite out.",
+      "Passive, observe-only WhatsApp linked-device bridge: Baileys in, SQLite out.",
     )
     .version(getVersion(), "-v, --version", "print the version and exit")
     .option("-c, --config <path>", "path to the YAML config file")
@@ -142,35 +141,6 @@ export function buildProgram(): Command {
         check: opts.check,
       });
     });
-
-  const directory = program
-    .command("directory")
-    .description("synchronize WhatsApp contact and group metadata");
-
-  directory
-    .command("sync")
-    .description("synchronize known contacts and joined groups, metadata only")
-    .option("--groups", "synchronize joined groups")
-    .option("--contacts", "synchronize known contacts")
-    .option("--jid <jid>", "synchronize one known group or contact JID")
-    .option("--json", "emit machine-readable JSON")
-    .action(
-      async (opts: {
-        groups?: boolean;
-        contacts?: boolean;
-        jid?: string;
-        json?: boolean;
-      }) => {
-        const globals = program.opts<GlobalOptions>();
-        await runDirectorySync({
-          configPath: globals.config,
-          groups: opts.groups,
-          contacts: opts.contacts,
-          jid: opts.jid,
-          json: opts.json,
-        });
-      },
-    );
 
   const mcp = program
     .command("mcp")
@@ -444,7 +414,7 @@ export function buildProgram(): Command {
     .option("--port <port>", "container host port override")
     .option(
       "--no-pairing",
-      "disable WhatsApp pairing controls in this dashboard",
+      "accepted without effect since ADR-0042 removed the whatsmeow pairing controls",
     )
     .action(
       async (opts: { bind?: string; port?: string; pairing?: boolean }) => {

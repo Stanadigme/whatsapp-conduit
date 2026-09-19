@@ -84,11 +84,10 @@ function coerce(raw: string): string | number | boolean {
  * the chat-filter note below).
  */
 const EDITABLE_KEYS = new Set<string>([
-  "transport.name",
   "account.name",
   "account.description",
-  "whatsmeow.binary_path",
-  "whatsmeow.command_timeout_ms",
+  // transport.name stays out: baileys is the only value resolveConfig accepts
+  // (ADR-0042), so writing anything else would make the file unloadable.
   "baileys.print_qr_in_terminal",
   "baileys.browser_name",
   "privacy.store_message_text",

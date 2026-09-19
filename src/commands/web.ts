@@ -12,7 +12,6 @@ import type { ClientDataReader } from "../db/reader.js";
 import { upsertAccount } from "../db/queries.js";
 import { resolveConfigPath, appLogger } from "../runtime.js";
 import { startDashboardServer } from "../dashboard/server.js";
-import { createPairingController } from "../dashboard/pairing.js";
 import { ensureDashboardToken } from "../dashboard/token.js";
 import { ModelDownloader } from "../dashboard/models.js";
 import { modelsDir } from "../stt/models.js";
@@ -21,6 +20,10 @@ export interface WebOptions {
   configPath?: string | undefined;
   bind?: string | undefined;
   port?: number | undefined;
+  /**
+   * Accepted and ignored: the whatsmeow pairing controls it used to disable are
+   * gone (ADR-0042), but the Compose `dashboard` service still passes the flag.
+   */
   pairing?: boolean | undefined;
 }
 
@@ -52,15 +55,6 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
             ...(options.port === undefined ? {} : { port: options.port }),
           },
         };
-  // Only the pairing controls need whatsmeow. The read-only dashboard runs on
-  // any transport when pairing is disabled (the Compose `dashboard` service
-  // already passes --no-pairing).
-  if (config.transport !== "whatsmeow" && options.pairing !== false) {
-    throw new Error(
-      "The dashboard pairing controls require transport: whatsmeow. " +
-        "Pass --no-pairing to serve the read-only dashboard on another transport.",
-    );
-  }
   if (!existsSync(config.paths.sqlite)) {
     throw new Error("Database not found. Run `whatsapp-conduit init` first.");
   }
@@ -84,8 +78,6 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
   } else {
     reader = createSqliteReader(db, config, config.account.name);
   }
-  const pairing =
-    options.pairing === false ? null : createPairingController(config);
   const dashboard = await startDashboardServer(config, {
     db,
     reader,
@@ -93,17 +85,6 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
     configPath,
     models: new ModelDownloader(modelsDir(config)),
     accountId: config.account.name,
-    pairing: pairing?.state ?? { status: "disabled", qr: null, error: null },
-    startPairing: async () => {
-      if (!pairing)
-        throw new Error(
-          "dashboard pairing is disabled; use `ingestion link --qr`",
-        );
-      await pairing.start();
-    },
-    stopPairing: async () => {
-      if (pairing) await pairing.stop();
-    },
   });
   const address = dashboard.server.address();
   const port =
@@ -120,7 +101,7 @@ export async function runWeb(options: WebOptions = {}): Promise<void> {
   await new Promise<void>((resolve) => {
     const stop = (): void => {
       dashboard.server.close(() => {
-        void (pairing?.stop() ?? Promise.resolve())
+        void Promise.resolve()
           .finally(() => closeDbAfterPostgresProjection(db))
           .finally(closeReader)
           .finally(resolve);

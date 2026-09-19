@@ -137,9 +137,6 @@ describe("dashboard message consultation", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "disabled", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -279,9 +276,6 @@ describe("dashboard message consultation", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "disabled", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
@@ -389,9 +383,6 @@ describe("dashboard message consultation", () => {
       configPath: join(dir, "config.yaml"),
       models: new ModelDownloader(join(dir, "models")),
       accountId,
-      pairing: { status: "disabled", qr: null, error: null },
-      startPairing: async () => undefined,
-      stopPairing: async () => undefined,
     });
     await new Promise<void>((resolve) =>
       dashboard.server.listen(0, "127.0.0.1", resolve),
